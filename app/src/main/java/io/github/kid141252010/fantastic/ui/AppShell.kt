@@ -57,6 +57,8 @@ import dev.chrisbanes.haze.haze
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.ui.player.MiniPlayer
 import io.github.kid141252010.fantastic.ui.player.NowPlaying
+import io.github.kid141252010.fantastic.ui.player.nowPlayingEnter
+import io.github.kid141252010.fantastic.ui.player.nowPlayingExit
 import io.github.kid141252010.fantastic.ui.search.SearchScreen
 import io.github.kid141252010.fantastic.ui.settings.SettingsScreen
 import io.github.kid141252010.fantastic.ui.theme.TabAccent
