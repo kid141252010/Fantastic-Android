@@ -107,7 +107,7 @@ fun AppShell(app: FantasticApp) {
         if (nowPlaying) BackHandler { nowPlaying = false }
 
         if (settings) {
-            SettingsScreen(app.prefs, onClose = { settings = false })
+            SettingsScreen(app.prefs, app.lyrics, onClose = { settings = false })
             BackHandler { settings = false }
         }
     }

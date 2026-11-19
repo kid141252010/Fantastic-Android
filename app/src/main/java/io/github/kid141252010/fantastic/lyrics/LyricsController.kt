@@ -1,6 +1,7 @@
 package io.github.kid141252010.fantastic.lyrics
 
 import android.content.Context
+import android.util.Log
 import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -37,6 +38,18 @@ class LyricsController(
     private val _error = MutableStateFlow<String?>(null)
     /** Failed 时的原因（网络、页面加载、脚本错误） */
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _diag = MutableStateFlow("")
+    /** 给设置页「歌词诊断」看的一行状态，真机上歌词出问题时让用户照抄 */
+    val diag: StateFlow<String> = _diag.asStateFlow()
+    private var lastMid: String? = null
+    private var lastBytes = -1
+
+    private fun note(event: String) {
+        Log.i(TAG, event)
+        _diag.value = "歌曲=${lastMid ?: "-"} 状态=${_status.value} 页面就绪=$pageReady 响应=${lastBytes}字节 " +
+            "WebView=${webViewVersion()} 错误=${_error.value ?: "无"} 最近事件=$event"
+    }
 
     private var pageReady = false
     private var pageError: String? = null
@@ -78,6 +91,7 @@ class LyricsController(
         pageError = pageError ?: message
         _error.value = message
         _status.value = Status.Failed
+        note("fail: $message")
     }
 
     private fun webViewVersion(): String =
@@ -87,21 +101,29 @@ class LyricsController(
         loadJob?.cancel()
         push("")
         val mid = mediaId?.takeIf { it.startsWith("qq:") }?.removePrefix("qq:")
+        lastMid = mid
+        lastBytes = -1
         if (mid == null) {
             _status.value = Status.None
+            note("load: 非 QQ 歌曲 $mediaId")
             return
         }
         pageError?.let { fail(it); return }
         _status.value = Status.Loading
         _error.value = null
+        note("load: 请求 $mid")
         loadJob = scope.launch {
             try {
-                push(api.qqLyricsJson(mid))
+                val json = api.qqLyricsJson(mid)
+                lastBytes = json.length
+                note("load: 收到 ${json.length} 字节")
+                push(json)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 _error.value = "歌词请求失败：${e.message ?: e.javaClass.simpleName}"
                 _status.value = Status.Failed
+                note("load: 失败 ${e.javaClass.simpleName}")
             }
         }
     }
@@ -140,6 +162,7 @@ class LyricsController(
         fun ready() {
             scope.launch {
                 pageReady = true
+                note("page: ready")
                 pending?.let { push(it) }
                 pending = null
                 lastSeekGeneration = -1
@@ -164,7 +187,12 @@ class LyricsController(
                         _status.value = Status.Failed
                     }
                 }
+                note("page: $value")
             }
         }
+    }
+
+    private companion object {
+        const val TAG = "FantasticLyrics"
     }
 }

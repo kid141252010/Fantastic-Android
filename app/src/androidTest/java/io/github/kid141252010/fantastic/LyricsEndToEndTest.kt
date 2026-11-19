@@ -17,6 +17,11 @@ import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.After
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -25,7 +30,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * 端到端：在真实的 MainActivity 里播一首 QQ 歌（走 music.1412.tech），点开迷你播放条进入全屏播放页，
+ * 端到端：在真实的 MainActivity 里播一首 QQ 歌（服务器换成本地 MockWebServer，歌词用测试资源，CI 在海外访问不了 QQ），点开迷你播放条进入全屏播放页，
  * 打开歌词，检查 WebView 里有可见歌词，并截图到 /data/local/tmp/lyrics-e2e.png。
  * 和 LyricsPageTest 不同，这里经过 LyricsController、Compose 的 AndroidView 与播放页的布局。
  */
@@ -56,8 +61,29 @@ class LyricsEndToEndTest {
         return result.poll(10, TimeUnit.SECONDS) ?: "timeout"
     }
 
+    private val server = MockWebServer()
+    private var oldBaseUrl: String? = null
+
+    @After
+    fun tearDown() {
+        oldBaseUrl?.let { app.prefs.baseUrl = it }
+        server.shutdown()
+    }
+
     @Test
     fun lyricsVisibleInNowPlaying() {
+        val lyricsJson = instrumentation.context.assets.open("qq-lyrics.json").bufferedReader().readText()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                if (request.path.orEmpty().contains("/lyrics")) {
+                    MockResponse().setHeader("Content-Type", "application/json").setBody(lyricsJson)
+                } else {
+                    MockResponse().setResponseCode(404)
+                }
+        }
+        server.start()
+        oldBaseUrl = app.prefs.baseUrl
+        app.prefs.baseUrl = server.url("/").toString()
         val title = "端到端测试"
         compose.runOnUiThread {
             app.player.playQueue(listOf(Track("002Agcje4enxFb", Source.QQ, title, "测试", "测试", null, 0)), 0)
@@ -86,10 +112,9 @@ class LyricsEndToEndTest {
             })()""",
         )
         val web = app.lyrics.webView
-        val info = "status=${app.lyrics.status.value} error=${app.lyrics.error.value} visible=$visible " +
+        val info: String = "status=${app.lyrics.status.value} error=${app.lyrics.error.value} visible=$visible " +
             "viewport=${js("innerWidth+'x'+innerHeight")} view=${web.width}x${web.height} " +
-            "attached=${web.isAttachedToWindow} shown=${web.isShown} pos=${app.player.position()} " +
-            "playing=${app.player.state.value.isPlaying} perr=${app.player.state.value.error}"
+            "attached=${web.isAttachedToWindow} shown=${web.isShown} diag=${app.lyrics.diag.value}"
         Log.i("FantasticLyrics", "e2e $info")
         screencap("/data/local/tmp/lyrics-e2e.png")
         assertEquals(info, LyricsController.Status.Ready, app.lyrics.status.value)
