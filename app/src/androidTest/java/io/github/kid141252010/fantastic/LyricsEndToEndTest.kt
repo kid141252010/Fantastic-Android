@@ -94,9 +94,12 @@ class LyricsEndToEndTest {
         }
         Log.i("FantasticLyrics", "e2e status=${app.lyrics.status.value} error=${app.lyrics.error.value}")
 
+        Thread.sleep(1500)
+        screencap("/data/local/tmp/ui-home.png")
         compose.onAllNodesWithText(title).onFirst().performClick()
         compose.waitForIdle()
         Thread.sleep(1500)
+        screencap("/data/local/tmp/ui-player.png")
         compose.onNodeWithContentDescription("歌词").performClick()
         compose.waitForIdle()
         Thread.sleep(4000)
