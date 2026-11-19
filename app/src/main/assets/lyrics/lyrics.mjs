@@ -100,6 +100,8 @@ let laidOut = { w: -1, h: -1 };
  */
 function fixSize() {
   const el = view.getElement();
+  // 后台加载的 WebView 里 100% 高度一直解析成 0（模拟器 WebView 113 实测），直接写像素高度
+  if (innerHeight > 0 && el.style.height !== `${innerHeight}px`) el.style.height = `${innerHeight}px`;
   const w = el.clientWidth;
   const h = el.clientHeight;
   if (!w || !h || (view.size?.[0] === w && view.size?.[1] === h)) return false;
@@ -152,7 +154,7 @@ globalThis.fantastic = {
     const els = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim());
     const r = els[0]?.getBoundingClientRect();
     return JSON.stringify({
-      iw: innerWidth, ih: innerHeight, laidOut, amllSize: view.size, el: [view.getElement().clientWidth, view.getElement().clientHeight], frames, lines: lines.length, textEls: els.length,
+      iw: innerWidth, ih: innerHeight, laidOut, amllSize: view.size, el: [view.getElement().clientWidth, view.getElement().clientHeight], host: document.getElementById('lyrics').clientHeight, body: document.body.clientHeight, frames, lines: lines.length, textEls: els.length,
       first: r ? [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] : null,
       hidden: document.hidden,
     });
