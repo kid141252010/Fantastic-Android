@@ -55,6 +55,9 @@ fun SettingsScreen(prefs: Prefs, onClose: () -> Unit) {
             value = baseUrl, onValueChange = { baseUrl = it },
             label = { Text("Fantastic 服务器地址") }, singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(16.dp),
+            supportingText = if (baseUrl.trim().startsWith("http://", ignoreCase = true)) {
+                { Text("HTTP 是明文传输，只建议在局域网里用") }
+            } else null,
         )
         OutlinedTextField(
             value = storefront, onValueChange = { storefront = it },
