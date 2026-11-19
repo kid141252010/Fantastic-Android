@@ -189,10 +189,10 @@ class LyricsEndToEndTest {
 
         // 歌词左边缘与封面 / 按钮对齐：播放页内容左边距 32dp
         val density = instrumentation.targetContext.resources.displayMetrics.density
-        // 取可见的非对唱主歌词行，取左缘的中位数（逐字强调的字有放大位移，不能取最小值）
+        // 取可见的非对唱主歌词行文字左缘（AMLL 主行是 margin:-1em + padding:1em，要加回 padding），取中位数
         val alignRaw = js(
             """(() => { const rs = [...document.querySelectorAll('#lyrics .SZG9Ha_lyricLineWrapper:not(.SZG9Ha_isDuetWrapper) .SZG9Ha_lyricMainLine')]
-              .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.bottom > 0 && r.top < innerHeight).map((r) => r.left).sort((a, b) => a - b);
+              .map((e) => [e.getBoundingClientRect(), parseFloat(getComputedStyle(e).paddingLeft) || 0]).filter(([r]) => r.width > 0 && r.bottom > 0 && r.top < innerHeight).map(([r, p]) => r.left + p).sort((a, b) => a - b);
               const odd = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim() && e.getBoundingClientRect().left < 0)
                 .slice(0, 3).map((e) => e.className + ':' + e.textContent.slice(0, 8) + '@' + Math.round(e.getBoundingClientRect().left));
               return JSON.stringify({ left: rs.length ? rs[rs.length >> 1] * devicePixelRatio : -1, n: rs.length, all: rs.slice(0, 5), odd }); })()""",
