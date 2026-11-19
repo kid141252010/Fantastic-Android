@@ -23,8 +23,9 @@ html, body {
   font-weight: 700;
   --amll-lp-font-size: max(7.5vw, 20px);
   /* 原生把 WebView 左右各加宽 32dp（Dimens.Player），这里留同样的内边距，文字与封面、进度条对齐 */
-  padding: 0 32px;
+  /* 原生把 WebView 左右各加宽 32dp（Dimens.Player）。AMLL 的行是绝对定位的，播放器自身的 padding 对行不起作用，
+     只能用行内边距：设成 32px，文字左缘正好与封面、按钮对齐（AMLL 窄屏默认 20px，会偏左 12px） */
+  padding: 0;
   box-sizing: border-box;
-  /* AMLL 每行自带左右内边距（窄屏 20px），会让歌词比封面、按钮多缩进一截；去掉，只留上面的 32px */
-  --lyric-line-padding-x: 0px;
+  --lyric-line-padding-x: 32px;
 }

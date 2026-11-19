@@ -281,6 +281,25 @@ fun NowPlaying(
                         }
                     }
                 }
+                if (!controlsShown) {
+                    // 控制区隐藏时，原位置盖一层：点这里只唤出控制区，不会点到下面的歌词行而跳转
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(controlsPad)
+                            .semantics { contentDescription = "显示播放控制" }
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        awaitPointerEvent().changes.forEach { it.consume() }
+                                        controlsShown = true
+                                        lastTouch = System.currentTimeMillis()
+                                    }
+                                }
+                            },
+                    )
+                }
                 if (controlsShown || controlsAlpha > 0.01f) {
                     Column(
                         Modifier
