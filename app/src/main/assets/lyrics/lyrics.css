@@ -1,0 +1,23 @@
+/* 原生界面画背景，WebView 透明，这里只放 AMLL 歌词 */
+html, body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  font-family: system-ui, sans-serif;
+}
+#lyrics {
+  position: absolute;
+  inset: 0;
+  /* 上下渐隐，同 Apple Music */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 12%, #000 80%, transparent 100%);
+}
+#lyrics .amll-lyric-player {
+  /* plus-lighter 在透明的 WebView 上没有可叠加的底色，会发灰 */
+  mix-blend-mode: normal;
+  font-weight: 700;
+  --amll-lp-font-size: max(7.5vw, 20px);
+  padding: 0 7vw;
+  box-sizing: border-box;
+}

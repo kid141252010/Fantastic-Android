@@ -4,8 +4,8 @@
 
 ## 路线
 
-1. **骨架 + CI**（当前）：Compose 界面外壳、底栏、迷你播放条、全屏播放页；Fantastic API 客户端；QQ / Apple Music 搜索；QQ 原生播放（Media3，音质不可用时自动降级）。
-2. QQ 歌词：WebView 里跑 AMLL，原生推送播放时间锚点。
+1. **骨架 + CI**（已完成）：Compose 界面外壳、底栏、迷你播放条、全屏播放页；Fantastic API 客户端；QQ / Apple Music 搜索；QQ 原生播放（Media3，音质不可用时自动降级）。
+2. **QQ 歌词**（当前）：WebView 里跑 AMLL（`app/src/main/assets/lyrics`，由 `scripts/sync-lyrics.sh` 从 Fantastic 同步），原生每 500ms 推送播放进度锚点，页面每帧外推。
 3. Apple Music 播放：先用 WebView 引擎，再换成 Rust 核心（cargo-ndk 复用 Fantastic 的 `am-mp4`、`am-alac` 等 crate）。
 4. 全景声、MV、下载、资料库。
 

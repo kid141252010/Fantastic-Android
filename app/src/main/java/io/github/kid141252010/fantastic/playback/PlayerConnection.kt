@@ -30,6 +30,8 @@ data class PlayerState(
     val hasNext: Boolean = false,
     val hasPrevious: Boolean = false,
     val error: String? = null,
+    /** 每次跳转（含切歌）加一，歌词据此直接跳到位置 */
+    val seekGeneration: Int = 0,
 )
 
 /** 界面这一侧的播放器：通过 MediaController 连到 PlaybackService。 */
@@ -39,9 +41,19 @@ class PlayerConnection(private val context: Context, private val prefs: Prefs) {
 
     private var controller: MediaController? = null
     private var pending: (() -> Unit)? = null
+    private var seekGeneration = 0
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) = refresh()
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
+            seekGeneration++
+            refresh()
+        }
 
         override fun onPlayerError(error: PlaybackException) {
             val c = controller ?: return
@@ -139,6 +151,7 @@ class PlayerConnection(private val context: Context, private val prefs: Prefs) {
             hasNext = c.hasNextMediaItem(),
             hasPrevious = c.hasPreviousMediaItem() || c.currentPosition > 3000,
             error = c.playerError?.errorCodeName,
+            seekGeneration = seekGeneration,
         )
     }
 

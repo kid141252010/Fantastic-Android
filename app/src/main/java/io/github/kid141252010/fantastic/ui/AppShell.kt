@@ -58,6 +58,8 @@ fun AppShell(app: FantasticApp) {
     var nowPlaying by rememberSaveable { mutableStateOf(false) }
     var settings by remember { mutableStateOf(false) }
     val player by app.player.state.collectAsStateWithLifecycle()
+    // 提前建好歌词控制器：切歌时就预取歌词，打开歌词时不用等
+    remember { app.lyrics }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
@@ -100,7 +102,7 @@ fun AppShell(app: FantasticApp) {
             enter = slideInVertically(tween(380)) { it },
             exit = slideOutVertically(tween(300)) { it },
         ) {
-            NowPlaying(player, app.player, onClose = { nowPlaying = false })
+            NowPlaying(player, app.player, app.lyrics, onClose = { nowPlaying = false })
         }
         if (nowPlaying) BackHandler { nowPlaying = false }
 
