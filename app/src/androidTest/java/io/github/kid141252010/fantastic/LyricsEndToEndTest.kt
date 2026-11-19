@@ -189,15 +189,20 @@ class LyricsEndToEndTest {
 
         // 歌词左边缘与封面 / 按钮对齐：播放页内容左边距 32dp
         val density = instrumentation.targetContext.resources.displayMetrics.density
-        val textLeft = js(
-            """(() => { const xs = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim())
-              .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.bottom > 0 && r.top < innerHeight).map((r) => r.left);
-              return xs.length ? Math.min(...xs) * devicePixelRatio : -1; })()""",
-        ).toFloatOrNull() ?: -1f
+        // 取可见的非对唱主歌词行，取左缘的中位数（逐字强调的字有放大位移，不能取最小值）
+        val alignRaw = js(
+            """(() => { const rs = [...document.querySelectorAll('#lyrics .SZG9Ha_lyricLineWrapper:not(.SZG9Ha_isDuetWrapper) .SZG9Ha_lyricMainLine')]
+              .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.bottom > 0 && r.top < innerHeight).map((r) => r.left).sort((a, b) => a - b);
+              const odd = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim() && e.getBoundingClientRect().left < 0)
+                .slice(0, 3).map((e) => e.className + ':' + e.textContent.slice(0, 8) + '@' + Math.round(e.getBoundingClientRect().left));
+              return JSON.stringify({ left: rs.length ? rs[rs.length >> 1] * devicePixelRatio : -1, n: rs.length, all: rs.slice(0, 5), odd }); })()""",
+        )
+        Log.i("FantasticLyrics", "align raw=$alignRaw")
+        val textLeft = Regex("left\\\\?\":(-?[0-9.]+)").find(alignRaw)?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
         val screenLeft = loc[0] + textLeft
         val expected = 32 * density
         Log.i("FantasticLyrics", "align textLeft=$screenLeft expected=$expected")
-        assertTrue("lyrics left $screenLeft vs $expected", textLeft >= 0 && kotlin.math.abs(screenLeft - expected) <= 4 * density)
+        assertTrue("lyrics left $screenLeft vs $expected raw=$alignRaw", textLeft >= 0 && kotlin.math.abs(screenLeft - expected) <= 4 * density)
 
         // 在歌词上下滑不应收起播放页；页面选择被记住
         val cx = loc[0] + web.width / 2
