@@ -41,6 +41,11 @@ jobs:
   lyrics-webview:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 34 自带 WebView 113；36 的 WebView 新得多，接近真机
+        api-level: [34, 36]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -58,7 +63,7 @@ jobs:
       - name: Instrumented tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: ${{ matrix.api-level }}
           target: google_apis
           arch: x86_64
           disable-animations: true
@@ -66,7 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: lyrics-screenshot-${{ github.run_number }}
+          name: lyrics-screenshot-${{ matrix.api-level }}-${{ github.run_number }}
           path: lyrics*.png
           if-no-files-found: ignore
 

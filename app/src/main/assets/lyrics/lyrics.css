@@ -10,8 +10,12 @@ html, body {
 #lyrics {
   position: absolute;
   inset: 0;
-  /* 上下渐隐，同 Apple Music */
-  mask-image: linear-gradient(to bottom, transparent 0, #000 12%, #000 80%, transparent 100%);
+  /* 不用 mask-image 做上下渐隐：新版 WebView（133）在播放页里 mask + plus-lighter 叠在一起时整块歌词画不出来（DOM 正常、屏幕全空）。
+     先去掉渐隐，保证歌词能显示。 */
+}
+/* 同上：AMLL 的亮/暗两层用 plus-lighter 叠加，在透明 WebView 里不可靠，改成普通叠加 */
+#lyrics * {
+  mix-blend-mode: normal !important;
 }
 #lyrics .amll-lyric-player {
   /* plus-lighter 在透明的 WebView 上没有可叠加的底色，会发灰 */
