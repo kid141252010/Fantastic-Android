@@ -15,10 +15,18 @@ data class Track(
     val artworkTemplate: String?,
     val durationMs: Long,
 ) {
-    fun artwork(size: Int): String? = artworkTemplate
-        ?.replace("{w}", size.toString())
-        ?.replace("{h}", size.toString())
-        ?.replace("{f}", "jpg")
+    fun artwork(size: Int): String? {
+        // QQ 封面只有固定几档尺寸，其他尺寸（如 600、120）返回 404；取不小于所需的最小一档
+        val px = if (source == Source.QQ) QQ_ARTWORK_SIZES.firstOrNull { it >= size } ?: QQ_ARTWORK_SIZES.last() else size
+        return artworkTemplate
+            ?.replace("{w}", px.toString())
+            ?.replace("{h}", px.toString())
+            ?.replace("{f}", "jpg")
+    }
+
+    private companion object {
+        val QQ_ARTWORK_SIZES = listOf(90, 150, 300, 500, 800)
+    }
 }
 
 // ---- QQ：/qq/search ----

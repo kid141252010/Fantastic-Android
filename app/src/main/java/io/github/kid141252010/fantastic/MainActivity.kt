@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import io.github.kid141252010.fantastic.ui.AppShell
 import io.github.kid141252010.fantastic.ui.theme.FantasticTheme
 
@@ -24,7 +26,10 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             FantasticTheme {
-                AppShell(app)
+                // Surface 提供跟随深浅色的文字颜色，否则没指定颜色的 Text 在深色模式下是黑字
+                Surface(color = MaterialTheme.colorScheme.background) {
+                    AppShell(app)
+                }
             }
         }
     }
