@@ -65,7 +65,9 @@ import kotlinx.coroutines.delay
 fun NowPlaying(state: PlayerState, player: PlayerConnection, lyrics: LyricsController, onClose: () -> Unit) {
     var showLyrics by rememberSaveable { mutableStateOf(false) }
     val lyricsStatus by lyrics.status.collectAsStateWithLifecycle()
-    val lyricsAvailable = lyricsStatus == LyricsController.Status.Ready || lyricsStatus == LyricsController.Status.Loading
+    val lyricsError by lyrics.error.collectAsStateWithLifecycle()
+    // 失败时也能打开歌词，看到失败原因
+    val lyricsAvailable = lyricsStatus != LyricsController.Status.None && lyricsStatus != LyricsController.Status.Missing
     var position by remember { mutableLongStateOf(0L) }
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableFloatStateOf(0f) }
@@ -129,20 +131,27 @@ fun NowPlaying(state: PlayerState, player: PlayerConnection, lyrics: LyricsContr
                     when (lyricsStatus) {
                         LyricsController.Status.Missing, LyricsController.Status.Failed, LyricsController.Status.None ->
                             Text(
-                                if (lyricsStatus == LyricsController.Status.Failed) "歌词加载失败" else "暂无歌词",
-                                color = Color.White.copy(alpha = 0.6f),
+                                if (lyricsStatus == LyricsController.Status.Failed) lyricsError ?: "歌词加载失败" else "暂无歌词",
+                                color = Color.White.copy(alpha = 0.7f),
+                                fontSize = 15.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp),
                             )
-                        else -> AndroidView(
-                            factory = { lyrics.webView.also { (it.parent as? ViewGroup)?.removeView(it) } },
-                            // 歌词左右留白由页面自己控制，铺满宽度
-                            modifier = Modifier.fillMaxSize().layout { measurable, constraints ->
-                                val extra = 28.dp.roundToPx() * 2
-                                val placeable = measurable.measure(
-                                    constraints.copy(minWidth = constraints.maxWidth + extra, maxWidth = constraints.maxWidth + extra),
-                                )
-                                layout(constraints.maxWidth, placeable.height) { placeable.place(-extra / 2, 0) }
-                            },
-                        )
+                        else -> {
+                            AndroidView(
+                                factory = { lyrics.webView.also { (it.parent as? ViewGroup)?.removeView(it) } },
+                                // 歌词左右留白由页面自己控制，铺满宽度
+                                modifier = Modifier.fillMaxSize().layout { measurable, constraints ->
+                                    val extra = 28.dp.roundToPx() * 2
+                                    val placeable = measurable.measure(
+                                        constraints.copy(minWidth = constraints.maxWidth + extra, maxWidth = constraints.maxWidth + extra),
+                                    )
+                                    layout(constraints.maxWidth, placeable.height) { placeable.place(-extra / 2, 0) }
+                                },
+                            )
+                            if (lyricsStatus == LyricsController.Status.Loading) {
+                                Text("正在加载歌词…", color = Color.White.copy(alpha = 0.6f), fontSize = 15.sp)
+                            }
+                        }
                     }
                 }
             } else {
