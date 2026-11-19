@@ -83,5 +83,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt.coil3:coil-compose:3.0.4")
+    // 玻璃效果：背后内容模糊（API 31+ RenderEffect，低版本退化为半透明底色）
+    implementation("dev.chrisbanes.haze:haze:1.1.1")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
 }

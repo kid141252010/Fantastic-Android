@@ -51,7 +51,7 @@ fun Artwork(url: String?, size: Dp, corner: Dp = 6.dp, modifier: Modifier = Modi
 fun SongRow(track: Track, playing: Boolean, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            Modifier.padding(horizontal = Dimens.Page, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -73,7 +73,7 @@ fun SongRow(track: Track, playing: Boolean, onClick: () -> Unit) {
                 )
             }
         }
-        HorizontalDivider(Modifier.padding(start = 76.dp), color = MaterialTheme.colorScheme.outlineVariant)
+        HorizontalDivider(Modifier.padding(start = Dimens.Page + 60.dp), color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 
@@ -82,7 +82,7 @@ fun SongRow(track: Track, playing: Boolean, onClick: () -> Unit) {
 fun LargeTitle(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
-        modifier = modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = modifier.padding(horizontal = Dimens.Page, vertical = 8.dp),
         fontSize = 34.sp,
         fontWeight = FontWeight.Bold,
     )

@@ -18,6 +18,7 @@ html, body {
   mix-blend-mode: normal;
   font-weight: 700;
   --amll-lp-font-size: max(7.5vw, 20px);
-  padding: 0 7vw;
+  /* 原生把 WebView 左右各加宽 32dp（Dimens.Player），这里留同样的内边距，文字与封面、进度条对齐 */
+  padding: 0 32px;
   box-sizing: border-box;
 }
