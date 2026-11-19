@@ -1,4 +1,5 @@
-/* 原生界面画背景，WebView 透明，这里只放 AMLL 歌词 */
+/* Native Compose paints the background; one normal-composited text layer avoids
+ * the mask + plus-lighter failure of transparent Android WebViews. No CSS nesting. */
 html, body {
   margin: 0;
   height: 100%;
@@ -7,22 +8,65 @@ html, body {
   -webkit-tap-highlight-color: transparent;
   font-family: system-ui, sans-serif;
 }
-#lyrics {
-  position: absolute;
-  inset: 0;
-  /* 不用 mask-image 做上下渐隐：新版 WebView（133）在播放页里 mask + plus-lighter 叠在一起时整块歌词画不出来（DOM 正常、屏幕全空）。
-     先去掉渐隐，保证歌词能显示。 */
-}
-/* 同上：AMLL 的亮/暗两层用 plus-lighter 叠加，在透明 WebView 里不可靠，改成普通叠加 */
-#lyrics * {
-  mix-blend-mode: normal !important;
-}
-#lyrics .amll-lyric-player {
-  /* plus-lighter 在透明的 WebView 上没有可叠加的底色，会发灰 */
-  mix-blend-mode: normal;
-  font-weight: 700;
-  --amll-lp-font-size: max(7.5vw, 20px);
-  /* 原生把 WebView 左右各加宽 32dp（Dimens.Player），这里留同样的内边距，文字与封面、进度条对齐 */
+#lyrics { position: absolute; inset: 0; }
+.apple-music-lyrics {
+  width: 100%;
+  height: 100%;
   padding: 0 32px;
   box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  scrollbar-width: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
+.apple-music-lyrics::-webkit-scrollbar { display: none; }
+.lyrics-lines { position: relative; }
+.lyric-line {
+  position: relative;
+  margin: 0 0 20px;
+  padding: 2px 0 10px;
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.18;
+  transform-origin: left center;
+  cursor: pointer;
+}
+.lyric-line:focus-visible { outline: 2px solid rgba(255,255,255,0.45); border-radius: 8px; }
+.lyric-line.duet { transform-origin: right center; }
+.duet .lyric-voice { width: 85%; margin-left: auto; text-align: right; }
+.lyric-voice { color: rgba(255,255,255,0.18); }
+.lyric-word-group { display: inline-block; vertical-align: baseline; }
+.lyric-word-piece {
+  display: inline-block;
+  white-space: pre;
+  vertical-align: baseline;
+  transform-origin: center 85%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.lyric-word-piece.joined-script { display: inline; }
+.lyric-translation {
+  margin-top: 4px;
+  font-size: 22px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: rgba(255,255,255,0.45);
+}
+.background-voice { margin-top: 22px; font-size: 22px; }
+.interlude { min-height: 36px; cursor: default; }
+.interlude-dots {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: max-content;
+  height: 36px;
+  transform-origin: left center;
+}
+.interlude-dot { display: block; width: 10px; height: 10px; border-radius: 50%; }
+.lyric-credits { font-size: 22px; color: rgba(255,255,255,0.94); cursor: default; }

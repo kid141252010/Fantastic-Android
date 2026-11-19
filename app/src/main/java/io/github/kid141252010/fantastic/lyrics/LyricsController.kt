@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /**
- * 歌词：一个常驻的 WebView 跑 AMLL（assets/lyrics），全屏播放页打开歌词时挂上去。
+ * 歌词：一个常驻的 WebView 跑 APK 动画参数的独立歌词渲染器（assets/lyrics），全屏播放页打开歌词时挂上去。
  * 切歌时就预取歌词；挂在窗口上时每 500ms（以及播放 / 暂停、跳转时立刻）推送一次播放进度锚点，
  * 页面每帧自己外推，所以锚点不用很密。任何一步失败都把原因放进 [error]，界面上直接显示。
  */
