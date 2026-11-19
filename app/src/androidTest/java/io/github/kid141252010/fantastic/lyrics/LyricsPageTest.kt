@@ -1,6 +1,7 @@
 package io.github.kid141252010.fantastic.lyrics
 
 import android.graphics.Color
+import android.os.ParcelFileDescriptor
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -80,8 +81,10 @@ class LyricsPageTest {
             ).toInt()
             val size = evaluate(scenario, web, "innerWidth + 'x' + innerHeight")
             android.util.Log.i("FantasticLyrics", "visible text nodes=$visible viewport=$size ua=${evaluate(scenario, web, "navigator.userAgent")}")
-            instrumentation.uiAutomation.executeShellCommand("screencap -p /data/local/tmp/lyrics.png").close()
-            Thread.sleep(1500)
+            // 读到 EOF 才算命令跑完
+            ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand("screencap -p /data/local/tmp/lyrics.png"),
+            ).use { it.readBytes() }
             assertTrue("挂载后没有可见歌词（$visible 个文字节点，视口 $size）", visible > 5)
             assertTrue("没有页面错误", bridge.statuses.none { it.startsWith("error:") })
         }
