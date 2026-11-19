@@ -34,6 +34,11 @@ object LyricsWebView {
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
+            // 歌词自己处理滑动：按下时让外层（播放页）不要拦截，免得和下拉收起抢手势
+            setOnTouchListener { v, event ->
+                if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
+                false
+            }
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = false

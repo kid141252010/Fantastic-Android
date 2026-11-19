@@ -37,6 +37,9 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,6 +47,7 @@ import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.FormatQuote
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
@@ -63,6 +67,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -77,6 +88,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
@@ -111,7 +123,13 @@ fun NowPlaying(
     visibility: AnimatedVisibilityScope,
     onClose: () -> Unit,
 ) {
-    var showLyrics by rememberSaveable { mutableStateOf(false) }
+    val prefs = (LocalContext.current.applicationContext as FantasticApp).prefs
+    // 记住上次停留的页面（封面 / 歌词 / 待播清单），重开播放页、重启应用都回到这里
+    var page by rememberSaveable { mutableStateOf(Page.from(prefs.playerPage)) }
+    fun open(target: Page) {
+        page = if (page == target) Page.Cover else target
+        prefs.playerPage = page.key
+    }
     val lyricsStatus by lyrics.status.collectAsStateWithLifecycle()
     val lyricsError by lyrics.error.collectAsStateWithLifecycle()
     // 加载中、失败也能打开歌词，直接看到状态和原因
@@ -137,24 +155,25 @@ fun NowPlaying(
                 shape = RoundedCornerShape(topStart = corner, topEnd = corner)
                 clip = true
             }
-            .background(Color(0xFF1C1C1E))
-            // 吞掉点击，防止点穿到下面的页面
-            .clickable(remember { MutableInteractionSource() }, indication = null) {}
-            .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onDragEnd = {
-                        scope.launch {
-                            if (drag.value > dismissPx) onClose() else drag.animateTo(0f, spring(dampingRatio = 0.8f))
-                        }
-                    },
-                    onDragCancel = { scope.launch { drag.animateTo(0f) } },
-                ) { change, amount ->
-                    change.consume()
-                    scope.launch { drag.snapTo((drag.value + amount).coerceAtLeast(0f)) }
-                }
-            },
+            .background(Color(0xFF1C1C1E)),
     ) {
+        // 下拉收起只放在顶部（把手、歌词/清单页的小封面标题栏），中间的歌词和清单自己滑动，不和它抢手势
+        val dismissDrag = Modifier.pointerInput(Unit) {
+            detectVerticalDragGestures(
+                onDragEnd = {
+                    scope.launch {
+                        if (drag.value > dismissPx) onClose() else drag.animateTo(0f, spring(dampingRatio = 0.8f))
+                    }
+                },
+                onDragCancel = { scope.launch { drag.animateTo(0f) } },
+            ) { change, amount ->
+                change.consume()
+                scope.launch { drag.snapTo((drag.value + amount).coerceAtLeast(0f)) }
+            }
+        }
         Backdrop(state.artworkUri)
+        // 吞掉落在空白处的点击，防止点穿到下面的页面（在内容之下，不包住歌词）
+        Box(Modifier.fillMaxSize().clickable(remember { MutableInteractionSource() }, indication = null) {})
         Column(
             Modifier
                 .fillMaxSize()
@@ -163,7 +182,7 @@ fun NowPlaying(
                 .padding(horizontal = Dimens.Player),
         ) {
             // 顶部把手
-            Box(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 12.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxWidth().then(dismissDrag).padding(top = 8.dp, bottom = 12.dp), contentAlignment = Alignment.Center) {
                 Box(
                     Modifier
                         .size(36.dp, 5.dp)
@@ -173,23 +192,27 @@ fun NowPlaying(
                 )
             }
             AnimatedContent(
-                targetState = showLyrics,
+                targetState = page,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 transitionSpec = {
                     fadeIn(tween(Motion.Enter, easing = Motion.Emphasized)) togetherWith
                         fadeOut(tween(Motion.Exit, easing = Motion.Emphasized))
                 },
                 label = "lyrics",
-            ) { lyricsMode ->
+            ) { shown ->
                 // 歌词切换时封面在大图与小图之间过渡；刚展开时由外层动画负责从迷你条飞过来
                 val art = if (transition.isRunning) this else visibility
-                if (lyricsMode) {
+                if (shown != Page.Cover) {
                     Column(Modifier.fillMaxSize()) {
-                        Header(state, art)
-                        LyricsPane(lyrics, lyricsStatus, lyricsError, Modifier.weight(1f).fillMaxWidth())
+                        Header(state, art, dismissDrag)
+                        if (shown == Page.Lyrics) {
+                            LyricsPane(lyrics, lyricsStatus, lyricsError, Modifier.weight(1f).fillMaxWidth())
+                        } else {
+                            QueuePane(state, player, Modifier.weight(1f).fillMaxWidth())
+                        }
                     }
                 } else {
-                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
+                    Column(Modifier.fillMaxSize().then(dismissDrag), verticalArrangement = Arrangement.Center) {
                         AsyncImage(
                             model = state.artworkUri,
                             contentDescription = null,
@@ -215,38 +238,112 @@ fun NowPlaying(
             }
             Spacer(Modifier.height(16.dp))
             Controls(state, player)
-            // 底部开关：歌词（左）、待播清单（右，后续阶段）
+            // 底部开关：歌词（左）、待播清单（右）。图标底色的外缘与封面、歌词左右边缘对齐
             Row(
-                Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+                Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                val bg by animateColorAsState(if (showLyrics) Color.White.copy(alpha = 0.85f) else Color.Transparent, label = "lyricsBg")
-                val tint by animateColorAsState(
-                    when {
-                        showLyrics -> Color.Black.copy(alpha = 0.75f)
-                        lyricsAvailable -> Color.White.copy(alpha = 0.6f)
-                        else -> Color.White.copy(alpha = 0.25f)
-                    },
-                    label = "lyricsTint",
-                )
-                IconButton(onClick = { showLyrics = !showLyrics }, enabled = lyricsAvailable || showLyrics) {
-                    Icon(
-                        Icons.Rounded.FormatQuote,
-                        contentDescription = "歌词",
-                        tint = tint,
-                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(bg).padding(4.dp),
-                    )
-                }
-                IconButton(onClick = {}, enabled = false) {
-                    Icon(
-                        Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = "待播清单",
-                        tint = Color.White.copy(alpha = 0.25f),
-                    )
+                PageToggle(Icons.Rounded.FormatQuote, "歌词", page == Page.Lyrics, lyricsAvailable) { open(Page.Lyrics) }
+                PageToggle(Icons.AutoMirrored.Rounded.QueueMusic, "待播清单", page == Page.Queue, state.queue.isNotEmpty()) { open(Page.Queue) }
+            }
+        }
+    }
+}
+
+enum class Page(val key: String) {
+    Cover("cover"), Lyrics("lyrics"), Queue("queue");
+
+    companion object {
+        fun from(key: String) = entries.firstOrNull { it.key == key } ?: Cover
+    }
+}
+
+/** 32dp 的图标按钮，没有 IconButton 的 48dp 留白，这样左右边缘能和封面对齐；选中时白底黑图标（Apple Music） */
+@Composable
+private fun PageToggle(icon: ImageVector, label: String, selected: Boolean, available: Boolean, onClick: () -> Unit) {
+    val bg by animateColorAsState(if (selected) Color.White.copy(alpha = 0.85f) else Color.Transparent, label = "toggleBg")
+    val tint by animateColorAsState(
+        when {
+            selected -> Color.Black.copy(alpha = 0.75f)
+            available -> Color.White.copy(alpha = 0.6f)
+            else -> Color.White.copy(alpha = 0.25f)
+        },
+        label = "toggleTint",
+    )
+    Box(
+        Modifier
+            .size(32.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .clickable(enabled = available || selected, onClickLabel = label, onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
+    }
+}
+
+/** 待播清单：当前曲目高亮，点一首直接跳过去 */
+@Composable
+private fun QueuePane(state: PlayerState, player: PlayerConnection, modifier: Modifier) {
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = state.queueIndex.coerceAtLeast(0))
+    Column(modifier) {
+        Text(
+            "待播清单", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
+        )
+        LazyColumn(Modifier.fillMaxSize().edgeFade(), state = listState) {
+            itemsIndexed(state.queue, key = { i, e -> "$i:${e.id}" }) { i, entry ->
+                val current = i == state.queueIndex
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { player.skipTo(i) }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Artwork(entry.artworkUri, 44.dp, 4.dp)
+                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                        Text(
+                            entry.title, color = Color.White.copy(alpha = if (current) 1f else 0.85f), fontSize = 15.sp,
+                            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            entry.artist, color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (current) {
+                        Icon(
+                            if (state.isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.Pause,
+                            contentDescription = "正在播放", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
         }
     }
 }
+
+/**
+ * 上下边缘渐隐：在离屏层里用 DstIn 乘一条透明→不透明→透明的渐变。
+ * 不用网页里的 mask-image（新版 WebView 在播放页里会整块画不出来），由原生对 WebView 整体做。
+ */
+fun Modifier.edgeFade(top: Float = 0.1f, bottom: Float = 0.12f): Modifier = this
+    .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+    .drawWithContent {
+        drawContent()
+        drawRect(
+            Brush.verticalGradient(
+                0f to Color.Transparent,
+                top to Color.Black,
+                1f - bottom to Color.Black,
+                1f to Color.Transparent,
+            ),
+            blendMode = BlendMode.DstIn,
+        )
+    }
 
 /** 背景：放大模糊的封面 + 暗色渐变（API 31+ 才有 blur，低版本只剩渐变） */
 @Composable
@@ -266,8 +363,8 @@ private fun Backdrop(artwork: String?) {
 
 /** 歌词模式头部：60dp 小封面 + 歌名 / 艺人，左边与歌词、进度条对齐 */
 @Composable
-private fun Header(state: PlayerState, art: AnimatedVisibilityScope) {
-    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun Header(state: PlayerState, art: AnimatedVisibilityScope, dismissDrag: Modifier) {
+    Row(Modifier.fillMaxWidth().then(dismissDrag).padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Artwork(state.artworkUri, 60.dp, 6.dp, Modifier.sharedArtwork(art))
         Column(Modifier.padding(start = 14.dp).weight(1f)) {
             Text(
@@ -310,7 +407,7 @@ private fun LyricsPane(
                         val width = constraints.maxWidth + extra
                         val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width))
                         layout(constraints.maxWidth, placeable.height) { placeable.place(-extra / 2, 0) }
-                    },
+                    }.edgeFade(),
                 )
                 if (status == LyricsController.Status.Loading) {
                     Text("正在加载歌词…", color = Color.White.copy(alpha = 0.6f), fontSize = 15.sp)

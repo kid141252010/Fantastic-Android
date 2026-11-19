@@ -30,9 +30,14 @@ data class PlayerState(
     val hasNext: Boolean = false,
     val hasPrevious: Boolean = false,
     val error: String? = null,
+    /** 播放队列（待播清单）与当前位置 */
+    val queue: List<QueueEntry> = emptyList(),
+    val queueIndex: Int = -1,
     /** 每次跳转（含切歌）加一，歌词据此直接跳到位置 */
     val seekGeneration: Int = 0,
 )
+
+data class QueueEntry(val id: String, val title: String, val artist: String, val artworkUri: String?)
 
 /** 界面这一侧的播放器：通过 MediaController 连到 PlaybackService。 */
 class PlayerConnection(private val context: Context, private val prefs: Prefs) {
@@ -104,6 +109,7 @@ class PlayerConnection(private val context: Context, private val prefs: Prefs) {
     fun next() = whenReady { it.seekToNext() }
     fun previous() = whenReady { it.seekToPrevious() }
     fun seekTo(ms: Long) = whenReady { it.seekTo(ms) }
+    fun skipTo(index: Int) = whenReady { if (index in 0 until it.mediaItemCount) { it.seekToDefaultPosition(index); it.play() } }
 
     private fun toItem(t: Track): MediaItem? {
         // Apple 播放在第三阶段接入（需要解密核心），目前只播 QQ。
@@ -151,6 +157,12 @@ class PlayerConnection(private val context: Context, private val prefs: Prefs) {
             hasNext = c.hasNextMediaItem(),
             hasPrevious = c.hasPreviousMediaItem() || c.currentPosition > 3000,
             error = c.playerError?.errorCodeName,
+            queue = (0 until c.mediaItemCount).map { i ->
+                val item = c.getMediaItemAt(i)
+                val im = item.mediaMetadata
+                QueueEntry(item.mediaId, im.title?.toString().orEmpty(), im.artist?.toString().orEmpty(), im.artworkUri?.toString())
+            },
+            queueIndex = c.currentMediaItemIndex,
             seekGeneration = seekGeneration,
         )
     }

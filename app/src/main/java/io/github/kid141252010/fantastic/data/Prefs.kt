@@ -21,6 +21,11 @@ class Prefs(context: Context) {
         get() = sp.getString("qqQuality", "SQ")!!
         set(value) = sp.edit { putString("qqQuality", value) }
 
+    /** 播放页上次停留的页面：cover / lyrics / queue，下次打开播放页（含重启应用）回到这里 */
+    var playerPage: String
+        get() = sp.getString("playerPage", "cover")!!
+        set(value) = sp.edit { putString("playerPage", value) }
+
     companion object {
         const val DEFAULT_BASE_URL = "https://music.1412.tech"
 
