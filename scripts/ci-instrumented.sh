@@ -7,7 +7,7 @@ gradle :app:connectedDebugAndroidTest --stacktrace && ok=1
 adb logcat -d -s FantasticLyrics TestRunner AndroidRuntime chromium | tail -300
 echo "---- crash buffer ----"; adb logcat -d -b crash | tail -150
 echo "---- errors ----"; adb logcat -d "*:E" | grep -v "^--------" | tail -150
-for f in lyrics.png lyrics-e2e.png lyrics-live.png lyrics-live2.png ui-home.png ui-player.png; do
+for f in lyrics.png lyrics-e2e.png lyrics-live.png ui-home.png ui-player.png; do
   adb pull "/data/local/tmp/$f" "$f" >/dev/null 2>&1 || continue
   echo "PNG_BEGIN $f"; base64 -w0 "$f"; echo; echo "PNG_END $f"
 done
