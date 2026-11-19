@@ -145,7 +145,10 @@ class LyricsEndToEndTest {
         Thread.sleep(1500)
         compose.onNodeWithContentDescription("歌词").performClick()
         compose.waitForIdle()
-        Thread.sleep(5000)
+        Thread.sleep(2000)
+        // CI 在海外，QQ 播放地址 404，播放器不会走：在页面里把时间固定到 30 秒处并「播放」，让当前行变成亮白色
+        if (!playing) js("fantastic.sync(30000,true,true);fantastic.sync=()=>{}")
+        Thread.sleep(4000)
 
         val web = app.lyrics.webView
         val loc = IntArray(2)
