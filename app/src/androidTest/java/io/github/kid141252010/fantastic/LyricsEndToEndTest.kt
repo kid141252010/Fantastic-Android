@@ -170,7 +170,9 @@ class LyricsEndToEndTest {
             }
         }
         screencap("/data/local/tmp/lyrics-live.png")
-        val info = "playing=$playing pos=${app.player.position()} bright=$bright/$total webLoc=${loc.toList()} " +
+        var pos = -1L
+        compose.runOnUiThread { pos = app.player.position() }
+        val info = "playing=$playing pos=$pos bright=$bright/$total webLoc=${loc.toList()} " +
             "debug=${js("fantastic.debug()")} visible=${countVisible()} diag=${app.lyrics.diag.value}"
         Log.i("FantasticLyrics", "live $info")
         assertEquals(info, LyricsController.Status.Ready, app.lyrics.status.value)
