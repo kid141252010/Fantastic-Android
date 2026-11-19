@@ -100,12 +100,16 @@ function relayout() {
 globalThis.fantastic = {
   /** json：/qq/song/:mid/lyrics 的响应文本；null 清空 */
   setLyrics(json, prefer = 'amll') {
-    let song = null;
-    try { song = json ? selectSong(JSON.parse(json).candidates, prefer) : null; } catch { song = null; }
-    lines = song ? toAmllLines(song, options) : [];
-    view.setLyricLines(lines, Math.round(now()));
-    view.setCurrentTime(Math.round(now()), true);
-    if (json) bridge.status(lines.length ? 'ready' : 'missing');
+    try {
+      const song = json ? selectSong(JSON.parse(json).candidates, prefer) : null;
+      lines = song ? toAmllLines(song, options) : [];
+      view.setLyricLines(lines, Math.round(now()));
+      view.setCurrentTime(Math.round(now()), true);
+      if (json) bridge.status(lines.length ? 'ready' : 'missing');
+    } catch (error) {
+      lines = [];
+      bridge.status(`error:${error?.message || error}`);
+    }
   },
   /** pos：播放位置（毫秒）；seek：刚跳转过，歌词直接跳到位置而不是滚过去 */
   sync(pos, playing, seek) {
@@ -118,6 +122,12 @@ globalThis.fantastic = {
     if (seek) view.setCurrentTime(Math.round(pos), true);
   },
 };
+
+// WebView 先在后台加载（宽高为 0），挂到界面上才有尺寸；尺寸变化时重新排版
+let lastWidth = innerWidth;
+addEventListener('resize', () => {
+  if (innerWidth !== lastWidth) { lastWidth = innerWidth; relayout(); }
+});
 
 void ensureWordSegmenter(setWordSegmenter, relayout);
 bridge.ready();

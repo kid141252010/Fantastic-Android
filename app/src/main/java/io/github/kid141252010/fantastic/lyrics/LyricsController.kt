@@ -1,18 +1,9 @@
 package io.github.kid141252010.fantastic.lyrics
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Color
-import android.util.Log
 import android.view.View
-import android.webkit.ConsoleMessage
-import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.webkit.WebViewAssetLoader
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import kotlinx.coroutines.CancellationException
@@ -31,7 +22,7 @@ import org.json.JSONObject
 /**
  * 歌词：一个常驻的 WebView 跑 AMLL（assets/lyrics），全屏播放页打开歌词时挂上去。
  * 切歌时就预取歌词；挂在窗口上时每 500ms（以及播放 / 暂停、跳转时立刻）推送一次播放进度锚点，
- * 页面每帧自己外推，所以锚点不用很密。
+ * 页面每帧自己外推，所以锚点不用很密。任何一步失败都把原因放进 [error]，界面上直接显示。
  */
 class LyricsController(
     private val context: Context,
@@ -43,8 +34,12 @@ class LyricsController(
     private val scope = MainScope()
     private val _status = MutableStateFlow(Status.None)
     val status: StateFlow<Status> = _status.asStateFlow()
+    private val _error = MutableStateFlow<String?>(null)
+    /** Failed 时的原因（网络、页面加载、脚本错误） */
+    val error: StateFlow<String?> = _error.asStateFlow()
 
     private var pageReady = false
+    private var pageError: String? = null
     /** 页面没加载完时先存着，加载完再推送；"" 表示清空 */
     private var pending: String? = null
     private var loadJob: Job? = null
@@ -52,45 +47,15 @@ class LyricsController(
     private var lastSeekGeneration = -1
 
     val webView: WebView by lazy {
-        val loader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", ModuleAwareAssets(WebViewAssetLoader.AssetsPathHandler(context)))
-            .build()
-        createWebView(loader)
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun createWebView(loader: WebViewAssetLoader): WebView =
-        WebView(context).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            isVerticalScrollBarEnabled = false
-            isHorizontalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.allowFileAccess = false
-            settings.allowContentAccess = false
-            webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                    loader.shouldInterceptRequest(request.url)
-
-                // 歌词页不跳转到任何地方
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
-            }
-            webChromeClient = object : WebChromeClient() {
-                override fun onConsoleMessage(message: ConsoleMessage): Boolean {
-                    Log.d("FantasticLyrics", "${message.messageLevel()} ${message.message()} (${message.sourceId()}:${message.lineNumber()})")
-                    return true
-                }
-            }
-            addJavascriptInterface(Bridge(), "FantasticBridge")
+        LyricsWebView.create(context, Bridge(), onLoadError = { fail(it) }).apply {
             addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) = startSync()
                 override fun onViewDetachedFromWindow(v: View) {
                     syncJob?.cancel()
                 }
             })
-            loadUrl(PAGE)
         }
+    }
 
     init {
         scope.launch {
@@ -101,7 +66,22 @@ class LyricsController(
                 if (syncJob?.isActive == true) sync()
             }
         }
+        // 页面 15 秒还没跑起来（脚本没执行）就报出来，不要一直空白
+        scope.launch {
+            webView
+            delay(15_000)
+            if (!pageReady && pageError == null) fail("歌词页脚本没有运行（WebView ${webViewVersion()}）")
+        }
     }
+
+    private fun fail(message: String) {
+        pageError = pageError ?: message
+        _error.value = message
+        _status.value = Status.Failed
+    }
+
+    private fun webViewVersion(): String =
+        WebView.getCurrentWebViewPackage()?.versionName ?: "未知版本"
 
     private fun load(mediaId: String?) {
         loadJob?.cancel()
@@ -111,13 +91,16 @@ class LyricsController(
             _status.value = Status.None
             return
         }
+        pageError?.let { fail(it); return }
         _status.value = Status.Loading
+        _error.value = null
         loadJob = scope.launch {
             try {
                 push(api.qqLyricsJson(mid))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                _error.value = "歌词请求失败：${e.message ?: e.javaClass.simpleName}"
                 _status.value = Status.Failed
             }
         }
@@ -169,25 +152,19 @@ class LyricsController(
             scope.launch { player.seekTo(ms.toLong()) }
         }
 
+        /** "ready" | "missing" | "error:<原因>" */
         @JavascriptInterface
         fun status(value: String) {
-            scope.launch { _status.value = if (value == "ready") Status.Ready else Status.Missing }
+            scope.launch {
+                when {
+                    value == "ready" -> { _error.value = null; _status.value = Status.Ready }
+                    value == "missing" -> _status.value = Status.Missing
+                    value.startsWith("error:") -> {
+                        _error.value = "歌词页出错：${value.removePrefix("error:")}"
+                        _status.value = Status.Failed
+                    }
+                }
+            }
         }
-    }
-
-    /**
-     * AssetsPathHandler 按扩展名猜 MIME，不认识 .mjs 会给 text/plain，
-     * 而 ES 模块脚本要求 JavaScript MIME，否则整个歌词页加载失败
-     */
-    private class ModuleAwareAssets(private val inner: WebViewAssetLoader.PathHandler) : WebViewAssetLoader.PathHandler {
-        override fun handle(path: String): WebResourceResponse? {
-            val response = inner.handle(path) ?: return null
-            if (path.endsWith(".mjs")) response.mimeType = "text/javascript"
-            return response
-        }
-    }
-
-    private companion object {
-        const val PAGE = "https://appassets.androidplatform.net/assets/lyrics/index.html"
     }
 }
