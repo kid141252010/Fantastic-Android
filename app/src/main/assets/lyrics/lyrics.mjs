@@ -90,7 +90,9 @@ function frame(ts) {
 }
 requestAnimationFrame(frame);
 
+let laidOut = { w: -1, h: -1 };
 function relayout() {
+  laidOut = { w: innerWidth, h: innerHeight };
   if (lines.length) {
     view.setLyricLines(lines, Math.round(now()));
     view.setCurrentTime(Math.round(now()), true);
@@ -103,6 +105,7 @@ globalThis.fantastic = {
     try {
       const song = json ? selectSong(JSON.parse(json).candidates, prefer) : null;
       lines = song ? toAmllLines(song, options) : [];
+      laidOut = { w: innerWidth, h: innerHeight };
       view.setLyricLines(lines, Math.round(now()));
       view.setCurrentTime(Math.round(now()), true);
       if (json) bridge.status(lines.length ? 'ready' : 'missing');
@@ -121,13 +124,24 @@ globalThis.fantastic = {
     if (playing) view.resume(); else view.pause();
     if (seek) view.setCurrentTime(Math.round(pos), true);
   },
+  /** 原生在 WebView 挂上界面、尺寸变化后调用：后台加载时排版用的是 0 尺寸，必须重排 */
+  relayout() {
+    if (innerWidth !== laidOut.w || innerHeight !== laidOut.h) relayout();
+  },
+  /** 测试 / 诊断用 */
+  debug() {
+    const els = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim());
+    const r = els[0]?.getBoundingClientRect();
+    return JSON.stringify({
+      iw: innerWidth, ih: innerHeight, laidOut, lines: lines.length, textEls: els.length,
+      first: r ? [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] : null,
+      hidden: document.hidden,
+    });
+  },
 };
 
-// WebView 先在后台加载（宽高为 0），挂到界面上才有尺寸；尺寸变化时重新排版
-let lastWidth = innerWidth;
-addEventListener('resize', () => {
-  if (innerWidth !== lastWidth) { lastWidth = innerWidth; relayout(); }
-});
+// WebView 先在后台加载（宽高为 0），挂到界面上才有尺寸；宽或高变化都重新排版（AMLL 的行位置依赖高度）
+addEventListener('resize', () => globalThis.fantastic.relayout());
 
 void ensureWordSegmenter(setWordSegmenter, relayout);
 bridge.ready();

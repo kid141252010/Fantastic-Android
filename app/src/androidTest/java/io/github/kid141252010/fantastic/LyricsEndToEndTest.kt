@@ -111,8 +111,9 @@ class LyricsEndToEndTest {
               }).length;
             })()""",
         )
+        val dbg = js("fantastic.debug()")
         val web = app.lyrics.webView
-        val info: String = "status=${app.lyrics.status.value} error=${app.lyrics.error.value} visible=$visible " +
+        val info: String = "debug=$dbg " + "status=${app.lyrics.status.value} error=${app.lyrics.error.value} visible=$visible " +
             "viewport=${js("innerWidth+'x'+innerHeight")} view=${web.width}x${web.height} " +
             "attached=${web.isAttachedToWindow} shown=${web.isShown} diag=${app.lyrics.diag.value}"
         Log.i("FantasticLyrics", "e2e $info")

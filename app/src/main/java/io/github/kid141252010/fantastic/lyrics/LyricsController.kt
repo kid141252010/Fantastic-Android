@@ -61,6 +61,13 @@ class LyricsController(
 
     val webView: WebView by lazy {
         LyricsWebView.create(context, Bridge(), onLoadError = { fail(it) }).apply {
+            // 后台加载时没有尺寸，挂上界面或尺寸变化后让页面重排，否则歌词全挤在 0 高度里不可见
+            addOnLayoutChangeListener { v, l, t, r, b, ol, ot, or, ob ->
+                if ((r - l != or - ol || b - t != ob - ot) && r > l && b > t && pageReady) {
+                    note("layout: ${v.width}x${v.height}")
+                    (v as WebView).evaluateJavascript("fantastic.relayout()", null)
+                }
+            }
             addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) = startSync()
                 override fun onViewDetachedFromWindow(v: View) {
@@ -163,6 +170,7 @@ class LyricsController(
             scope.launch {
                 pageReady = true
                 note("page: ready")
+                if (webView.width > 0 && webView.height > 0) webView.evaluateJavascript("fantastic.relayout()", null)
                 pending?.let { push(it) }
                 pending = null
                 lastSeekGeneration = -1
