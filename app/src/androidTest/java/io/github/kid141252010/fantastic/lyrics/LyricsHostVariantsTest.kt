@@ -9,6 +9,14 @@ import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.runtime.remember
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.haze
+import io.github.kid141252010.fantastic.ui.player.nowPlayingEnter
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,6 +42,7 @@ import java.util.concurrent.TimeUnit
  * 真机（新 WebView）上歌词在播放页里不显示，但单独放进 Activity 能显示。
  * 这里把歌词 WebView 放进几种不同的宿主里，各自截图数 WebView 区域里的亮像素，找出是哪一层让它画不出来。
  */
+@OptIn(ExperimentalSharedTransitionApi::class)
 @RunWith(AndroidJUnit4::class)
 class LyricsHostVariantsTest {
     class Bridge {
@@ -95,29 +104,26 @@ class LyricsHostVariantsTest {
     @Test
     fun hosts() {
         val results = linkedMapOf<String, Int>()
-        results["compose-plain-activityCtx"] = variant("compose-plain-activityCtx", false) { Plain(it) }
-        results["compose-plain-appCtx"] = variant("compose-plain-appCtx", true) { Plain(it) }
-        results["graphicsLayer-clip-shape"] = variant("graphicsLayer-clip-shape", true) { web ->
-            Box(Modifier.fillMaxSize().graphicsLayer { shape = RoundedCornerShape(1.dp); clip = true }.background(androidx.compose.ui.graphics.Color(0xFF1C1C1E))) { Plain(web) }
+        results["plain"] = variant("plain", true) { Plain(it) }
+        results["sharedTransitionLayout"] = variant("sharedTransitionLayout", true) { web ->
+            SharedTransitionLayout(Modifier.fillMaxSize()) { Plain(web) }
         }
-        results["blur-sibling"] = variant("blur-sibling", true) { web ->
+        results["animatedVisibility-enter"] = variant("animatedVisibility-enter", true) { web ->
+            val state = remember { MutableTransitionState(false).apply { targetState = true } }
+            AnimatedVisibility(state, enter = nowPlayingEnter) { Plain(web) }
+        }
+        results["haze-sibling"] = variant("haze-sibling", true) { web ->
+            val haze = remember { HazeState() }
             Box(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxSize().blur(80.dp).background(androidx.compose.ui.graphics.Color.DarkGray))
+                Box(Modifier.fillMaxSize().haze(haze).background(androidx.compose.ui.graphics.Color.DarkGray))
                 Plain(web)
             }
         }
-        results["animatedContent"] = variant("animatedContent", true) { web ->
-            AnimatedContent(targetState = true, label = "t") { if (it) Plain(web) }
-        }
-        results["graphicsLayer-alpha"] = variant("graphicsLayer-alpha", true) { web ->
-            Box(Modifier.fillMaxSize().graphicsLayer { alpha = 0.99f }) { Plain(web) }
-        }
-        results["wider-offset"] = variant("wider-offset", true) { web ->
-            Plain(web, Modifier.fillMaxSize().layout { m, c ->
-                val extra = 64.dp.roundToPx()
-                val p = m.measure(c.copy(minWidth = c.maxWidth + extra, maxWidth = c.maxWidth + extra))
-                layout(c.maxWidth, p.height) { p.place(-extra / 2, 0) }
-            })
+        results["shared+visibility"] = variant("shared+visibility", true) { web ->
+            SharedTransitionLayout(Modifier.fillMaxSize()) {
+                val state = remember { MutableTransitionState(false).apply { targetState = true } }
+                AnimatedVisibility(state, enter = nowPlayingEnter) { Plain(web) }
+            }
         }
         Log.i("FantasticLyrics", "variants $results")
         assertTrue("variants $results", results.values.all { it > 200 })
