@@ -48,11 +48,15 @@ class LyricsController(
     private var syncJob: Job? = null
     private var lastSeekGeneration = -1
 
-    @SuppressLint("SetJavaScriptEnabled")
     val webView: WebView by lazy {
         val loader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
             .build()
+        createWebView(loader)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createWebView(loader: WebViewAssetLoader): WebView =
         WebView(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
             isVerticalScrollBarEnabled = false
@@ -78,7 +82,6 @@ class LyricsController(
             })
             loadUrl(PAGE)
         }
-    }
 
     init {
         scope.launch {
