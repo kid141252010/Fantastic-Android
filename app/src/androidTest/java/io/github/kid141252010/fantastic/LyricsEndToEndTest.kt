@@ -123,6 +123,60 @@ class LyricsEndToEndTest {
         assertTrue(info, (visible.toIntOrNull() ?: 0) > 5)
     }
 
+    /**
+     * 真服务器 + 真播放：用户报告的测试歌曲（邓紫棋《任天堂》），播放几秒后打开歌词，
+     * 不只数 DOM，还在屏幕截图里数 WebView 区域的亮像素，确认歌词真的画到了屏幕上。
+     */
+    @Test
+    fun liveSongPixelsVisible() {
+        val mid = "002vg20z24SqPJ"
+        val title = "任天堂"
+        compose.runOnUiThread {
+            app.player.playQueue(listOf(Track(mid, Source.QQ, title, "G.E.M.邓紫棋", "任天堂", null, 213000)), 0)
+        }
+        compose.waitUntil(30_000) { app.player.state.value.mediaId == "qq:$mid" }
+        compose.waitUntil(60_000) {
+            app.lyrics.status.value.let { it != LyricsController.Status.Loading && it != LyricsController.Status.None }
+        }
+        val playing = runCatching { compose.waitUntil(30_000) { app.player.state.value.isPlaying }; true }.getOrDefault(false)
+        Thread.sleep(6000)
+        compose.onAllNodesWithText(title).onFirst().performClick()
+        compose.waitForIdle()
+        Thread.sleep(1500)
+        compose.onNodeWithContentDescription("歌词").performClick()
+        compose.waitForIdle()
+        Thread.sleep(5000)
+
+        val web = app.lyrics.webView
+        val loc = IntArray(2)
+        compose.runOnUiThread { web.getLocationOnScreen(loc) }
+        val shot = instrumentation.uiAutomation.takeScreenshot()
+        var bright = 0
+        var total = 0
+        if (shot != null && web.width > 0 && web.height > 0) {
+            val x0 = loc[0].coerceAtLeast(0); val y0 = loc[1].coerceAtLeast(0)
+            val x1 = (loc[0] + web.width).coerceAtMost(shot.width); val y1 = (loc[1] + web.height).coerceAtMost(shot.height)
+            var y = y0
+            while (y < y1) {
+                var x = x0
+                while (x < x1) {
+                    val c = shot.getPixel(x, y)
+                    val l = (android.graphics.Color.red(c) * 3 + android.graphics.Color.green(c) * 6 + android.graphics.Color.blue(c)) / 10
+                    if (l > 170) bright++
+                    total++
+                    x += 2
+                }
+                y += 2
+            }
+        }
+        screencap("/data/local/tmp/lyrics-live.png")
+        val info = "playing=$playing pos=${app.player.position()} bright=$bright/$total webLoc=${loc.toList()} " +
+            "debug=${js("fantastic.debug()")} visible=${countVisible()} diag=${app.lyrics.diag.value}"
+        Log.i("FantasticLyrics", "live $info")
+        assertEquals(info, LyricsController.Status.Ready, app.lyrics.status.value)
+        assertTrue(info, bright > 200)
+    }
+
     private fun countVisible(): String = js(
         """(() => {
           const h = innerHeight;
