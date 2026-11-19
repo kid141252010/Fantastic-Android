@@ -64,6 +64,12 @@ class LyricsEndToEndTest {
     private val server = MockWebServer()
     private var oldBaseUrl: String? = null
 
+    @org.junit.Before
+    fun setUp() {
+        // 播放页会记住上次的页面；测试从封面页开始，点「歌词」才是打开
+        app.prefs.playerPage = "cover"
+    }
+
     @After
     fun tearDown() {
         oldBaseUrl?.let { app.prefs.baseUrl = it }
@@ -180,6 +186,33 @@ class LyricsEndToEndTest {
         Log.i("FantasticLyrics", "live $info")
         assertEquals(info, LyricsController.Status.Ready, app.lyrics.status.value)
         assertTrue(info, bright > 100)
+
+        // 歌词左边缘与封面 / 按钮对齐：播放页内容左边距 32dp
+        val density = instrumentation.targetContext.resources.displayMetrics.density
+        // 取可见的非对唱主歌词行文字左缘（AMLL 主行是 margin:-1em + padding:1em，要加回 padding），取中位数
+        val alignRaw = js(
+            """(() => { const rs = [...document.querySelectorAll('#lyrics .SZG9Ha_lyricLineWrapper:not(.SZG9Ha_isDuetWrapper) .SZG9Ha_lyricMainLine')]
+              .map((e) => [e.getBoundingClientRect(), parseFloat(getComputedStyle(e).paddingLeft) || 0]).filter(([r]) => r.width > 0 && r.bottom > 0 && r.top < innerHeight).map(([r, p]) => r.left + p).sort((a, b) => a - b);
+              const odd = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim() && e.getBoundingClientRect().left < 0)
+                .slice(0, 3).map((e) => e.className + ':' + e.textContent.slice(0, 8) + '@' + Math.round(e.getBoundingClientRect().left));
+              return JSON.stringify({ left: rs.length ? rs[rs.length >> 1] * devicePixelRatio : -1, n: rs.length, all: rs.slice(0, 5), odd }); })()""",
+        )
+        Log.i("FantasticLyrics", "align raw=$alignRaw")
+        val textLeft = Regex("left\\\\?\":(-?[0-9.]+)").find(alignRaw)?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
+        val screenLeft = loc[0] + textLeft
+        val expected = 32 * density
+        Log.i("FantasticLyrics", "align textLeft=$screenLeft expected=$expected")
+        assertTrue("lyrics left $screenLeft vs $expected raw=$alignRaw", textLeft >= 0 && kotlin.math.abs(screenLeft - expected) <= 4 * density)
+
+        // 在歌词上下滑不应收起播放页；页面选择被记住
+        val cx = loc[0] + web.width / 2
+        val cy = loc[1] + web.height / 3
+        ParcelFileDescriptor.AutoCloseInputStream(
+            instrumentation.uiAutomation.executeShellCommand("input swipe $cx $cy $cx ${cy + web.height / 2} 300"),
+        ).use { it.readBytes() }
+        Thread.sleep(1500)
+        compose.onNodeWithContentDescription("歌词").assertExists()
+        assertEquals("lyrics", app.prefs.playerPage)
     }
 
     private fun countVisible(): String = js(
