@@ -197,19 +197,22 @@ class LyricsEndToEndTest {
             return n
         }
         val steps = linkedMapOf<String, String>()
-        compose.runOnUiThread { web.invalidate() }
-        Thread.sleep(1500); steps["invalidate"] = "${brightNow()}"
-        compose.runOnUiThread { web.visibility = android.view.View.INVISIBLE }
-        Thread.sleep(300)
-        compose.runOnUiThread { web.visibility = android.view.View.VISIBLE }
-        Thread.sleep(1500); steps["visibilityToggle"] = "${brightNow()}"
-        compose.runOnUiThread { web.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null) }
-        Thread.sleep(1500); steps["hardwareLayer"] = "${brightNow()}"
-        compose.runOnUiThread { web.setLayerType(android.view.View.LAYER_TYPE_NONE, null) }
-        js("document.getElementById('lyrics').style.maskImage='none';document.getElementById('lyrics').style.webkitMaskImage='none'")
+        val styleJs = "(()=>{let st=document.getElementById('dbgst');if(!st){st=document.createElement('style');st.id='dbgst';document.head.append(st)}return t=>{st.textContent=t}})()"
+        js("window.__dbg=$styleJs")
+        js("__dbg('#lyrics *{mix-blend-mode:normal!important}')")
+        Thread.sleep(1500); steps["noBlend"] = "${brightNow()}"
+        js("__dbg('html{background:rgba(0,0,0,0.01)}')")
+        Thread.sleep(1500); steps["almostTransparentBg"] = "${brightNow()}"
+        js("__dbg('#lyrics{mask-image:none!important;-webkit-mask-image:none!important}')")
         Thread.sleep(1500); steps["noMask"] = "${brightNow()}"
-        js("document.documentElement.style.background='#202020'")
-        Thread.sleep(1500); steps["opaqueBg"] = "${brightNow()}|" + js("JSON.stringify([...document.querySelectorAll('#lyrics *')].filter(e=>!e.childElementCount&&e.textContent.trim()).slice(0,3).map(e=>{const s=getComputedStyle(e);return [e.textContent.slice(0,6),s.color,s.opacity,s.filter,s.visibility,s.display,getComputedStyle(e.parentElement).opacity]}))")
+        js("__dbg('#lyrics *{mix-blend-mode:normal!important} #lyrics{mask-image:none!important;-webkit-mask-image:none!important}')")
+        Thread.sleep(1500); steps["noBlendNoMask"] = "${brightNow()}"
+        js("__dbg('')")
+        Thread.sleep(1500); steps["reset"] = "${brightNow()}"
+        js("__dbg('html{background:#202020}')")
+        Thread.sleep(1500); steps["opaqueBg"] = "${brightNow()}"
+        js("__dbg('html{background:#202020} #lyrics *{mix-blend-mode:normal!important}')")
+        Thread.sleep(1500); steps["opaqueNoBlend"] = "${brightNow()}"
         screencap("/data/local/tmp/lyrics-live2.png")
         compose.runOnUiThread {
             (web.parent as? android.view.ViewGroup)?.removeView(web)
