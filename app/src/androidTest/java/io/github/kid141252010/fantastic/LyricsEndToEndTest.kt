@@ -178,6 +178,46 @@ class LyricsEndToEndTest {
         val info = "playing=$playing pos=$pos bright=$bright/$total webLoc=${loc.toList()} " +
             "debug=${js("fantastic.debug()")} visible=${countVisible()} diag=${app.lyrics.diag.value}"
         Log.i("FantasticLyrics", "live $info")
+        // 找原因：依次尝试几种干预，看哪一种能让歌词画出来
+        fun brightNow(): Int {
+            val l = IntArray(2)
+            compose.runOnUiThread { web.getLocationOnScreen(l) }
+            val img = instrumentation.uiAutomation.takeScreenshot() ?: return -1
+            var n = 0
+            var y = l[1].coerceAtLeast(0)
+            while (y < (l[1] + web.height).coerceAtMost(img.height)) {
+                var x = l[0].coerceAtLeast(0)
+                while (x < (l[0] + web.width).coerceAtMost(img.width)) {
+                    val c = img.getPixel(x, y)
+                    if ((android.graphics.Color.red(c) * 3 + android.graphics.Color.green(c) * 6 + android.graphics.Color.blue(c)) / 10 > 170) n++
+                    x += 2
+                }
+                y += 2
+            }
+            return n
+        }
+        val steps = linkedMapOf<String, String>()
+        compose.runOnUiThread { web.invalidate() }
+        Thread.sleep(1500); steps["invalidate"] = "${brightNow()}"
+        compose.runOnUiThread { web.visibility = android.view.View.INVISIBLE }
+        Thread.sleep(300)
+        compose.runOnUiThread { web.visibility = android.view.View.VISIBLE }
+        Thread.sleep(1500); steps["visibilityToggle"] = "${brightNow()}"
+        compose.runOnUiThread { web.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null) }
+        Thread.sleep(1500); steps["hardwareLayer"] = "${brightNow()}"
+        compose.runOnUiThread { web.setLayerType(android.view.View.LAYER_TYPE_NONE, null) }
+        js("document.getElementById('lyrics').style.maskImage='none';document.getElementById('lyrics').style.webkitMaskImage='none'")
+        Thread.sleep(1500); steps["noMask"] = "${brightNow()}"
+        js("document.documentElement.style.background='#202020'")
+        Thread.sleep(1500); steps["opaqueBg"] = "${brightNow()}|" + js("JSON.stringify([...document.querySelectorAll('#lyrics *')].filter(e=>!e.childElementCount&&e.textContent.trim()).slice(0,3).map(e=>{const s=getComputedStyle(e);return [e.textContent.slice(0,6),s.color,s.opacity,s.filter,s.visibility,s.display,getComputedStyle(e.parentElement).opacity]}))")
+        screencap("/data/local/tmp/lyrics-live2.png")
+        compose.runOnUiThread {
+            (web.parent as? android.view.ViewGroup)?.removeView(web)
+            val root = compose.activity.window.decorView as android.view.ViewGroup
+            root.addView(web, android.view.ViewGroup.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, 600))
+        }
+        Thread.sleep(2500); steps["reparentDecor"] = "${brightNow()}"
+        Log.i("FantasticLyrics", "live steps $steps")
         assertEquals(info, LyricsController.Status.Ready, app.lyrics.status.value)
         assertTrue(info, bright > 200)
     }
