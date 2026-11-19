@@ -71,6 +71,13 @@ object LyricsWebView {
      */
     private class ModuleAwareAssets(private val inner: WebViewAssetLoader.PathHandler) : WebViewAssetLoader.PathHandler {
         override fun handle(path: String): WebResourceResponse? {
+            // 词典以 .gz.bin 打包（aapt 不保留 .gz 资源原名），页面仍按 .gz 请求
+            if (path.endsWith(".gz")) {
+                val response = inner.handle("$path.bin") ?: return null
+                response.mimeType = "application/gzip"
+                response.encoding = null
+                return response
+            }
             val response = inner.handle(path) ?: return null
             when {
                 path.endsWith(".mjs") -> response.mimeType = "text/javascript"

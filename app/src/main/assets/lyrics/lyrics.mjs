@@ -82,7 +82,9 @@ view.addEventListener('line-click', (event) => {
 });
 
 let lastFrame = 0;
+let frames = 0;
 function frame(ts) {
+  if (++frames % 30 === 0 && fixSize()) relayout();
   view.setCurrentTime(Math.round(now()));
   view.update(lastFrame ? ts - lastFrame : 0);
   lastFrame = ts;
@@ -90,7 +92,27 @@ function frame(ts) {
 }
 requestAnimationFrame(frame);
 
+let laidOut = { w: -1, h: -1 };
+/*
+ * AMLL 只渲染「在可视范围内」的行，范围取自它自己 ResizeObserver 记下的 size。
+ * WebView 在后台（未挂到界面）加载时 ResizeObserver 记到 0 高度，挂上后安卓 WebView 113 不一定再回调，
+ * 结果所有行都被判定在范围外、一行都不插入 DOM（真机/模拟器上歌词全空）。这里直接用元素实际尺寸校正。
+ */
+function fixSize() {
+  const el = view.getElement();
+  // 后台加载的 WebView 里 100% 高度一直解析成 0（模拟器 WebView 113 实测），直接写像素高度
+  if (innerHeight > 0 && el.style.height !== `${innerHeight}px`) el.style.height = `${innerHeight}px`;
+  const w = el.clientWidth;
+  const h = el.clientHeight;
+  if (!w || !h || (view.size?.[0] === w && view.size?.[1] === h)) return false;
+  view.size[0] = w;
+  view.size[1] = h;
+  try { view.onResize?.(); } catch { /* 旧版 AMLL 没有 */ }
+  return true;
+}
 function relayout() {
+  laidOut = { w: innerWidth, h: innerHeight };
+  fixSize();
   if (lines.length) {
     view.setLyricLines(lines, Math.round(now()));
     view.setCurrentTime(Math.round(now()), true);
@@ -103,6 +125,8 @@ globalThis.fantastic = {
     try {
       const song = json ? selectSong(JSON.parse(json).candidates, prefer) : null;
       lines = song ? toAmllLines(song, options) : [];
+      laidOut = { w: innerWidth, h: innerHeight };
+      fixSize();
       view.setLyricLines(lines, Math.round(now()));
       view.setCurrentTime(Math.round(now()), true);
       if (json) bridge.status(lines.length ? 'ready' : 'missing');
@@ -121,13 +145,24 @@ globalThis.fantastic = {
     if (playing) view.resume(); else view.pause();
     if (seek) view.setCurrentTime(Math.round(pos), true);
   },
+  /** 原生在 WebView 挂上界面、尺寸变化后调用：后台加载时排版用的是 0 尺寸，必须重排 */
+  relayout() {
+    if (innerWidth !== laidOut.w || innerHeight !== laidOut.h) relayout();
+  },
+  /** 测试 / 诊断用 */
+  debug() {
+    const els = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim());
+    const r = els[0]?.getBoundingClientRect();
+    return JSON.stringify({
+      iw: innerWidth, ih: innerHeight, laidOut, amllSize: view.size, el: [view.getElement().clientWidth, view.getElement().clientHeight], host: document.getElementById('lyrics').clientHeight, body: document.body.clientHeight, frames, lines: lines.length, textEls: els.length,
+      first: r ? [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] : null,
+      hidden: document.hidden,
+    });
+  },
 };
 
-// WebView 先在后台加载（宽高为 0），挂到界面上才有尺寸；尺寸变化时重新排版
-let lastWidth = innerWidth;
-addEventListener('resize', () => {
-  if (innerWidth !== lastWidth) { lastWidth = innerWidth; relayout(); }
-});
+// WebView 先在后台加载（宽高为 0），挂到界面上才有尺寸；宽或高变化都重新排版（AMLL 的行位置依赖高度）
+addEventListener('resize', () => globalThis.fantastic.relayout());
 
 void ensureWordSegmenter(setWordSegmenter, relayout);
 bridge.ready();

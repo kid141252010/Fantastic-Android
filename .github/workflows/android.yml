@@ -62,15 +62,12 @@ jobs:
           target: google_apis
           arch: x86_64
           disable-animations: true
-          script: |
-            gradle :app:connectedDebugAndroidTest --stacktrace || (adb logcat -d -s FantasticLyrics TestRunner AndroidRuntime chromium | tail -200; exit 1)
-            adb pull /data/local/tmp/lyrics.png lyrics.png
-            echo "LYRICS_PNG_BASE64_BEGIN"; base64 -w0 lyrics.png; echo; echo "LYRICS_PNG_BASE64_END"
+          script: ./scripts/ci-instrumented.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lyrics-screenshot-${{ github.run_number }}
-          path: lyrics.png
+          path: lyrics*.png
           if-no-files-found: ignore
 
   # main 上的每次构建都更新 nightly 预发布，手机上直接下载 APK

@@ -5,7 +5,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import android.os.Build
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 
 /** Apple Music 的品牌红。 */
 val AppleRed = Color(0xFFFA2D48)
@@ -33,4 +37,18 @@ private val Dark = darkColorScheme(
 @Composable
 fun FantasticTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = if (isSystemInDarkTheme()) Dark else Light, content = content)
+}
+
+/**
+ * 标签栏选中色：Android 12+ 用 Material You 动态取色（录屏里 Apple Music 跟随系统强调色，是蓝色），
+ * 低版本用 Apple 蓝。
+ */
+@Composable
+fun TabAccent(): Color {
+    val dark = isSystemInDarkTheme()
+    if (Build.VERSION.SDK_INT >= 31) {
+        val context = LocalContext.current
+        return (if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)).primary
+    }
+    return if (dark) Color(0xFF0A84FF) else Color(0xFF007AFF)
 }

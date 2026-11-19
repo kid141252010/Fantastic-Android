@@ -26,10 +26,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.kid141252010.fantastic.BuildConfig
 import io.github.kid141252010.fantastic.data.Prefs
+import io.github.kid141252010.fantastic.lyrics.LyricsController
 
 @Composable
-fun SettingsScreen(prefs: Prefs, onClose: () -> Unit) {
+fun SettingsScreen(prefs: Prefs, lyrics: LyricsController, onClose: () -> Unit) {
+    val diag by lyrics.diag.collectAsStateWithLifecycle()
+    val clipboard = LocalClipboardManager.current
     var baseUrl by remember { mutableStateOf(prefs.baseUrl) }
     var storefront by remember { mutableStateOf(prefs.storefront) }
     var quality by remember { mutableStateOf(prefs.qqQuality) }
@@ -78,5 +85,19 @@ fun SettingsScreen(prefs: Prefs, onClose: () -> Unit) {
                 Text(label)
             }
         }
+        Text(
+            "歌词诊断（歌词不显示时点按复制发给开发者）",
+            modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 4.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
+        )
+        val report = "版本 ${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_SHA})\n" + diag.ifEmpty { "还没有播放过歌曲" }
+        Text(
+            report,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { clipboard.setText(AnnotatedString(report)) }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        )
     }
 }

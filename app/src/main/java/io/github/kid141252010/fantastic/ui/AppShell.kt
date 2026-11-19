@@ -2,14 +2,31 @@ package io.github.kid141252010.fantastic.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.GridView
@@ -20,12 +37,10 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,16 +48,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.haze
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.ui.player.MiniPlayer
 import io.github.kid141252010.fantastic.ui.player.NowPlaying
+import io.github.kid141252010.fantastic.ui.player.nowPlayingEnter
+import io.github.kid141252010.fantastic.ui.player.nowPlayingExit
 import io.github.kid141252010.fantastic.ui.search.SearchScreen
 import io.github.kid141252010.fantastic.ui.settings.SettingsScreen
+import io.github.kid141252010.fantastic.ui.theme.TabAccent
 
 enum class Tab(val label: String, val icon: ImageVector) {
     Home("主页", Icons.Rounded.Home),
@@ -52,6 +71,11 @@ enum class Tab(val label: String, val icon: ImageVector) {
     Search("搜索", Icons.Rounded.Search),
 }
 
+/**
+ * 外壳：页面铺满全屏（内容一直延伸到屏幕底部），底部悬浮玻璃迷你播放条 + 玻璃标签栏，
+ * 玻璃取样页面内容做模糊。全屏播放页从迷你条展开，封面共享元素过渡。
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun AppShell(app: FantasticApp) {
     var tab by rememberSaveable { mutableStateOf(Tab.Home) }
@@ -60,55 +84,91 @@ fun AppShell(app: FantasticApp) {
     val player by app.player.state.collectAsStateWithLifecycle()
     // 提前建好歌词控制器：切歌时就预取歌词，打开歌词时不用等
     remember { app.lyrics }
+    val haze = remember { HazeState() }
+    val hasTrack = player.mediaId != null
 
-    Box(Modifier.fillMaxSize()) {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
-            bottomBar = {
-                Column {
-                    if (player.mediaId != null) {
-                        MiniPlayer(player, app.player, onOpen = { nowPlaying = true })
-                    }
-                    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f)) {
-                        Tab.entries.forEach { t ->
-                            NavigationBarItem(
-                                selected = tab == t,
-                                onClick = { tab = t },
-                                icon = { Icon(t.icon, contentDescription = t.label) },
-                                label = { Text(t.label, fontSize = 10.sp) },
-                                colors = NavigationBarItemDefaults.colors(
-                                    indicatorColor = Color.Transparent,
-                                    selectedIconColor = MaterialTheme.colorScheme.primary,
-                                    selectedTextColor = MaterialTheme.colorScheme.primary,
-                                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                ),
-                            )
-                        }
+    val nav = WindowInsets.navigationBars.asPaddingValues()
+    val barsHeight = Dimens.BarBottom + Dimens.TabBarHeight +
+        (if (hasTrack) Dimens.BarGap + Dimens.MiniPlayerHeight else 0.dp) + Dimens.BarGap
+    val barsPadding = PaddingValues(bottom = nav.calculateBottomPadding() + barsHeight)
+
+    SharedTransitionLayout(Modifier.fillMaxSize()) {
+        CompositionLocalProvider(
+            LocalSharedTransition provides this,
+            LocalHaze provides haze,
+            LocalBarsPadding provides barsPadding,
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().haze(haze).statusBarsPadding()) {
+                    when (tab) {
+                        Tab.Search -> SearchScreen(app)
+                        else -> Placeholder(tab, onSettings = { settings = true })
                     }
                 }
-            },
-        ) { padding ->
-            Box(Modifier.padding(padding).fillMaxSize()) {
-                when (tab) {
-                    Tab.Search -> SearchScreen(app)
-                    else -> Placeholder(tab, onSettings = { settings = true })
+
+                Column(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(start = Dimens.Page, end = Dimens.Page, bottom = Dimens.BarBottom),
+                ) {
+                    if (hasTrack) {
+                        AnimatedVisibility(
+                            visible = !nowPlaying,
+                            enter = fadeIn(tween(Motion.Enter, easing = Motion.EmphasizedDecelerate)),
+                            exit = fadeOut(tween(Motion.Exit, easing = Motion.EmphasizedAccelerate)),
+                        ) {
+                            Column {
+                                MiniPlayer(player, app.player, visibility = this@AnimatedVisibility, onOpen = { nowPlaying = true })
+                                Spacer(Modifier.height(Dimens.BarGap))
+                            }
+                        }
+                        if (nowPlaying) Spacer(Modifier.height(Dimens.MiniPlayerHeight + Dimens.BarGap))
+                    }
+                    TabBar(tab, onSelect = { tab = it })
+                }
+
+                AnimatedVisibility(
+                    visible = nowPlaying && hasTrack,
+                    enter = nowPlayingEnter,
+                    exit = nowPlayingExit,
+                ) {
+                    NowPlaying(player, app.player, app.lyrics, visibility = this, onClose = { nowPlaying = false })
+                }
+                if (nowPlaying) BackHandler { nowPlaying = false }
+
+                if (settings) {
+                    SettingsScreen(app.prefs, app.lyrics, onClose = { settings = false })
+                    BackHandler { settings = false }
                 }
             }
         }
+    }
+}
 
-        AnimatedVisibility(
-            visible = nowPlaying && player.mediaId != null,
-            enter = slideInVertically(tween(380)) { it },
-            exit = slideOutVertically(tween(300)) { it },
-        ) {
-            NowPlaying(player, app.player, app.lyrics, onClose = { nowPlaying = false })
-        }
-        if (nowPlaying) BackHandler { nowPlaying = false }
-
-        if (settings) {
-            SettingsScreen(app.prefs, onClose = { settings = false })
-            BackHandler { settings = false }
+/** 悬浮玻璃标签栏：选中项用系统强调色（Material You 动态取色，录屏里是蓝色） */
+@Composable
+private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit) {
+    Glass(CircleShape, Modifier.fillMaxWidth().height(Dimens.TabBarHeight)) {
+        Row(Modifier.fillMaxSize().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+            Tab.entries.forEach { t ->
+                val color = if (t == selected) TabAccent() else MaterialTheme.colorScheme.onSurface
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = ripple(bounded = false, radius = 32.dp),
+                        ) { onSelect(t) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(t.icon, contentDescription = t.label, tint = color, modifier = Modifier.size(26.dp))
+                    Text(t.label, color = color, fontSize = 10.sp, lineHeight = 12.sp)
+                }
+            }
         }
     }
 }
@@ -125,7 +185,7 @@ private fun Placeholder(tab: Tab, onSettings: () -> Unit) {
         }
         Text(
             "这一页还在做，先去「搜索」试试 QQ 音乐播放。",
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(horizontal = Dimens.Page, vertical = 8.dp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

@@ -41,7 +41,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LargeTitle
+import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.SongRow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -85,7 +87,7 @@ fun SearchScreen(app: FantasticApp) {
         // 搜索框
         Row(
             Modifier
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = Dimens.Page)
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
                 .padding(horizontal = 10.dp, vertical = 9.dp),
@@ -108,7 +110,7 @@ fun SearchScreen(app: FantasticApp) {
             }
         }
         SingleChoiceSegmentedButtonRow(
-            Modifier.padding(horizontal = 16.dp, vertical = 10.dp).fillMaxWidth(),
+            Modifier.padding(horizontal = Dimens.Page, vertical = 10.dp).fillMaxWidth(),
         ) {
             val options = listOf(Source.Apple to "Apple Music", Source.QQ to "QQ 音乐")
             options.forEachIndexed { i, (s, label) ->
@@ -126,10 +128,10 @@ fun SearchScreen(app: FantasticApp) {
             }
             error != null -> Text(
                 "搜索失败：$error",
-                Modifier.padding(16.dp),
+                Modifier.padding(Dimens.Page),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            else -> LazyColumn(Modifier.fillMaxSize()) {
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = LocalBarsPadding.current) {
                 itemsIndexed(results, key = { _, t -> "${t.source}:${t.id}" }) { i, t ->
                     SongRow(t, playing = player.mediaId == "qq:${t.id}") {
                         if (t.source == Source.Apple) {
