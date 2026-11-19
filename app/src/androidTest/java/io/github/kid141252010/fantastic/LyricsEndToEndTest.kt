@@ -104,16 +104,14 @@ class LyricsEndToEndTest {
         compose.waitForIdle()
         Thread.sleep(4000)
 
-        val visible = js(
-            """(() => {
-              const h = innerHeight;
-              return [...document.querySelectorAll('#lyrics *')].filter((e) => {
-                if (e.childElementCount || !e.textContent.trim()) return false;
-                const r = e.getBoundingClientRect();
-                return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < h;
-              }).length;
-            })()""",
-        )
+        // 行从下方弹簧滑入，给最多 10 秒
+        var visible = "0"
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            visible = countVisible()
+            if ((visible.toIntOrNull() ?: 0) > 5) break
+            Thread.sleep(500)
+        }
         val dbg = js("fantastic.debug()")
         val web = app.lyrics.webView
         val info: String = "debug=$dbg " + "status=${app.lyrics.status.value} error=${app.lyrics.error.value} visible=$visible " +
@@ -124,4 +122,15 @@ class LyricsEndToEndTest {
         assertEquals(info, LyricsController.Status.Ready, app.lyrics.status.value)
         assertTrue(info, (visible.toIntOrNull() ?: 0) > 5)
     }
+
+    private fun countVisible(): String = js(
+        """(() => {
+          const h = innerHeight;
+          return [...document.querySelectorAll('#lyrics *')].filter((e) => {
+            if (e.childElementCount || !e.textContent.trim()) return false;
+            const r = e.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < h;
+          }).length;
+        })()""",
+    )
 }

@@ -84,7 +84,7 @@ view.addEventListener('line-click', (event) => {
 let lastFrame = 0;
 let frames = 0;
 function frame(ts) {
-  if (++frames % 30 === 0 && fixSize()) relayout();
+  if (++frames % 10 === 0 && fixSize()) relayout();
   view.setCurrentTime(Math.round(now()));
   view.update(lastFrame ? ts - lastFrame : 0);
   lastFrame = ts;
