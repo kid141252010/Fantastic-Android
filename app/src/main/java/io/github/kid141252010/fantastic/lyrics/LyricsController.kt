@@ -3,7 +3,10 @@ package io.github.kid141252010.fantastic.lyrics
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
+import android.util.Log
 import android.view.View
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -50,7 +53,7 @@ class LyricsController(
 
     val webView: WebView by lazy {
         val loader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+            .addPathHandler("/assets/", ModuleAwareAssets(WebViewAssetLoader.AssetsPathHandler(context)))
             .build()
         createWebView(loader)
     }
@@ -72,6 +75,12 @@ class LyricsController(
 
                 // 歌词页不跳转到任何地方
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                    Log.d("FantasticLyrics", "${message.messageLevel()} ${message.message()} (${message.sourceId()}:${message.lineNumber()})")
+                    return true
+                }
             }
             addJavascriptInterface(Bridge(), "FantasticBridge")
             addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
@@ -163,6 +172,18 @@ class LyricsController(
         @JavascriptInterface
         fun status(value: String) {
             scope.launch { _status.value = if (value == "ready") Status.Ready else Status.Missing }
+        }
+    }
+
+    /**
+     * AssetsPathHandler 按扩展名猜 MIME，不认识 .mjs 会给 text/plain，
+     * 而 ES 模块脚本要求 JavaScript MIME，否则整个歌词页加载失败
+     */
+    private class ModuleAwareAssets(private val inner: WebViewAssetLoader.PathHandler) : WebViewAssetLoader.PathHandler {
+        override fun handle(path: String): WebResourceResponse? {
+            val response = inner.handle(path) ?: return null
+            if (path.endsWith(".mjs")) response.mimeType = "text/javascript"
+            return response
         }
     }
 
