@@ -1,0 +1,63 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 同一分支只保留最新一次构建，旧构建被取消，不会晚于新构建发布 nightly
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      # 固定 debug 签名，这样新包能直接覆盖安装旧包
+      - name: Debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
+      - name: Build
+        run: gradle :app:assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fantastic-debug-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/*.apk
+
+      # main 上的每次构建都更新 nightly 预发布，手机上直接下载 APK
+      - name: Nightly release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 手动重跑旧构建时，main 已经前进，不覆盖更新的 nightly
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "main 已前进到 $head，跳过发布"
+            exit 0
+          fi
+          cp app/build/outputs/apk/debug/app-debug.apk fantastic-debug.apk
+          gh release delete nightly --yes --cleanup-tag || true
+          gh release create nightly fantastic-debug.apk --prerelease \
+            --title "Nightly #${{ github.run_number }}" \
+            --notes "main @ ${GITHUB_SHA::7}" --target "$GITHUB_SHA"
