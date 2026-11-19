@@ -2,6 +2,11 @@ package io.github.kid141252010.fantastic.ui.player
 
 import android.view.ViewGroup
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.EnterTransition
@@ -191,64 +196,124 @@ fun NowPlaying(
                         .clickable(onClick = onClose),
                 )
             }
-            AnimatedContent(
-                targetState = page,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                transitionSpec = {
-                    fadeIn(tween(Motion.Enter, easing = Motion.Emphasized)) togetherWith
-                        fadeOut(tween(Motion.Exit, easing = Motion.Emphasized))
-                },
-                label = "lyrics",
-            ) { shown ->
-                // 歌词切换时封面在大图与小图之间过渡；刚展开时由外层动画负责从迷你条飞过来
-                val art = if (transition.isRunning) this else visibility
-                if (shown != Page.Cover) {
-                    Column(Modifier.fillMaxSize()) {
-                        Header(state, art, dismissDrag)
-                        if (shown == Page.Lyrics) {
-                            LyricsPane(lyrics, lyricsStatus, lyricsError, Modifier.weight(1f).fillMaxWidth())
-                        } else {
-                            QueuePane(state, player, Modifier.weight(1f).fillMaxWidth())
-                        }
-                    }
-                } else {
-                    Column(Modifier.fillMaxSize().then(dismissDrag), verticalArrangement = Arrangement.Center) {
-                        AsyncImage(
-                            model = state.artworkUri,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .sharedArtwork(art)
-                                .fillMaxWidth()
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.White.copy(alpha = 0.1f)),
-                        )
-                        Spacer(Modifier.height(28.dp))
-                        Text(
-                            state.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            state.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 20.sp,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+            // 歌词页播放中 3 秒没操作：控制区淡出，歌词一直铺到底（Apple Music）；任何触摸都让它回来
+            var lastTouch by remember { mutableLongStateOf(System.currentTimeMillis()) }
+            var controlsShown by remember { mutableStateOf(true) }
+            val autoHide = page == Page.Lyrics && state.isPlaying
+            LaunchedEffect(autoHide, lastTouch) {
+                controlsShown = true
+                if (autoHide) {
+                    delay(IdleHideMs)
+                    controlsShown = false
                 }
             }
-            Spacer(Modifier.height(16.dp))
-            Controls(state, player)
-            // 底部开关：歌词（左）、待播清单（右）。图标底色的外缘与封面、歌词左右边缘对齐
-            Row(
-                Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+            var controlsHeight by remember { mutableIntStateOf(0) }
+            // 歌词底部渐隐的终点（像素）：控制区显示时停在控制区上沿，隐藏后到屏幕底部
+            val lyricsBottom by animateFloatAsState(
+                if (controlsShown) controlsHeight.toFloat() else 0f,
+                tween(if (controlsShown) Motion.Enter else 600, easing = Motion.Emphasized), label = "lyricsBottom",
+            )
+            val controlsAlpha by animateFloatAsState(
+                if (controlsShown) 1f else 0f,
+                tween(if (controlsShown) Motion.Enter else 600, easing = Motion.Emphasized), label = "controlsAlpha",
+            )
+            val controlsPad = with(density) { controlsHeight.toDp() }
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .pointerInput(Unit) {
+                        // 只观察不消费：Initial 阶段先于歌词 WebView 看到触摸
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent(PointerEventPass.Initial)
+                                val t = System.currentTimeMillis()
+                                if (t - lastTouch > 250) lastTouch = t
+                            }
+                        }
+                    },
             ) {
-                PageToggle(Icons.Rounded.FormatQuote, "歌词", page == Page.Lyrics, lyricsAvailable) { open(Page.Lyrics) }
-                PageToggle(Icons.AutoMirrored.Rounded.QueueMusic, "待播清单", page == Page.Queue, state.queue.isNotEmpty()) { open(Page.Queue) }
+                AnimatedContent(
+                    targetState = page,
+                    modifier = Modifier.fillMaxSize(),
+                    transitionSpec = {
+                        fadeIn(tween(Motion.Enter, easing = Motion.Emphasized)) togetherWith
+                            fadeOut(tween(Motion.Exit, easing = Motion.Emphasized))
+                    },
+                    label = "page",
+                ) { shown ->
+                    // 歌词切换时封面在大图与小图之间过渡；刚展开时由外层动画负责从迷你条飞过来
+                    val art = if (transition.isRunning) this else visibility
+                    when (shown) {
+                        Page.Lyrics -> Column(Modifier.fillMaxSize()) {
+                            Header(state, art, dismissDrag)
+                            // 歌词铺到底，控制区盖在上面；底部渐隐跟着控制区走
+                            LyricsPane(lyrics, lyricsStatus, lyricsError, { lyricsBottom }, Modifier.weight(1f).fillMaxWidth())
+                        }
+                        Page.Queue -> Column(Modifier.fillMaxSize().padding(bottom = controlsPad)) {
+                            Header(state, art, dismissDrag)
+                            QueuePane(state, player, Modifier.weight(1f).fillMaxWidth())
+                        }
+                        Page.Cover -> Column(
+                            Modifier.fillMaxSize().padding(bottom = controlsPad).then(dismissDrag),
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            AsyncImage(
+                                model = state.artworkUri,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .sharedArtwork(art)
+                                    .fillMaxWidth()
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.White.copy(alpha = 0.1f)),
+                            )
+                            Spacer(Modifier.height(28.dp))
+                            Text(
+                                state.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                state.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 20.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+                if (controlsShown || controlsAlpha > 0.01f) {
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .graphicsLayer { alpha = controlsAlpha }
+                            .onSizeChanged { controlsHeight = it.height },
+                    ) {
+                        Spacer(Modifier.height(16.dp))
+                        Controls(state, player)
+                        // 底部开关和 Apple Music 一样排在上一首 / 下一首正下方：歌词（左）、待播清单（右）
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                        ) {
+                            Box(Modifier.width(64.dp), contentAlignment = Alignment.Center) {
+                                PageToggle(Icons.Rounded.FormatQuote, "歌词", page == Page.Lyrics, lyricsAvailable) { open(Page.Lyrics) }
+                            }
+                            Spacer(Modifier.width(80.dp))
+                            Box(Modifier.width(64.dp), contentAlignment = Alignment.Center) {
+                                PageToggle(Icons.AutoMirrored.Rounded.QueueMusic, "待播清单", page == Page.Queue, state.queue.isNotEmpty()) {
+                                    open(Page.Queue)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+private const val IdleHideMs = 3000L
 
 enum class Page(val key: String) {
     Cover("cover"), Lyrics("lyrics"), Queue("queue");
@@ -330,15 +395,18 @@ private fun QueuePane(state: PlayerState, player: PlayerConnection, modifier: Mo
  * 上下边缘渐隐：在离屏层里用 DstIn 乘一条透明→不透明→透明的渐变。
  * 不用网页里的 mask-image（新版 WebView 在播放页里会整块画不出来），由原生对 WebView 整体做。
  */
-fun Modifier.edgeFade(top: Float = 0.1f, bottom: Float = 0.12f): Modifier = this
+fun Modifier.edgeFade(top: Float = 0.1f, bottom: Float = 0.12f, bottomInset: () -> Float = { 0f }): Modifier = this
     .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
     .drawWithContent {
         drawContent()
+        // bottomInset：底部被控制区盖住的高度（像素），渐隐在它上沿结束，下面完全透明
+        val end = (1f - bottomInset() / size.height.coerceAtLeast(1f)).coerceIn(top + bottom, 1f)
         drawRect(
             Brush.verticalGradient(
                 0f to Color.Transparent,
                 top to Color.Black,
-                1f - bottom to Color.Black,
+                end - bottom to Color.Black,
+                end to Color.Transparent,
                 1f to Color.Transparent,
             ),
             blendMode = BlendMode.DstIn,
@@ -384,6 +452,7 @@ private fun LyricsPane(
     lyrics: LyricsController,
     status: LyricsController.Status,
     error: String?,
+    bottomInset: () -> Float,
     modifier: Modifier,
 ) {
     Box(modifier, contentAlignment = Alignment.Center) {
@@ -407,7 +476,7 @@ private fun LyricsPane(
                         val width = constraints.maxWidth + extra
                         val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width))
                         layout(constraints.maxWidth, placeable.height) { placeable.place(-extra / 2, 0) }
-                    }.edgeFade(),
+                    }.edgeFade(bottomInset = bottomInset),
                 )
                 if (status == LyricsController.Status.Loading) {
                     Text("正在加载歌词…", color = Color.White.copy(alpha = 0.6f), fontSize = 15.sp)
