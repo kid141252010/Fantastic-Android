@@ -9,9 +9,9 @@ on:
 permissions:
   contents: write
 
-# 同一分支只保留最新一次构建，旧构建被取消，不会晚于新构建发布 nightly
+# 只取消同一 PR 的旧构建；main 的构建互不取消，发布在下面的 nightly 任务里串行
 concurrency:
-  group: android-${{ github.ref }}
+  group: android-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -44,19 +44,31 @@ jobs:
           name: fantastic-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
 
-      # main 上的每次构建都更新 nightly 预发布，手机上直接下载 APK
-      - name: Nightly release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  # main 上的每次构建都更新 nightly 预发布，手机上直接下载 APK
+  nightly:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # 串行发布：同一时刻只有一个任务改 nightly，排队中的旧任务会被新的替换
+    concurrency:
+      group: nightly
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fantastic-debug-${{ github.run_number }}
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          # 手动重跑旧构建时，main 已经前进，不覆盖更新的 nightly
-          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          # 拿到发布权之后再核对：main 已前进（如重跑旧构建）就不覆盖更新的 nightly
+          head=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
           if [ "$head" != "$GITHUB_SHA" ]; then
             echo "main 已前进到 $head，跳过发布"
             exit 0
           fi
-          cp app/build/outputs/apk/debug/app-debug.apk fantastic-debug.apk
+          cp app-debug.apk fantastic-debug.apk
           gh release delete nightly --yes --cleanup-tag || true
           gh release create nightly fantastic-debug.apk --prerelease \
             --title "Nightly #${{ github.run_number }}" \

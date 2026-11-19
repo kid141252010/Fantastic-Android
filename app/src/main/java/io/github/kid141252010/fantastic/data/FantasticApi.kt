@@ -63,6 +63,15 @@ class FantasticApi(private val prefs: Prefs) {
             AmSearch.serializer(),
         ).results.songs?.data.orEmpty().map { it.toTrack() }
 
+    /** QQ 歌词候选（QRC / LRC 等，均已转成 TTML），原样交给歌词页解析 */
+    suspend fun qqLyricsJson(mid: String): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(url("/qq/song/$mid/lyrics")).build()
+        client.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
+            r.body?.string().orEmpty().ifBlank { throw IOException("歌词响应为空") }
+        }
+    }
+
     /** QQ 播放地址：服务端 302 到 QQ CDN，ExoPlayer 会跟随跳转。 */
     fun qqPlayUrl(mid: String, quality: String) = url("/qq/song/$mid/play?quality=$quality")
 

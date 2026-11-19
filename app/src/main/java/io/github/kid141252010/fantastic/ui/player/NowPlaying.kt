@@ -1,5 +1,13 @@
 package io.github.kid141252010.fantastic.ui.player
 
+import android.view.ViewGroup
+import androidx.compose.material.icons.rounded.FormatQuote
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.kid141252010.fantastic.lyrics.LyricsController
+import io.github.kid141252010.fantastic.ui.Artwork
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -52,9 +60,12 @@ import io.github.kid141252010.fantastic.playback.PlayerState
 import io.github.kid141252010.fantastic.ui.formatTime
 import kotlinx.coroutines.delay
 
-/** 全屏播放页（第一阶段版本）。歌词页（AMLL）在第二阶段接入。 */
+/** 全屏播放页。动画（封面缩放到左上角等）等录屏后还原。 */
 @Composable
-fun NowPlaying(state: PlayerState, player: PlayerConnection, onClose: () -> Unit) {
+fun NowPlaying(state: PlayerState, player: PlayerConnection, lyrics: LyricsController, onClose: () -> Unit) {
+    var showLyrics by rememberSaveable { mutableStateOf(false) }
+    val lyricsStatus by lyrics.status.collectAsStateWithLifecycle()
+    val lyricsAvailable = lyricsStatus == LyricsController.Status.Ready || lyricsStatus == LyricsController.Status.Loading
     var position by remember { mutableLongStateOf(0L) }
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableFloatStateOf(0f) }
@@ -99,27 +110,64 @@ fun NowPlaying(state: PlayerState, player: PlayerConnection, onClose: () -> Unit
                     .background(Color.White.copy(alpha = 0.4f))
                     .clickable(onClick = onClose),
             )
-            Spacer(Modifier.weight(0.5f))
-            AsyncImage(
-                model = state.artworkUri,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color.White.copy(alpha = 0.1f)),
-            )
-            Spacer(Modifier.weight(0.5f))
-            Column(Modifier.fillMaxWidth()) {
-                Text(
-                    state.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+            if (showLyrics) {
+                // 歌词模式：顶部小封面与歌名，中间 AMLL 歌词
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Artwork(state.artworkUri, 60.dp, 6.dp)
+                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                        Text(
+                            state.title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            state.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 15.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Box(Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
+                    when (lyricsStatus) {
+                        LyricsController.Status.Missing, LyricsController.Status.Failed, LyricsController.Status.None ->
+                            Text(
+                                if (lyricsStatus == LyricsController.Status.Failed) "歌词加载失败" else "暂无歌词",
+                                color = Color.White.copy(alpha = 0.6f),
+                            )
+                        else -> AndroidView(
+                            factory = { lyrics.webView.also { (it.parent as? ViewGroup)?.removeView(it) } },
+                            // 歌词左右留白由页面自己控制，铺满宽度
+                            modifier = Modifier.fillMaxSize().layout { measurable, constraints ->
+                                val extra = 28.dp.roundToPx() * 2
+                                val placeable = measurable.measure(
+                                    constraints.copy(minWidth = constraints.maxWidth + extra, maxWidth = constraints.maxWidth + extra),
+                                )
+                                layout(constraints.maxWidth, placeable.height) { placeable.place(-extra / 2, 0) }
+                            },
+                        )
+                    }
+                }
+            } else {
+                Spacer(Modifier.weight(0.5f))
+                AsyncImage(
+                    model = state.artworkUri,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.White.copy(alpha = 0.1f)),
                 )
-                Text(
-                    state.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 20.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
+                Spacer(Modifier.weight(0.5f))
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        state.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        state.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 20.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Spacer(Modifier.height(16.dp))
             val duration = state.durationMs.coerceAtLeast(1)
@@ -162,7 +210,25 @@ fun NowPlaying(state: PlayerState, player: PlayerConnection, onClose: () -> Unit
                     Icon(Icons.Rounded.FastForward, "下一首", tint = Color.White, modifier = Modifier.size(44.dp))
                 }
             }
-            Spacer(Modifier.weight(0.4f))
+            Spacer(Modifier.height(16.dp))
+            // 底部开关：歌词（待播清单在后续阶段）
+            Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                IconButton(onClick = { showLyrics = !showLyrics }, enabled = lyricsAvailable || showLyrics) {
+                    Icon(
+                        Icons.Rounded.FormatQuote,
+                        contentDescription = "歌词",
+                        tint = when {
+                            showLyrics -> Color.White
+                            lyricsAvailable -> Color.White.copy(alpha = 0.55f)
+                            else -> Color.White.copy(alpha = 0.2f)
+                        },
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (showLyrics) Color.White.copy(alpha = 0.2f) else Color.Transparent)
+                            .padding(4.dp),
+                    )
+                }
+            }
         }
     }
 }
