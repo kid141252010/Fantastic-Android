@@ -1,6 +1,7 @@
 # 歌词渲染器
 
 `lyrics.mjs` 保留原生 `FantasticBridge` / `fantastic` 接口，`apple-music-player.mjs` 负责 DOM 排版、跟随、对唱、背景人声与逐词绘制，`apple-music-motion.mjs` 保存独立重写的动画函数。已删除 AMLL 的渲染内核与样式；服务端候选里的 `source: "amll"` 仍表示歌词来源，不代表使用 AMLL 渲染器。
+`lyrics.mjs` adapts provider payloads; the locally maintained `ttml.mjs` parses TTML inside `WebViewAssetLoader`. Neither module draws the playback screen. `NativeLyricsView` and `LyricInkView` render lyrics with Android `RecyclerView` and Canvas; `LyricMotion.kt` owns native timing curves. There is no AMLL rendering engine; candidate `source: "amll"` identifies lyric provenance only.
 
 ## APK 来源与曲线
 
@@ -33,8 +34,8 @@ SHA-256：`49e83b64fccff79310c7dff174e02228dd0455a3d87df4d9655d1e4f8cd2e351`。
 - 对不宜逐字拆分的 Arabic/Indic 文本保留连写；旧 WebView 的中日韩分词继续使用现有词典。对唱宽度 .85、普通行缩放 .98、高亮行 1、字号 34/22、背景人声上间距 22dp 来自 APK 资源。
 - 曲线和参数经过静态提取；尚未进行登录后原版 Apple Music 与移植版的逐帧 A/B 比对，不能声称完整原生事件系统或所有机型上的视觉结果完全一致。
 
-## 上游文件与验证
+## Parser ownership
 
-`ttml.mjs`、`word-segmenter.mjs`、两份词典及其许可证仍由 `scripts/sync-lyrics.sh` 从 Fantastic 的 `web/lyrics/` 同步，版本见 `FANTASTIC_COMMIT`；不要直接修改这些 vendored 文件。同步不会覆盖本地渲染器或重新引入 AMLL。压缩词典以 `.gz.bin` 存放，原生映射回 `.gz` 请求。
+The TTML parser and provider adapter are maintained in this project. Do not overwrite them from a Fantastic checkout. Parsing and rendering remain separate: provider payloads are converted to `LyricSong` in the WebView, and the Android RecyclerView/Canvas displays the result.
 
 设备回归见 `LyricsPageTest`（后台预载后挂载、向前/向后跳转、暂停、切歌清空、真实 DOM 位移验证句前提前量与句后移动时长的区别）和 `LyricsEndToEndTest.lyricsVisibleInNowPlaying`（真实 Compose 播放页布局）。`liveSongPixelsVisible` 另外依赖外部服务器，不属于离线回归。修改后用实际 WebView 截图确认文字像素可见，不能只数 DOM。

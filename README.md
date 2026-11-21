@@ -25,4 +25,6 @@ gradle :app:assembleDebug   # Gradle 8.11、JDK 17、Android SDK 35
 
 ## 许可证
 
-AGPL-3.0
+Apache-2.0
+
+Project-authored code is Apache-2.0. Bundled third-party components retain their own licenses and notices.

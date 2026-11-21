@@ -2,81 +2,76 @@
 
 ## Project Overview
 
-Fantastic Android is a Kotlin/Jetpack Compose client for a user-configured Fantastic server. Search supports QQ Music and Apple Music; native playback currently supports QQ through Media3. Apple Music playback and most non-search tabs are not implemented. Do not mistake UI placeholders or roadmap items for working features. The project is AGPL-3.0.
+Fantastic Android is a Kotlin/Jetpack Compose client for a user-configured Fantastic server. Search supports QQ Music and Apple Music. QQ playback uses Media3; Apple playback is delegated to Fantastic’s web player through `ApplePlaybackEngine`. The app includes library and Apple discovery/radio surfaces; Home remains a placeholder. Project-authored code is Apache-2.0; bundled assets retain their own notices.
 
 ## Architecture & Data Flow
 
-- `FantasticApp` is the process-wide dependency container: eagerly creates `Prefs` and `FantasticApi`, lazily creates `PlayerConnection` and `LyricsController`. Reuse these instances; there is no DI framework.
-- `MainActivity` hosts `FantasticTheme` → `AppShell`. Navigation is Compose state and overlays, not a Navigation component graph. `SearchScreen` debounces input, calls `FantasticApi`, and maps serialized responses into `Track`.
-- Playback: Compose → `PlayerConnection`/`MediaController` → `PlaybackService`/`MediaSession` → `ExoPlayer`. `PlayerState` is exposed as read-only `StateFlow`. QQ stream failures downgrade quality using `Prefs.QQ_QUALITIES`. Keep the exported service's restricted commands for untrusted controllers.
-- Lyrics: media ID changes → `LyricsController` fetches `/qq/song/{mid}/lyrics` → a persistent WebView parses TTML candidates → the page renders lyrics. Native code sends playback anchors every 500 ms while attached; the page extrapolates each frame. Click-to-seek returns through `FantasticBridge.seek`.
-- The WebView loads local ES modules from `https://appassets.androidplatform.net/assets/lyrics/` through `WebViewAssetLoader`, not `file://`. Preserve `ready`/`status`/`seek`, `fantastic.setLyrics`/`sync`/`relayout`/`debug`, and attach-after-background-load behavior when changing renderers.
+- `FantasticApp` is the process-wide manual dependency container. It creates shared `Prefs` and `FantasticApi` instances and lazily provides API clients, `PlayerConnection`, and `LyricsController`; reuse them instead of adding a DI framework.
+- `MainActivity` hosts `FantasticTheme` and `AppShell`. Navigation is Compose state and overlays, not a Navigation component graph. `SearchScreen` debounces input, calls `FantasticApi`, and maps serialized responses to `Track`.
+- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ/NetEase use the native ExoPlayer resolver path; Apple items are handled by `ApplePlaybackEngine` behind the same Media3 session. UI state and commands flow through `PlayerConnection` and read-only `StateFlow`.
+- `MusicLibrary` serializes mutations on an IO coroutine scope, persists snapshots with `AtomicFile`, and exposes immutable state through `StateFlow`.
+- The parser loads local ES modules through `WebViewAssetLoader` at `https://appassets.androidplatform.net/assets/lyrics/`, not `file://`. Preserve the `ready`/`status` bridge, `parseFantasticLyrics` contract, and attach-after-background-load lifecycle. The WebView parses; it does not render the playback surface.
 
 ## Key Directories
 
-Paths below the Kotlin root `app/src/main/java/io/github/kid141252010/fantastic/`:
+Paths below are relative to `app/src/main/java/io/github/kid141252010/fantastic/` unless stated otherwise:
 
-- `data/`: server preferences, OkHttp API access, serializable DTOs and `Track` conversion.
-- `playback/`: service-owned player and UI-facing controller/state.
-- `lyrics/`: WebView asset routing, lifecycle, playback synchronization and diagnostics.
-- `ui/`: Compose shell, shared dimensions/motion, player/search/settings screens and theme.
-
-Other working areas: `app/src/main/assets/lyrics/` for the lyric page, `app/src/androidTest/` for device tests and fixtures, `scripts/` for asset synchronization and CI diagnostics. Keep downloaded tools, decompilation output, screenshots and other temporary files under ignored `.work/` inside this repository.
+- `data/`: preferences, Fantastic/Apple/QQ API clients, DTOs, and `Track` conversion.
+- `playback/`: service-owned player, Media3 session, and UI-facing connection/state.
+- `lyrics/`: lyric loading/parsing lifecycle, synchronization, RecyclerView layout, Canvas renderer, and motion curves.
+- `ui/`: Compose shell, search, player, settings, and theme.
+- `app/src/main/assets/lyrics/`: local parser modules, the optional ICU-backed word segmenter, and third-party dictionary notices.
+- `scripts/sync-lyrics.sh`: refreshes only the permissively licensed ICU dictionary; it must not overwrite local parser modules.
 
 ## Development Commands
 
-Use an installed Gradle; this repository has no Gradle wrapper. Run from the root:
+There is no Gradle wrapper. Use Gradle 8.11.1, JDK 17, and Android SDK 35 from the repository root:
 
 ```sh
 gradle :app:assembleDebug
-gradle :app:lintDebug
-gradle :app:connectedDebugAndroidTest
-# Focused WebView regression; requires a connected emulator/device:
-gradle :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.kid141252010.fantastic.lyrics.LyricsPageTest
-# Install and launch:
+gradle :app:lintDebug # standard AGP task; not run by CI
 gradle :app:installDebug
 adb shell am start -n io.github.kid141252010.fantastic/.MainActivity
-# CI tests plus logcat and screenshots; Bash required:
-bash scripts/ci-instrumented.sh
-# Refresh vendored lyric assets from a local Fantastic checkout:
 bash scripts/sync-lyrics.sh /path/to/Fantastic
+# CI installs Temurin JDK 17 and Gradle 8.11.1, then runs:
+gradle :app:assembleDebug --stacktrace
 ```
 
-Debug APK: `app/build/outputs/apk/debug/app-debug.apk`. Device tests require an unlocked device/emulator visible to `adb`; successful compilation alone does not verify the lyric surface.
+The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in ignored `local.properties` or configure the Android SDK through the environment; do not commit machine-specific paths.
 
 ## Code Conventions & Common Patterns
 
-- Follow Kotlin official style (`kotlin.code.style=official`): four-space indentation, `PascalCase` types/composables, `camelCase` functions/properties. Existing comments and user-visible messages are predominantly Chinese.
-- Keep screen-local state in `remember`/`rememberSaveable`; observe shared flows with `collectAsStateWithLifecycle`. Keep player ownership in the service, not composables.
-- Use `LaunchedEffect` for keyed UI work, cancellable jobs for lyric loads, and `Dispatchers.IO` for blocking HTTP. Rethrow `CancellationException` before handling general failures. Existing API code closes responses with `use` and reports HTTP/empty-body errors explicitly.
-- Show failures through existing error/status state and `FantasticLyrics` diagnostics; do not replace errors with a silently empty page. DTOs use kotlinx.serialization and tolerate unknown response keys.
-- Reuse `ui/Design.kt` dimensions, motion and composition locals. Lyrics deliberately extend beyond horizontal player padding to avoid clipping scaled text.
-- The lyric page is plain `.mjs`/CSS/HTML, without a JS bundler. `apple-music-player.mjs` and `apple-music-motion.mjs` are the local renderer and APK-derived curve implementation; do not reintroduce AMLL. Files listed in `scripts/sync-lyrics.sh` are vendored TTML/segmentation assets; preserve provenance/licenses. The candidate source name `amll` is a lyric provider, not a rendering dependency.
+- Follow Kotlin official style (`kotlin.code.style=official`): four-space indentation, `PascalCase` types/composables, and `camelCase` functions/properties. User-visible strings and existing comments are predominantly Chinese.
+- Keep screen-local Compose state in `remember`/`rememberSaveable`; collect shared flows with `collectAsStateWithLifecycle`. Keep playback ownership in the service.
+- Use `LaunchedEffect` for keyed UI work and cancellable jobs for lyric loads. Rethrow `CancellationException` before handling other failures; run blocking HTTP work on `Dispatchers.IO`.
+- Close OkHttp responses with `use`; report HTTP and empty-body errors explicitly. DTOs use kotlinx.serialization and tolerate unknown response keys. Preserve existing error/status state and `FantasticLyrics` diagnostics instead of silently returning empty content.
+- Reuse `ui/Design.kt` dimensions, motion, and composition locals. Lyrics intentionally extend beyond player horizontal padding to avoid clipping scaled text.
+- Keep lyric-provider parsing in locally maintained `.mjs`/HTML modules; playback rendering and timing are native Kotlin. Candidate `source: "amll"` identifies provenance, not a rendering dependency.
 
 ## Important Files
 
-- `app/src/main/AndroidManifest.xml`: application/activity/service registration, playback permissions, cleartext-server support.
-- `FantasticApp.kt`, `MainActivity.kt`, `ui/AppShell.kt`: dependency and UI entry points, relative to the Kotlin root above.
-- `data/Prefs.kt`: normalized server URL, storefront and quality selection; never add private credentials to source.
-- `lyrics/LyricsController.kt`, `lyrics/LyricsWebView.kt`: lifecycle/bridge contracts, script MIME types and compressed dictionary asset mapping.
-- `app/build.gradle.kts`, root Gradle files: Android/dependency versions and signing configuration.
-- `.github/workflows/android.yml`: authoritative CI build, device-test matrix and nightly publication.
-- `app/src/main/assets/lyrics/README.md` and `FANTASTIC_COMMIT`: lyric asset ownership and upstream provenance.
+- `app/src/main/AndroidManifest.xml`: application, launcher activity, playback service, permissions, and cleartext-server support.
+- `FantasticApp.kt`, `MainActivity.kt`, `ui/AppShell.kt`: dependency container and app entry points.
+- `data/Prefs.kt`, `data/FantasticApi.kt`, `data/AppleCatalogApi.kt`: settings and server/API access.
+- `playback/PlaybackService.kt`, `playback/PlayerConnection.kt`, `playback/FantasticSessionPlayer.kt`, `playback/ApplePlaybackEngine.kt`: Media3 session ownership and source-specific playback adapters.
+- `lyrics/LyricsController.kt`, `lyrics/LyricsWebView.kt`: lyric loading, parser bridge, and WebView lifecycle.
+- `lyrics/NativeLyricsView.kt`, `lyrics/LyricInkView.kt`, `lyrics/LyricMotion.kt`: native lyric list, Canvas rendering, and animation curves.
+- Root `LICENSE` is Apache-2.0 and `app/build.gradle.kts` copies it into the APK assets during `preBuild`.
+- `app/build.gradle.kts`, root `build.gradle.kts`, `settings.gradle.kts`, and `gradle.properties`: Android and Kotlin build configuration.
+- `.github/workflows/android.yml`: CI APK build and nightly publication.
+- `app/src/main/assets/lyrics/README.md`, `lyrics.mjs`, `ttml.mjs`, `word-segmenter.mjs`, and `CJDICT-LICENSE.txt`: local parser ownership and retained dictionary notice.
+- `data/MusicLibrary.kt`, `ui/library/MusicLibraryScreen.kt`: local catalog library state and UI.
+- `ui/player/AppleMediaScreen.kt`, `ui/browse/AppleDiscoveryScreen.kt`, `APPLE_MUSIC_PARITY.md`: Apple media WebView surfaces, discovery, and implementation gaps.
 
 ## Runtime/Tooling Preferences
 
-CI uses Temurin JDK 17 and Gradle 8.11.1. Kotlin is 2.1.0; AGP is 8.7.3. Compile/target SDK is 35, minimum SDK is 26; Java/Kotlin output targets 17. Configure an Android SDK through `local.properties` (`sdk.dir`, ignored) or the environment.
-
-There is no required Bun/Node application runtime or JS package manager. The lyric sync script uses Bash and Git only. Keep local CSS unnested for older WebViews. `.mjs` must be served as JavaScript MIME. Compressed dictionaries are packaged as `.gz.bin` and routed back to `.gz` requests. Transparent WebViews have known mask/blending pitfalls: verify rendered pixels, not only DOM presence.
-
-`app/debug.keystore` is intentionally public and signs both debug and current release builds for compatible nightly updates; it is not a production signing secret. `GITHUB_RUN_NUMBER` controls version code and `GITHUB_SHA` supplies diagnostic build identity. Do not introduce machine-specific absolute paths into tracked build configuration.
+- CI uses Temurin JDK 17 and Gradle 8.11.1. Kotlin is 2.1.0, AGP is 8.7.3, compile/target SDK is 35, minimum SDK is 26, and Java/Kotlin output targets 17.
+- No Bun, Node.js, or JavaScript package manager is required. The WebView loads `.mjs` ES modules from Android assets with JavaScript MIME. Gzip dictionaries use `.gz.bin` packaging and `LyricsWebView` maps `.gz` requests back to those files.
+- Keep downloaded tools, temporary build setup, and diagnostic artifacts under ignored `.work/`. `app/debug.keystore` is a public debug key, not a production signing secret. `GITHUB_RUN_NUMBER` sets version code and `GITHUB_SHA` supplies the diagnostic build identity.
 
 ## Testing & QA
 
-Tests use AndroidJUnit4, AndroidX Test, Compose UI testing and MockWebServer. There is currently no `app/src/test` suite or coverage threshold.
-
-- `LyricsPageTest`: real WebView, bundled `qq-lyrics.json`, lyrics supplied before attachment, then visible text and screenshot assertions.
-- `LyricsEndToEndTest.lyricsVisibleInNowPlaying`: local MockWebServer, real activity/controller/Compose layout, opens lyrics through the player UI. Does not require a working external music server.
-- `LyricsEndToEndTest.liveSongPixelsVisible`: external Fantastic/QQ integration and screenshot pixel checks. Requires a reachable configured server; audio may fail outside QQ's supported region. Do not claim this is an offline test.
-
-CI tests Google APIs x86_64 emulators on API 34 and 36, covering old/new WebView behavior. `scripts/ci-instrumented.sh` captures `FantasticLyrics`, Chromium and crash logs and pulls `/data/local/tmp/lyrics*.png` plus player screenshots. For lyric changes, verify pause/resume, seek, track changes and zero-size-to-attached layout on the actual surface. Run the narrowest relevant check and state which device/network-dependent checks were not run.
+- The repository currently has no automated test sources, fixtures, test-only dependencies, or coverage threshold. Do not add, modify, or run automated tests/assertions unless explicitly requested.
+- CI builds the debug APK and publishes a nightly release from `main`; it has no test, lint, or device-install job.
+- Build success does not verify the RecyclerView/Canvas lyric surface or network-backed playback. Device, server, and playback acceptance is performed manually; state explicitly which such checks were not run.
+- In Settings → 歌词诊断, tap the report to copy lyric status/build details; WebView load errors use the `FantasticLyrics` Logcat tag.

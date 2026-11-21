@@ -5,9 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val generatedLicenseAssets = layout.buildDirectory.dir("generated/licenseAssets")
+
 android {
     namespace = "io.github.kid141252010.fantastic"
     compileSdk = 35
+    sourceSets.getByName("main").assets.srcDir(generatedLicenseAssets)
 
     defaultConfig {
         applicationId = "io.github.kid141252010.fantastic"
@@ -49,6 +52,15 @@ android {
         compose = true
         buildConfig = true
     }
+}
+
+tasks.register<Copy>("copyApacheLicense") {
+    from(rootProject.file("LICENSE"))
+    into(generatedLicenseAssets)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("copyApacheLicense")
 }
 
 dependencies {
