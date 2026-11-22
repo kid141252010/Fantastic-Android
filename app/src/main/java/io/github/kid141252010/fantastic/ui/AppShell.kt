@@ -118,11 +118,13 @@ fun AppShell(app: FantasticApp) {
                             visible = !nowPlaying,
                             enter = fadeIn(tween(Motion.Enter, easing = Motion.EmphasizedDecelerate)),
                             exit = fadeOut(tween(Motion.Exit, easing = Motion.EmphasizedAccelerate)),
+                    bottomBar = { frame, chromeInteractive ->
                         ) {
                             Column {
                                 MiniPlayer(player, app.player, visibility = this@AnimatedVisibility, onOpen = { nowPlaying = true })
                                 Spacer(Modifier.height(Dimens.BarGap))
                             }
+                                enabled = !glassSheetState.value && chromeInteractive,
                         }
                         if (nowPlaying) Spacer(Modifier.height(Dimens.MiniPlayerHeight + Dimens.BarGap))
                     }
