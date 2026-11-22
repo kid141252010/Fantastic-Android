@@ -70,12 +70,21 @@ function textWithoutRoles(node) {
 }
 
 function wordSpans(node) {
-  return children(node, 'span').filter(item => !roleOf(item)).map(item => ({
-    begin: parseTime(item.getAttribute('begin') || '0'),
-    end: parseTime(item.getAttribute('end') || '0'),
-    text: item.textContent || '',
-    spaceAfter: item.nextSibling?.nodeType === 3,
-  }));
+  return Array.from(node?.childNodes ?? []).flatMap(item => {
+    if (item.nodeType === 3) {
+      const text = item.textContent || '';
+      return text && text.trim().length === 0 ? [{ begin: 0, end: 0, text, whitespace: true, spaceAfter: false }] : [];
+    }
+    if (item.nodeType !== 1 || item.localName !== 'span' || roleOf(item)) return [];
+    const text = item.textContent || '';
+    return [{
+      begin: parseTime(item.getAttribute('begin') || '0'),
+      end: parseTime(item.getAttribute('end') || '0'),
+      text,
+      whitespace: text.trim().length === 0,
+      spaceAfter: false,
+    }];
+  });
 }
 
 function voice(node, translationNode, romanizationNode, preferred) {
@@ -181,7 +190,7 @@ export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage)
   }));
 
   const lines = sections.flatMap(section => section.lines);
-  const hasWordTimes = lines.some(item => item.tokens.length || item.background.tokens.length);
+  const hasWordTimes = lines.some(item => item.tokens.some(token => !token.whitespace) || item.background.tokens.some(token => !token.whitespace));
   const hasLineTimes = lines.some(item => item.begin || item.end);
   const timing = attribute(root, APPLE_NS, 'timing') || (hasWordTimes ? 'Word' : hasLineTimes ? 'Line' : 'None');
   const duration = parseTime(body.getAttribute('dur') || '0') || Math.max(0, ...lines.map(item => item.end));
