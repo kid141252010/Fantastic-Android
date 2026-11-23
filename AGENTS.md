@@ -27,8 +27,7 @@ Paths below are relative to `app/src/main/java/io/github/kid141252010/fantastic/
 - `playback/`: service-owned player, Media3 session, and UI-facing connection/state.
 - `lyrics/`: lyric loading/parsing lifecycle, synchronization, RecyclerView layout, Canvas renderer, and motion curves.
 - `ui/`: Compose shell, search, player, settings, and theme.
-- `app/src/main/assets/lyrics/`: local parser modules, the optional ICU-backed word segmenter, and third-party dictionary notices.
-- `scripts/sync-lyrics.sh` refreshes the ICU CJK dictionary and reads its notices from a Fantastic checkout. Keep the locally maintained parser modules in this repository.
+- `app/src/main/assets/lyrics/` contains the locally maintained parser modules and provider adapters.
 
 ## Development Commands
 
@@ -38,7 +37,6 @@ There is no Gradle wrapper. Use Gradle 8.11.1, JDK 17, and Android SDK 35 from t
 gradle :app:assembleDebug
 gradle :app:installDebug
 adb shell am start -n io.github.kid141252010.fantastic/.MainActivity
-bash scripts/sync-lyrics.sh /path/to/Fantastic
 ```
 
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in ignored `local.properties` or configure the Android SDK through the environment; do not commit machine-specific paths.
@@ -69,14 +67,14 @@ The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in i
 - Root `LICENSE` is Apache-2.0 and `app/build.gradle.kts` copies it into the APK assets during `preBuild`.
 - `app/build.gradle.kts`, root `build.gradle.kts`, `settings.gradle.kts`, and `gradle.properties`: Android and Kotlin build configuration.
 - `.github/workflows/android.yml`: CI APK build and nightly publication.
-- `app/src/main/assets/lyrics/` contains the local parser and provider adapters. The renderer guide explains the timing model and the dictionary guide records upstream attribution. [Lyrics](app/src/main/assets/lyrics/README.md) · [Dictionary](app/src/main/assets/lyrics/CJDICT-README.md)
+- The [lyrics renderer guide](app/src/main/assets/lyrics/README.md) describes the parser contract, timing and layout.
 - `data/MusicLibrary.kt`, `ui/library/MusicLibraryScreen.kt`: local catalog library state and UI.
 - `ui/player/AppleMediaScreen.kt` and `ui/browse/AppleDiscoveryScreen.kt` handle media pages and discovery. [Player behavior and device acceptance](APPLE_MUSIC_PARITY.md)
 
 ## Runtime/Tooling Preferences
 
 - CI uses Temurin JDK 17 and Gradle 8.11.1. Kotlin is 2.1.0, AGP is 8.7.3, compile/target SDK is 35, minimum SDK is 26, and Java/Kotlin output targets 17.
-- No Bun, Node.js, or JavaScript package manager is required. The WebView loads `.mjs` ES modules from Android assets with JavaScript MIME. Gzip dictionaries use `.gz.bin` packaging and `LyricsWebView` maps `.gz` requests back to those files.
+- No Bun, Node.js, or JavaScript package manager is required. The WebView loads `.mjs` ES modules from Android assets with JavaScript MIME.
 - Keep downloaded tools, temporary build setup, and diagnostic artifacts under ignored `.work/`. `app/debug.keystore` is a public debug key, not a production signing secret. `GITHUB_RUN_NUMBER` sets version code and `GITHUB_SHA` supplies the diagnostic build identity.
 
 ## Testing & QA

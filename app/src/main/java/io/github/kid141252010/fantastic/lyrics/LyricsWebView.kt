@@ -76,13 +76,6 @@ object LyricsWebView {
      */
     private class ModuleAwareAssets(private val inner: WebViewAssetLoader.PathHandler) : WebViewAssetLoader.PathHandler {
         override fun handle(path: String): WebResourceResponse? {
-            // AAPT stores gzip assets as .gz.bin; keep the request URL stable.
-            if (path.endsWith(".gz")) {
-                val response = inner.handle("$path.bin") ?: return null
-                response.mimeType = "application/gzip"
-                response.encoding = null
-                return response
-            }
             val response = inner.handle(path) ?: return null
             when {
                 path.endsWith(".mjs") -> response.mimeType = "text/javascript"

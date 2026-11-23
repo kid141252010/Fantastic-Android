@@ -2,7 +2,7 @@
 
 `LyricsController` 加载歌词并控制同步。`lyrics.mjs` 整理各音源的候选数据，`ttml.mjs` 在 `WebViewAssetLoader` 中解析 TTML。`NativeLyricsView` 用 RecyclerView 布局，`LyricInkView` 用 Canvas 绘制，`LyricMotion.kt` 保存时序和曲线。AMLL 提供歌词数据，播放界面由 Android 原生渲染。
 
-解析模块由本项目维护。同步 ICU 字典时保留这些模块及 `parseFantasticLyrics`、`ready` 和 `status` 桥接协议。[字典维护说明](CJDICT-README.md)
+解析模块由本项目维护，需保留 `parseFantasticLyrics`、`ready` 和 `status` 桥接协议。
 
 ## 歌词来源与缓存
 

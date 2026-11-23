@@ -43,6 +43,6 @@ gradle :app:assembleDebug -PincludeLocalAmFonts=false
 
 ## 许可证
 
-项目自有代码采用 Apache-2.0。随包 ICU 字典及其衍生词表适用上游许可。[项目许可证](LICENSE) · [字典声明](app/src/main/assets/lyrics/CJDICT-README.md)
+项目自有代码采用 Apache-2.0。[项目许可证](LICENSE)
 
 启动图标改编自 Fantastic 的旧版红色图标。[上游 SVG](https://github.com/kid141252010/Fantastic/blob/73d1f19c7f49dc77413f5d32f92f639df2a850df/web/icons/icon.svg)
