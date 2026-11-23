@@ -86,6 +86,7 @@ import io.github.kid141252010.fantastic.data.LibraryPlaylistTrack
 import io.github.kid141252010.fantastic.data.MusicLibrarySnapshot
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizeAppleStorefront
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.MediaActionContent
@@ -696,7 +697,8 @@ private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: 
 }
 
 private fun asTrack(hit: CatalogHit): Track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
-    ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0)
+    ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0,
+        storefront = if (hit.source == Source.Apple) normalizeAppleStorefront(hit.country) else null)
 
 private fun CatalogHit.librarySubtitle(): String = if (subtitle.isBlank()) source.libraryName() else "$subtitle · ${source.libraryName()}"
 

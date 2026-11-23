@@ -41,6 +41,7 @@ import io.github.kid141252010.fantastic.data.LibraryEntry
 import io.github.kid141252010.fantastic.data.LibraryKey
 import io.github.kid141252010.fantastic.data.LibraryPlaylist
 import io.github.kid141252010.fantastic.data.MusicLibrarySnapshot
+import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
@@ -72,7 +73,7 @@ internal fun libraryAlbums(entries: List<LibraryEntry>): List<LibraryEntry> {
         if (album == null) {
             albums[key] = LibraryEntry(
                 CatalogHit(track.source, "album", track.albumId, track.album, track.artist,
-                    track.artwork(480) ?: entry.hit.artwork),
+                    track.artwork(480) ?: entry.hit.artwork, country = if (track.source == Source.Apple) entry.hit.country else "cn"),
                 addedAt = entry.addedAt,
             )
         } else if (entry.addedAt > album.addedAt) {

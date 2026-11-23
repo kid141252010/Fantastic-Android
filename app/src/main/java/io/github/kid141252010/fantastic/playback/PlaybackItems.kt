@@ -8,6 +8,7 @@ import androidx.media3.common.util.UnstableApi
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizeAppleStorefront
 
 internal const val KEY_ID = "fantastic.id"
 internal const val KEY_SOURCE = "fantastic.source"
@@ -15,6 +16,7 @@ internal const val KEY_DURATION_MS = "fantastic.durationMs"
 internal const val KEY_ARTIST_ID = "fantastic.artistId"
 internal const val KEY_ALBUM_ID = "fantastic.albumId"
 internal const val KEY_ARTWORK_TEMPLATE = "fantastic.artworkTemplate"
+private const val KEY_STOREFRONT = "fantastic.storefront"
 internal const val KEY_QUALITY = "fantastic.quality"
 internal const val KEY_PLAYBACK_MESSAGE = "fantastic.playbackMessage"
 internal const val KEY_SHUFFLE_START = "fantastic.shuffleStart"
@@ -33,6 +35,7 @@ internal fun Track.toQueueItem(quality: String? = null, shuffleStart: Boolean? =
             putString(KEY_ARTIST_ID, artistId)
             putString(KEY_ALBUM_ID, albumId)
             putString(KEY_ARTWORK_TEMPLATE, artworkTemplate.orEmpty())
+            if (source == Source.Apple && storefront != null) putString(KEY_STOREFRONT, storefront)
             if (quality != null) putString(KEY_QUALITY, quality)
             if (shuffleStart != null) putBoolean(KEY_SHUFFLE_START, shuffleStart)
             if (occurrence != null) putInt(KEY_OCCURRENCE, occurrence)
@@ -48,7 +51,8 @@ internal fun MediaItem.toTrack(): Track? {
     return Track(id, source, mediaMetadata.title?.toString().orEmpty(), mediaMetadata.artist?.toString().orEmpty(),
         mediaMetadata.albumTitle?.toString().orEmpty(), artwork,
         extras?.getLong(KEY_DURATION_MS, 0)?.coerceAtLeast(0) ?: 0,
-        extras?.getString(KEY_ARTIST_ID).orEmpty(), extras?.getString(KEY_ALBUM_ID).orEmpty())
+        extras?.getString(KEY_ARTIST_ID).orEmpty(), extras?.getString(KEY_ALBUM_ID).orEmpty(),
+        storefront = if (source == Source.Apple) normalizeAppleStorefront(extras?.getString(KEY_STOREFRONT)) else null)
 }
 
 private val qqSongId = Regex("[0-9A-Za-z]{1,32}")

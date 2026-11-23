@@ -14,14 +14,23 @@ internal enum class PlaybackCacheLimit(val id: String, val label: String, val by
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("fantastic", Context.MODE_PRIVATE)
 
-    var baseUrl: String
-        get() = sp.getString("baseUrl", DEFAULT_BASE_URL)!!.trimEnd('/')
-        set(value) = sp.edit { putString("baseUrl", value.trim().trimEnd('/')) }
+    val baseUrl: String
+        get() = sp.getString("baseUrl", DEFAULT_BASE_URL)!!.trim().trimEnd('/')
 
     /** Apple Music 店面，如 us、tr、jp。 */
-    var storefront: String
-        get() = sp.getString("storefront", "us")!!
-        set(value) = sp.edit { putString("storefront", value.trim().lowercase()) }
+    val storefront: String
+        get() = normalizeAppleStorefront(sp.getString("storefront", null)) ?: "us"
+
+    internal val appleStorefrontCache: String?
+        get() = sp.getString("appleStorefrontCache", null)
+
+    internal fun saveAppleCatalogSettings(baseUrl: String, storefront: String, cacheJson: String? = null) {
+        sp.edit {
+            putString("baseUrl", baseUrl)
+            putString("storefront", storefront)
+            if (cacheJson != null) putString("appleStorefrontCache", cacheJson)
+        }
+    }
 
     /** QQ 音乐首选音质，对应 /qq/song/:mid/play?quality=。 */
     var qqQuality: String

@@ -145,7 +145,8 @@ fun AppShell(app: FantasticApp) {
                         .then(if (playerExpanded || settings || catalog != null) Modifier.clearAndSetSemantics {} else Modifier),
                 ) {
                     when (tab) {
-                        Tab.Search -> SearchScreen(app, onOpen = { catalog = it })
+                        Tab.Search -> SearchScreen(app, visible = !settings && catalog == null && !playerExpanded,
+                            onOpen = { catalog = it })
                         Tab.Library -> MusicLibraryScreen(app, onOpen = { catalog = it })
                         Tab.New -> AppleDiscoveryScreen(app, radio = false, onOpen = { catalog = it })
                         Tab.Radio -> AppleDiscoveryScreen(app, radio = true, onOpen = { catalog = it })
@@ -153,7 +154,7 @@ fun AppShell(app: FantasticApp) {
                     }
                 }
                 catalog?.takeIf { appleMedia == null }?.let { hit ->
-                    CatalogDetails(app, hit.source, hit.kind, hit.id,
+                    CatalogDetails(app, hit,
                         modifier = Modifier.fillMaxSize().haze(haze),
                         interactive = !playerExpanded && !settings && !glassSheetState.value,
                         onClose = { catalog = null })

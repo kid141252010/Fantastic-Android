@@ -13,4 +13,5 @@ data class CatalogHit(
     val explicit: Boolean = false,
     val detailOnly: Boolean = true,
     val attributes: JsonElement? = null,
+    val country: String? = if (source == Source.Apple) track?.storefront else "cn",
 )

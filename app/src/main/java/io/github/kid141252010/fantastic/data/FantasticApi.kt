@@ -71,11 +71,13 @@ class FantasticApi(private val prefs: Prefs) {
     suspend fun qqSearch(query: String): List<Track> =
         get("/qq/search?type=song&q=${enc(query)}", QqSearch.serializer()).songs.map { it.toTrack() }
 
-    suspend fun amSearch(query: String): List<Track> =
-        getAmp(
-            "/amp/v1/catalog/${prefs.storefront}/search?types=songs&limit=25&term=${enc(query)}",
+    suspend fun amSearch(query: String): List<Track> {
+        val storefront = prefs.storefront
+        return getAmp(
+            "/amp/v1/catalog/$storefront/search?types=songs&limit=25&term=${enc(query)}",
             AmSearch.serializer(),
-        ).results.songs?.data.orEmpty().map { it.toTrack() }
+        ).results.songs?.data.orEmpty().map { it.toTrack(storefront) }
+    }
 
     /** QQ 歌词候选（QRC / LRC 等，均已转成 TTML），保留原始请求地址供注释补充请求使用。 */
     internal suspend fun qqLyrics(mid: String): QqLyricsDocument = withContext(Dispatchers.IO) {
@@ -148,3 +150,31 @@ class FantasticApi(private val prefs: Prefs) {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 }
+
+/** Read a catalog response without keeping an OkHttp call alive after the query is cancelled. */
+internal suspend fun OkHttpClient.readCatalogBody(request: Request, maxBytes: Long? = null): String =
+    suspendCancellableCoroutine { continuation ->
+        val call = newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (!continuation.isCancelled) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val value = response.use {
+                        if (!it.isSuccessful) throw IOException("HTTP ${it.code}")
+                        val body = it.body ?: return@use ""
+                        if (maxBytes != null && body.source().request(maxBytes + 1)) {
+                            throw IOException("目录响应过大")
+                        }
+                        body.string()
+                    }
+                    if (!continuation.isCancelled) continuation.resume(value)
+                } catch (e: IOException) {
+                    if (!continuation.isCancelled) continuation.resumeWithException(e)
+                }
+            }
+        })
+    }

@@ -110,7 +110,8 @@ class MusicLibrary(context: Context) {
             val key = LibraryKey(clean.source, clean.kind, clean.id)
             val old = state.items.firstOrNull { it.key == key }
             if (old == null && state.items.size >= MAX_ITEMS) return@trySend state
-            val entry = LibraryEntry(clean, old?.addedAt ?: now(), old?.favoriteAt ?: 0, old?.folderId.orEmpty(), old?.metadata)
+            val entry = LibraryEntry(clean.keepCountryFrom(old?.hit), old?.addedAt ?: now(),
+                old?.favoriteAt ?: 0, old?.folderId.orEmpty(), old?.metadata)
             state.copy(items = state.items.filterNot { it.key == key } + entry)
         }
     }
@@ -122,7 +123,8 @@ class MusicLibrary(context: Context) {
             val key = LibraryKey(clean.source, clean.kind, clean.id)
             val old = state.items.firstOrNull { it.key == key }
             if (old == null && state.items.size >= MAX_ITEMS) return@trySend state
-            val entry = LibraryEntry(clean, old?.addedAt ?: now(), if (old?.isFavorite == true) 0 else now(), old?.folderId.orEmpty(), old?.metadata)
+            val entry = LibraryEntry(clean.keepCountryFrom(old?.hit), old?.addedAt ?: now(),
+                if (old?.isFavorite == true) 0 else now(), old?.folderId.orEmpty(), old?.metadata)
             state.copy(items = state.items.filterNot { it.key == key } + entry)
         }
     }
@@ -136,9 +138,17 @@ class MusicLibrary(context: Context) {
             if (index < 0) return@trySend state
             val list = state.playlists[index]
             val key = LibraryKey(clean.source, clean.kind, clean.id)
-            if (list.tracks.any { LibraryKey(it.hit.source, it.hit.kind, it.hit.id) == key }) return@trySend state
-            if (list.tracks.size >= MAX_TRACKS_PER_PLAYLIST || state.playlists.sumOf { it.tracks.size } >= MAX_TOTAL_TRACKS) return@trySend state
-            val updated = list.copy(tracks = list.tracks + LibraryPlaylistTrack(newUid(), now(), clean), updatedAt = now())
+            val duplicate = list.tracks.indexOfFirst { LibraryKey(it.hit.source, it.hit.kind, it.hit.id) == key }
+            val tracks = if (duplicate >= 0) {
+                val old = list.tracks[duplicate]
+                val country = clean.country
+                if (clean.source != Source.Apple || country == null || country == old.hit.country) return@trySend state
+                list.tracks.toMutableList().also { it[duplicate] = old.copy(hit = old.hit.withCountry(country)) }
+            } else {
+                if (list.tracks.size >= MAX_TRACKS_PER_PLAYLIST || state.playlists.sumOf { it.tracks.size } >= MAX_TOTAL_TRACKS) return@trySend state
+                list.tracks + LibraryPlaylistTrack(newUid(), now(), clean)
+            }
+            val updated = list.copy(tracks = tracks, updatedAt = now())
             state.copy(playlists = state.playlists.toMutableList().also { it[index] = updated })
         }
     }
@@ -327,6 +337,7 @@ class MusicLibrary(context: Context) {
         data.items.forEach { incoming ->
             val old = itemMap[incoming.key]
             itemMap[incoming.key] = if (old == null) incoming else incoming.copy(
+                hit = incoming.hit.keepCountryFrom(old.hit),
                 addedAt = minOf(incoming.addedAt, old.addedAt),
                 favoriteAt = maxOf(incoming.favoriteAt, old.favoriteAt),
                 folderId = incoming.folderId.ifBlank { old.folderId },
@@ -431,14 +442,22 @@ class MusicLibrary(context: Context) {
         val explicit = extension?.boolean("explicit") ?: raw.boolean("explicit") ?: false
         val attributes = extension?.get("attributes") ?: raw["attributes"]
         val boundedAttributes = attributes?.takeIf { it.toString().length <= MAX_ATTRIBUTES_CHARS }
-        val track = (extension?.get("track") ?: raw["track"])?.objectOrNull()?.let { parseTrack(it, source, id, title, subtitle, art) }
-            ?: if (kind == "song") fallbackTrack(source, id, title, subtitle, raw.string("album").clean(300), art,
-                (extension?.long("durationMs") ?: raw.long("duration"))?.takeIf { it in 1..MAX_DURATION_MS } ?: 0) else null
+        val country = if (source == Source.Apple) normalizeAppleStorefront(raw.string("country")) else "cn"
+        val storefront = country.takeIf { source == Source.Apple }
+        val track = if (kind == "song") {
+            (extension?.get("track") ?: raw["track"])?.objectOrNull()?.let {
+                parseTrack(it, source, id, title, subtitle, art, storefront)
+            } ?: fallbackTrack(source, id, title, subtitle, raw.string("album").clean(300), art,
+                (extension?.long("durationMs") ?: raw.long("duration"))?.takeIf { it in 1..MAX_DURATION_MS } ?: 0, storefront)
+        } else null
         return CatalogHit(source, kind, id, title, subtitle, art, track, explicit,
-            extension?.boolean("detailOnly") ?: raw.boolean("detailOnly") ?: true, boundedAttributes)
+            extension?.boolean("detailOnly") ?: raw.boolean("detailOnly") ?: true, boundedAttributes, country)
     }
 
-    private fun parseTrack(raw: JsonObject, expectedSource: Source, expectedId: String, title: String, subtitle: String, artwork: String?): Track? {
+    private fun parseTrack(
+        raw: JsonObject, expectedSource: Source, expectedId: String, title: String, subtitle: String,
+        artwork: String?, storefront: String?,
+    ): Track? {
         val source = raw.string("source")?.let { value -> Source.entries.firstOrNull { it.mediaPrefix == value || it.name == value } } ?: expectedSource
         val id = raw.string("id")?.clean(128)?.takeIf { it.matches(ID_REGEX) } ?: expectedId
         if (source != expectedSource || id != expectedId) return null
@@ -446,26 +465,40 @@ class MusicLibrary(context: Context) {
             raw.string("album").clean(300), cleanArtwork(raw.string("artworkTemplate")) ?: artwork,
             raw.long("durationMs")?.takeIf { it in 0..MAX_DURATION_MS } ?: 0,
             raw.string("artistId").clean(128).takeIf { validCatalogId(source, "artist", it) }.orEmpty(),
-            raw.string("albumId").clean(128).takeIf { validCatalogId(source, "album", it) }.orEmpty())
+            raw.string("albumId").clean(128).takeIf { validCatalogId(source, "album", it) }.orEmpty(), storefront)
     }
 
     private fun normalizeHit(hit: CatalogHit): CatalogHit? {
         if (hit.kind !in KINDS || !validCatalogId(hit.source, hit.kind, hit.id)) return null
         val title = hit.title.clean(300).ifBlank { hit.id }
         val subtitle = hit.subtitle.clean(300)
-        val track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }?.let {
+        val song = hit.track?.takeIf { hit.kind == "song" && it.source == hit.source && it.id == hit.id }
+        val country = if (hit.source == Source.Apple) {
+            normalizeAppleStorefront(hit.country) ?: normalizeAppleStorefront(song?.storefront)
+        } else "cn"
+        val track = song?.let {
             Track(it.id, it.source, it.title.clean(300).ifBlank { title }, it.artist.clean(300), it.album.clean(300),
                 cleanArtwork(it.artworkTemplate), it.durationMs.coerceIn(0, MAX_DURATION_MS),
                 it.artistId.clean(128).takeIf { id -> validCatalogId(it.source, "artist", id) }.orEmpty(),
-                it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty())
+                it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty(),
+                storefront = country.takeIf { hit.source == Source.Apple })
         }
         val attrs = hit.attributes?.takeIf { it.toString().length <= MAX_ATTRIBUTES_CHARS }
         return CatalogHit(hit.source, hit.kind, hit.id, title, subtitle, cleanArtwork(hit.artwork), track,
-            hit.explicit, hit.detailOnly, attrs)
+            hit.explicit, hit.detailOnly, attrs, country)
     }
 
-    private fun fallbackTrack(source: Source, id: String, title: String, artist: String, album: String, artwork: String?, durationMs: Long) =
-        Track(id, source, title, artist, album, artwork, durationMs)
+    private fun fallbackTrack(
+        source: Source, id: String, title: String, artist: String, album: String, artwork: String?,
+        durationMs: Long, storefront: String?,
+    ) = Track(id, source, title, artist, album, artwork, durationMs, storefront = storefront)
+
+    // The caller has already matched LibraryKey and normalized both records.
+    private fun CatalogHit.keepCountryFrom(old: CatalogHit?): CatalogHit =
+        if (source == Source.Apple && country == null && old?.country != null) withCountry(old.country) else this
+
+    private fun CatalogHit.withCountry(country: String): CatalogHit =
+        copy(country = country, track = track?.copy(storefront = country))
 
     private fun repairFolders(state: MusicLibrarySnapshot): MusicLibrarySnapshot {
         val folders = state.folders.associateBy { it.id }.toMutableMap()
@@ -517,7 +550,8 @@ class MusicLibrary(context: Context) {
     private fun encodeHit(hit: CatalogHit, addedAt: Long? = null, favoriteAt: Long? = null, folderId: String? = null, uid: String? = null, metadata: JsonObject? = null): JsonObject = buildJsonObject {
         metadata?.forEach { (name, value) -> put(name, value) }
         put("kind", hit.kind); put("id", hit.id); put("source", hit.source.mediaPrefix)
-        put("country", metadata?.string("country") ?: "us"); put("name", hit.title); put("title", hit.title); put("subtitle", hit.subtitle)
+        hit.country?.let { put("country", it) }
+        put("name", hit.title); put("title", hit.title); put("subtitle", hit.subtitle)
         put("artist", hit.subtitle); put("artwork", hit.artwork ?: ""); put("explicit", hit.explicit); put("detailOnly", hit.detailOnly)
         if (hit.kind == "playlist") put("curator", hit.subtitle)
         hit.track?.let { track ->
@@ -552,7 +586,6 @@ class MusicLibrary(context: Context) {
     private fun JsonPrimitive.longOrNullSafe(): Long? = longOrNull
 
     private fun cleanMetadata(raw: JsonObject): JsonObject = buildJsonObject {
-        raw.string("country")?.takeIf { it.matches(Regex("[A-Za-z]{2}")) }?.let { put("country", it.lowercase()) }
         for (name in listOf("album", "albumId", "releaseDate", "bgColor")) {
             raw.string(name)?.takeIf { it.length <= 300 }?.let { put(name, it) }
         }

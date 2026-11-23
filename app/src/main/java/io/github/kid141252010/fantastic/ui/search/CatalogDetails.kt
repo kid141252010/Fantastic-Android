@@ -79,6 +79,7 @@ import io.github.kid141252010.fantastic.data.NeteaseSongPage
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizeAppleStorefront
 import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
@@ -118,14 +119,19 @@ import okhttp3.Response
 @Composable
 internal fun CatalogDetails(
     app: FantasticApp,
-    source: Source,
-    kind: String,
-    id: String,
+    hit: CatalogHit,
     modifier: Modifier = Modifier,
     interactive: Boolean = true,
     onClose: () -> Unit,
 ) {
-    val root = remember(source, kind, id) { DetailTarget(source, normalizedKind(kind), id) }
+    val root = remember(hit) {
+        val kind = normalizedKind(hit.kind)
+        val storefront = if (hit.source == Source.Apple) {
+            val song = hit.track?.takeIf { kind == "song" && it.source == hit.source && it.id == hit.id }
+            normalizeAppleStorefront(hit.country) ?: normalizeAppleStorefront(song?.storefront) ?: app.prefs.storefront
+        } else null
+        DetailTarget(hit.source, kind, hit.id, storefront)
+    }
     var history by remember(root) { mutableStateOf(listOf(root)) }
     val current = history.last()
     val player by app.player.state.collectAsStateWithLifecycle()
@@ -192,7 +198,7 @@ internal fun CatalogDetails(
     }
 }
 
-private data class DetailTarget(val source: Source, val kind: String, val id: String)
+private data class DetailTarget(val source: Source, val kind: String, val id: String, val storefront: String? = null)
 private data class DetailEntry(
     val target: DetailTarget,
     val title: String,
@@ -458,7 +464,8 @@ private fun DetailBody(
         }
     }
     moreEntry?.let { entry ->
-        val hit = CatalogHit(entry.target.source, entry.target.kind, entry.target.id, entry.title, entry.subtitle, entry.artwork, entry.track)
+        val hit = CatalogHit(entry.target.source, entry.target.kind, entry.target.id, entry.title, entry.subtitle,
+            entry.artwork, entry.track, country = if (entry.target.source == Source.Apple) entry.target.storefront else "cn")
         val queue = if (entry.target == target) playable else listOfNotNull(entry.track)
         val resolverSection = playableSection?.takeIf { entry.target == target && loaded.song == null }
         val sectionForSong = moreSection
@@ -658,8 +665,7 @@ private fun NeteaseSongControls(
 
 private class DetailRepository(private val app: FantasticApp, private val target: DetailTarget) {
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
-    // Keep a consistent storefront while navigating this resource's opaque pagination links.
-    private val storefront = app.prefs.storefront
+    private fun appleStorefront(): String = checkNotNull(target.storefront)
     private var parentAlbum: AppleCatalogResource? = null
 
     suspend fun load(): DetailPage {
@@ -673,6 +679,10 @@ private class DetailRepository(private val app: FantasticApp, private val target
     suspend fun more(cursor: DetailCursor): DetailSection = when (cursor) {
         is DetailCursor.Apple -> {
             if (cursor.next in cursor.visited) throw DetailUnavailable("服务器重复返回同一分页链接，无法继续加载。")
+            val path = cursor.next.removePrefix("/amp").substringBefore('?')
+            if (!path.startsWith("/v1/catalog/${appleStorefront()}/")) {
+                throw DetailUnavailable("服务器返回了不匹配的 Apple Music 地区分页链接。")
+            }
             val response = if (cursor.tracks) app.apple.trackPage(cursor.next) else app.apple.page(cursor.next)
             val next = response.next?.takeIf { it.isNotBlank() }
             if (next == cursor.next || next in cursor.visited) throw DetailUnavailable("服务器分页没有前进，请稍后重试。")
@@ -733,7 +743,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
             "music-video" -> AppleCatalogApi.Entity.MusicVideo
             else -> throw DetailUnavailable("Apple Music 暂不支持此类资源详情。")
         }
-        val resource = app.apple.entity(entity, target.id, storefront = storefront,
+        val resource = app.apple.entity(entity, target.id, storefront = appleStorefront(),
             params = if (entity == AppleCatalogApi.Entity.Album) mapOf("include" to "tracks,artists,record-labels") else emptyMap())
         parentAlbum = resource.takeIf { target.kind == "album" }
         val facts = buildList {
@@ -757,7 +767,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
         val description = listOf("description", "plainEditorialNotes", "editorialNotes", "artistBio")
             .firstNotNullOfOrNull { key -> detailPlainText(resource.attributes[key]).takeIf { it.isNotBlank() } }.orEmpty()
         return DetailPage(resource.name, listOf(resource.artist, resource.album).filter { it.isNotBlank() }.distinct().joinToString(" · "),
-            resource.artworkUrl(600), description, facts, resource.toTrack().takeIf { target.kind == "song" }, sections,
+            resource.artworkUrl(600), description, facts, resource.toTrack(appleStorefront()).takeIf { target.kind == "song" }, sections,
             if (target.kind == "music-video") "这是音乐视频。当前播放器队列只接受音频歌曲；此处不将视频冒充音频，也不解析 DRM 视频地址。可浏览下方关联艺人和专辑。" else null)
     }
 
@@ -773,13 +783,14 @@ private class DetailRepository(private val app: FantasticApp, private val target
 
     private fun appleEntry(resource: AppleCatalogResource, album: AppleCatalogResource? = null): DetailEntry? {
         if (!isSupportedKind(resource.type)) return null
-        val track = resource.toTrack().takeIf { normalizedKind(resource.type) == "song" }?.let { song -> if (album == null) song else song.copy(
+        val storefront = appleStorefront()
+        val track = resource.toTrack(storefront)?.let { song -> if (album == null) song else song.copy(
             album = song.album.ifBlank { album.name },
             artist = song.artist.ifBlank { album.artist },
             artworkTemplate = song.artworkTemplate ?: album.artwork?.detailString("url")?.replace("{c}", "bb"),
             albumId = album.id,
         ) }
-        return DetailEntry(DetailTarget(Source.Apple, normalizedKind(resource.type), resource.id),
+        return DetailEntry(DetailTarget(Source.Apple, normalizedKind(resource.type), resource.id, storefront),
             resource.name, resource.artist, resource.artworkUrl(160) ?: track?.artwork(160), track)
     }
 

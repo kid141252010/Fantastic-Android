@@ -35,9 +35,11 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.AppleCatalogApi
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
+import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.lyrics.LyricShareLine
 import io.github.kid141252010.fantastic.lyrics.LyricsController
@@ -91,6 +93,8 @@ internal fun NowPlayingContent(
         mutableStateOf(if (share != null && share.startIndex in share.lines.indices) setOf(share.startIndex) else emptySet())
     }
     val libraryState by library.snapshot.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val app = context.applicationContext as FantasticApp
     val rawTrack = state.currentTrack
     var menuTrack by remember(rawTrack) { mutableStateOf(rawTrack) }
     val trackMenuOpen = panel == PlayerPanel.Track
@@ -101,8 +105,9 @@ internal fun NowPlayingContent(
         val missingAlbum = current.albumId.isMissingCatalogId()
         if (!missingArtist && !missingAlbum) return@LaunchedEffect
 
+        val storefront = rawTrack.storefront ?: app.prefs.storefront
         try {
-            val details = apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id).toTrack()
+            val details = apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id, storefront = storefront).toTrack(storefront)
             if (details?.source != Source.Apple || details.id != rawTrack.id) return@LaunchedEffect
             ensureActive()
             menuTrack = current.copy(
@@ -112,6 +117,7 @@ internal fun NowPlayingContent(
                 durationMs = if (current.durationMs > 0) current.durationMs else details.durationMs,
                 artistId = if (missingArtist) details.artistId else current.artistId,
                 albumId = if (missingAlbum) details.albumId else current.albumId,
+                storefront = details.storefront,
             )
         } catch (cancel: CancellationException) {
             throw cancel
@@ -119,22 +125,20 @@ internal fun NowPlayingContent(
             Log.w("FantasticCatalog", "Apple song relationship lookup failed for ${rawTrack.id}", error)
         }
     }
-    val hit = remember(menuTrack) {
-        menuTrack?.let { CatalogHit(it.source, "song", it.id, it.title, it.artist, it.artwork(500), it, detailOnly = false) }
-    }
+    val hit = remember(menuTrack) { menuTrack?.let { SearchCatalog.trackHit(it) } }
     val libraryEntry = hit?.let { song -> libraryState.items.firstOrNull {
         it.key.source == song.source && it.key.kind == song.kind && it.key.id == song.id
     } }
     val favorite = libraryEntry?.isFavorite == true
     val toggleFavorite: (() -> Unit)? = hit?.let { { library.toggleFavorite(it) } }
-    val context = LocalContext.current
     val entities = remember(menuTrack) {
         buildList {
             menuTrack?.let { song ->
+                val country = if (song.source == Source.Apple) song.storefront else "cn"
                 if (!song.artistId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "artist", song.artistId, song.artist, artwork = null, detailOnly = true))
+                    song.source, "artist", song.artistId, song.artist, country = country))
                 if (!song.albumId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "album", song.albumId, song.album, artwork = song.artwork(500), detailOnly = true))
+                    song.source, "album", song.albumId, song.album, artwork = song.artwork(500), country = country))
             }
         }
     }

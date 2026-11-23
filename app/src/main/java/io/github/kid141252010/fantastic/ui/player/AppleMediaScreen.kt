@@ -62,6 +62,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.normalizeAppleStorefront
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -241,7 +242,7 @@ private data class AppleMediaRoute(val kind: String, val storefront: String, val
     val path: String get() = "/https://music.apple.com/$storefront/$kind/_/$id"
 }
 
-/** Prefer the resource's official storefront only after validating its origin, type, and ID. */
+/** Prefer the requested storefront, falling back to an official link validated for this resource. */
 private fun appleMediaRoute(hit: CatalogHit, configuredStorefront: String): AppleMediaRoute? {
     if (hit.source != Source.Apple) return null
     val kind = when (hit.kind) {
@@ -256,12 +257,11 @@ private fun appleMediaRoute(hit: CatalogHit, configuredStorefront: String): Appl
     }
     if (!validId) return null
 
-    val attributes = hit.attributes as? JsonObject
-    val attributeUrl = (attributes?.get("url") as? JsonPrimitive)?.contentOrNull
-    val verifiedStorefront = attributeUrl?.let { validatedStorefront(it, kind, hit.id) }
-    val storefront = verifiedStorefront
-        ?: configuredStorefront.takeIf { it.matches(Regex("[a-z]{2}")) }
-        ?: "us"
+    val storefront = normalizeAppleStorefront(hit.country) ?: run {
+        val attributes = hit.attributes as? JsonObject
+        val url = (attributes?.get("url") as? JsonPrimitive)?.contentOrNull
+        url?.let { validatedStorefront(it, kind, hit.id) } ?: normalizeAppleStorefront(configuredStorefront) ?: "us"
+    }
     return AppleMediaRoute(kind, storefront, hit.id)
 }
 

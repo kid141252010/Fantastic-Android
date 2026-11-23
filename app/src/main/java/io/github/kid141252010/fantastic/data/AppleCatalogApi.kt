@@ -217,18 +217,21 @@ class AppleCatalogApi(
         ), language)
 
     /** All storefront pages, following Apple's next URLs as in upstream i18n.js. */
-    suspend fun storefronts(): List<AppleStorefront> {
+    suspend fun storefronts(baseUrl: String = prefs.baseUrl): List<AppleStorefront> {
         val result = linkedMapOf<String, AppleStorefront>()
         val seen = hashSetOf<String>()
         var next: String? = "/v1/storefronts"
         while (next != null) {
-            val path = next
-            if (!seen.add(path)) throw IOException("Repeated Apple storefront page")
-            val response = request(path)
+            val path = next.removePrefix("/amp")
+            if (path.substringBefore('?') != "/v1/storefronts" || !seen.add(path)) {
+                throw IOException("Invalid or repeated Apple storefront page")
+            }
+            val response = request(proxyUrl(path, emptyMap(), null, baseUrl))
+            if (response.raw["data"] !is JsonArray) throw IOException("Invalid Apple storefront response")
             for (resource in response.data) {
                 val tags = resource.attributes.strings("supportedLanguageTags")
                 if (tags.isEmpty()) continue
-                val id = resource.id.lowercase(Locale.ROOT)
+                val id = normalizeAppleStorefront(resource.id) ?: continue
                 result[id] = AppleStorefront(id, resource.name, tags,
                     resource.attributes.text("defaultLanguageTag") ?: tags.first())
             }
@@ -489,11 +492,8 @@ class AppleCatalogApi(
 
     private fun catalog(storefront: String) = "/v1/catalog/${country(storefront)}"
 
-    private fun country(value: String): String {
-        val cc = value.lowercase(Locale.ROOT)
-        require(cc.length == 2 && cc.all { it in 'a'..'z' }) { "Invalid Apple storefront" }
-        return cc
-    }
+    private fun country(value: String): String =
+        requireNotNull(normalizeAppleStorefront(value)) { "Invalid Apple storefront" }
 
     private fun segment(value: String): String {
         require(value.isNotEmpty() && !value.contains("..") && value.all {
@@ -620,11 +620,12 @@ data class AppleCatalogResource(
     val explicit: Boolean get() = attributes.text("contentRating") == "explicit"
 
     /** Non-song catalogue entries must remain navigable entities, not fake playable audio tracks. */
-    fun toTrack(): Track? = if (type == "songs") Track(
+    fun toTrack(storefront: String): Track? = if (type == "songs") Track(
         id, Source.Apple, name, artist, album,
         artwork?.text("url")?.replace("{c}", "bb"), durationMs,
         artistId = relationships["artists"]?.data?.firstOrNull()?.id.orEmpty(),
         albumId = relationships["albums"]?.data?.firstOrNull()?.id.orEmpty(),
+        storefront = storefront,
     ) else null
 
     fun artworkUrl(width: Int, height: Int = width, crop: String = "bb", format: String = "jpg"): String? =
@@ -639,9 +640,7 @@ data class AppleCatalogPage(
     val name: String? = null,
     val meta: JsonObject = JsonObject(emptyMap()),
     val attributes: JsonObject = JsonObject(emptyMap()),
-) {
-    fun tracks(): List<Track> = data.mapNotNull { it.toTrack() }
-}
+)
 
 @Serializable
 data class AppleCatalogResponse(
@@ -703,6 +702,7 @@ data class AppleSearchSuggestion(
     val content: AppleCatalogResource? = null,
 )
 
+@Serializable
 data class AppleStorefront(
     val id: String,
     val name: String,

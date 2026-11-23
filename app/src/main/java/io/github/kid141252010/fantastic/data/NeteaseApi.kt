@@ -1,7 +1,5 @@
 package io.github.kid141252010.fantastic.data
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -15,15 +13,16 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 /** Native client for Fantastic's server-side NetEase adapter. Account credentials stay on the server. */
-class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val prefs: Prefs) {
+class NeteaseApi(private val api: FantasticApi, private val prefs: Prefs) {
     private val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
         explicitNulls = false
     }
 
-    suspend fun capabilities(): NeteaseCapabilities = get("/ncm/capabilities", NeteaseCapabilities.serializer()).let { response ->
-        response.copy(qualities = response.qualities.filter { it.quality in Prefs.NETEASE_QUALITY_IDS })
+    suspend fun capabilities(server: String = prefs.baseUrl): NeteaseCapabilities {
+        val response = get("/ncm/capabilities", NeteaseCapabilities.serializer(), server)
+        return response.copy(qualities = response.qualities.filter { it.quality in Prefs.NETEASE_QUALITY_IDS })
     }
 
     suspend fun search(
@@ -151,13 +150,8 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
         throw IOException("Invalid Netease response", e)
     }
 
-    private suspend fun request(path: String, server: String = prefs.baseUrl): String = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(server.trimEnd('/') + path).get().build()
-        api.client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            response.body?.string().orEmpty()
-        }
-    }
+    private suspend fun request(path: String, server: String = prefs.baseUrl): String =
+        api.client.readCatalogBody(Request.Builder().url(server.trimEnd('/') + path).build())
 
     internal fun validateCdnUrl(value: String) {
         val uri = try {

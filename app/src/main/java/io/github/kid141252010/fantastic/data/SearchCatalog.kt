@@ -4,6 +4,9 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -14,7 +17,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.longOrNull
 
 /** A search cursor belongs to one source, kind, query and storefront; it never stores a CDN play URL. */
-class SearchCatalog(private val apple: AppleCatalogApi, private val netease: NeteaseApi, private val qq: QqApi, private val prefs: Prefs) {
+class SearchCatalog(private val apple: AppleCatalogApi, private val netease: NeteaseApi, private val qq: QqApi) {
     enum class Kind(val id: String, val title: String, val appleType: AppleCatalogApi.Entity) {
         Song("song", "歌曲", AppleCatalogApi.Entity.Song),
         Artist("artist", "艺人", AppleCatalogApi.Entity.Artist),
@@ -25,34 +28,111 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
     data class Cursor(val source: Source, val kind: Kind, val query: String, val offset: Int, val next: String? = null, val storefront: String)
     data class Page(val items: List<CatalogHit>, val next: Cursor? = null)
     data class Suggestion(val title: String, val query: String? = null, val hit: CatalogHit? = null)
+    internal data class ExactLookup(val source: Source, val kind: Kind, val hit: CatalogHit? = null, val error: String? = null)
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
-    suspend fun search(source: Source, kind: Kind, query: String): Page = load(Cursor(source, kind, query.trim(), 0, storefront = prefs.storefront))
+    suspend fun search(source: Source, kind: Kind, query: String, storefront: String): Page =
+        load(Cursor(source, kind, query.trim(), 0, storefront = storefront))
+
+    internal fun exactMatches(query: String, storefront: String): Flow<ExactLookup> = channelFlow {
+        val id = query.trim()
+        val sources = when {
+            isNumericCatalogId(id) -> Source.entries
+            isQqMid(id) -> listOf(Source.QQ)
+            else -> return@channelFlow
+        }
+        for (source in sources) for (kind in exactKinds) launch {
+            val result = try {
+                val hit = when (source) {
+                    Source.Apple -> apple.entities(kind.appleType, listOf(id), storefront = storefront).data
+                        .firstOrNull { it.id == id && it.type == kind.appleType.route }?.let { appleHit(it, storefront) }
+                    Source.Netease -> neteaseExact(kind, id)
+                    Source.QQ -> if (sources.size == 1) qqMidExact(kind, id) else qqNumericExact(kind, id)
+                }
+                ExactLookup(source, kind, hit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val notFound = if (source == Source.Apple) (e as? AppleCatalogHttpException)?.statusCode == 404
+                    else e is IOException && e.message == "HTTP 404"
+                val message = when {
+                    notFound -> null
+                    e is AppleCatalogHttpException -> "HTTP ${e.statusCode}"
+                    e is IOException -> e.message?.take(160) ?: "无法连接目录服务"
+                    else -> "目录响应格式无效"
+                }
+                ExactLookup(source, kind, error = message)
+            }
+            send(result)
+        }
+    }
+
+    private suspend fun neteaseExact(kind: Kind, id: String): CatalogHit? = when (kind) {
+        Kind.Artist -> netease.artist(id).artist.takeIf { it.mid == id && it.name.isNotBlank() }?.let {
+            CatalogHit(Source.Netease, kind.id, it.mid, it.name, artwork = it.avatar)
+        }
+        Kind.Album -> netease.album(id).album.takeIf { it.mid == id && it.name.isNotBlank() }?.let {
+            CatalogHit(Source.Netease, kind.id, it.mid, it.name, it.artists.joinToString(" / ") { a -> a.name }, it.cover)
+        }
+        Kind.Song -> netease.song(id).song.takeIf { it.id == id && it.name.isNotBlank() }?.let { trackHit(it.toTrack()) }
+        Kind.Playlist, Kind.Video -> null
+    }
+
+    private suspend fun qqMidExact(kind: Kind, id: String): CatalogHit? {
+        val raw = when (kind) {
+            Kind.Artist -> qq.artist(id)["artist"] as? JsonObject ?: throw IOException("QQ 音乐响应缺少艺人资料")
+            Kind.Album -> qq.album(id)["album"] as? JsonObject ?: throw IOException("QQ 音乐响应缺少专辑资料")
+            Kind.Song -> qq.song(id)
+            Kind.Playlist, Kind.Video -> return null
+        }
+        if (raw.text(if (kind == Kind.Song) "id" else "mid") != id || raw.text("name").isBlank()) return null
+        return qqHit(kind, raw)
+    }
+
+    private suspend fun qqNumericExact(kind: Kind, id: String): CatalogHit? {
+        val raw = qq.numericDetail(kind.id, id) ?: return null
+        return when (kind) {
+            Kind.Artist -> CatalogHit(Source.QQ, kind.id, raw.text("singer_mid"), raw.text("singer_name"))
+            Kind.Album -> CatalogHit(Source.QQ, kind.id, raw.text("mid"), raw.text("name"), raw.text("singername"))
+            Kind.Song -> {
+                val artists = (raw["singer"] as? JsonArray).orEmpty().mapNotNull { item ->
+                    val singer = item as? JsonObject ?: return@mapNotNull null
+                    val name = singer.text("name").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    QqArtist(name, singer.text("mid").takeIf(QqApi::isResolvedMid).orEmpty())
+                }
+                val album = raw["album"] as? JsonObject
+                val durationMs = raw.text("interval").toLongOrNull()?.takeIf { it in 0..Long.MAX_VALUE / 1_000 }?.times(1_000) ?: 0
+                trackHit(QqSong(id = raw.text("mid"), name = raw.text("name"), artists = artists, album = album?.text("name").orEmpty(),
+                    albumMid = album?.text("mid")?.takeIf(QqApi::isResolvedMid).orEmpty(), durationMs = durationMs).toTrack())
+            }
+            Kind.Playlist, Kind.Video -> null
+        }
+    }
 
     data class Group(val key: String, val title: String, val kind: Kind?, val items: List<CatalogHit>, val next: Cursor? = null)
     data class GroupFailure(val kind: Kind, val message: String)
     data class GroupedPage(val groups: List<Group>, val failures: List<GroupFailure>)
     private data class GroupOutcome(val kind: Kind, val page: Page? = null, val error: Exception? = null)
 
-    suspend fun searchAll(source: Source, query: String): GroupedPage {
+    suspend fun searchAll(source: Source, query: String, storefront: String): GroupedPage {
         val term = query.trim()
         require(term.isNotEmpty())
         if (source == Source.Apple) {
             val response = apple.search(term, listOf(
                 AppleCatalogApi.Entity.Song, AppleCatalogApi.Entity.Album, AppleCatalogApi.Entity.MusicVideo,
                 AppleCatalogApi.Entity.Playlist, AppleCatalogApi.Entity.Artist,
-            ), limit = 21, storefront = prefs.storefront)
+            ), limit = 21, storefront = storefront)
             val groups = response.groups.mapNotNull { group ->
                 if (group.key == "top") {
-                    val hits = group.page.data.map(::appleHit).distinctBy { "${it.kind}:${it.id}" }.take(6)
+                    val hits = group.page.data.map { appleHit(it, storefront) }.distinctBy { "${it.kind}:${it.id}" }.take(6)
                     return@mapNotNull hits.takeIf { it.isNotEmpty() }?.let { Group("top", "最佳结果", null, it) }
                 }
                 val kind = appleKind(group.key) ?: return@mapNotNull null
-                val hits = group.page.data.filter { appleKind(it.type) == kind }.map(::appleHit)
+                val hits = group.page.data.filter { appleKind(it.type) == kind }.map { appleHit(it, storefront) }
                     .distinctBy { "${it.kind}:${it.id}" }
                 if (hits.isEmpty()) return@mapNotNull null
                 val next = group.page.next?.takeIf(String::isNotBlank)?.let {
-                    Cursor(source, kind, term, hits.size, next = it, storefront = prefs.storefront)
+                    Cursor(source, kind, term, hits.size, next = it, storefront = storefront)
                 }
                 Group(kind.id, kind.title, kind, hits, next)
             }
@@ -63,7 +143,7 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
         val outcomes = supervisorScope {
             kinds.map { kind -> async {
                 try {
-                    GroupOutcome(kind, page = search(source, kind, term))
+                    GroupOutcome(kind, page = search(source, kind, term, storefront))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -93,11 +173,17 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
         val kind = cursor.kind
         val limit = if (source == Source.QQ && kind != Kind.Song) 20 else 30
         if (source == Source.Apple) {
-            val response = if (cursor.next == null) apple.search(cursor.query, listOf(kind.appleType), limit, storefront = cursor.storefront)
-            else apple.searchPage(cursor.next)
+            val response = if (cursor.next == null) {
+                apple.search(cursor.query, listOf(kind.appleType), limit, storefront = cursor.storefront)
+            } else {
+                if (cursor.next.removePrefix("/amp").substringBefore('?') != "/v1/catalog/${cursor.storefront}/search") {
+                    throw IOException("服务器返回了不匹配的 Apple Music 搜索分页链接")
+                }
+                apple.searchPage(cursor.next)
+            }
             val page = response.groups.firstOrNull { appleKind(it.key) == kind }?.page
                 ?: response.groups.firstOrNull { group -> group.page.data.any { appleKind(it.type) == kind } }?.page
-            val items = page?.data.orEmpty().filter { appleKind(it.type) == kind }.map(::appleHit)
+            val items = page?.data.orEmpty().filter { appleKind(it.type) == kind }.map { appleHit(it, cursor.storefront) }
             val next = page?.next?.takeIf { it.isNotBlank() }
             if (next != null && (next == cursor.next || items.isEmpty())) throw IOException("搜索分页没有前进")
             return Page(items, next?.let { cursor.copy(offset = cursor.offset + items.size, next = it) })
@@ -133,11 +219,11 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
         return Page(items, if (rawCount > 0 && hasMore && offset <= 10_000) cursor.copy(offset = offset) else null)
     }
 
-    suspend fun suggestions(source: Source, query: String): List<Suggestion> {
+    suspend fun suggestions(source: Source, query: String, storefront: String): List<Suggestion> {
         if (query.isBlank()) return emptyList()
         val values = when (source) {
-            Source.Apple -> apple.suggestions(query).mapNotNull { item ->
-                item.content?.let { resource -> Suggestion(resource.name, hit = appleHit(resource)) }
+            Source.Apple -> apple.suggestions(query, storefront = storefront).mapNotNull { item ->
+                item.content?.let { resource -> Suggestion(resource.name, hit = appleHit(resource, storefront)) }
                     ?: item.searchTerm?.let { Suggestion(item.displayTerm ?: it, query = it) }
             }
             Source.Netease -> netease.suggest(query).let { result ->
@@ -189,12 +275,22 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
     private fun JsonObject.text(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
 
     companion object {
+        private val exactKinds = listOf(Kind.Artist, Kind.Album, Kind.Song)
+
+        private fun isQqMid(value: String): Boolean =
+            value.length == 14 && value.any { it in '0'..'9' } && QqApi.isResolvedMid(value)
+
+        internal fun isIdQuery(query: String): Boolean {
+            val id = query.trim()
+            return isNumericCatalogId(id) || isQqMid(id)
+        }
+
         fun trackHit(track: Track) = CatalogHit(track.source, "song", track.id, track.title, track.artist, track.artwork(500), track, detailOnly = false)
-        fun appleHit(resource: AppleCatalogResource): CatalogHit = CatalogHit(Source.Apple,
+        fun appleHit(resource: AppleCatalogResource, storefront: String): CatalogHit = CatalogHit(Source.Apple,
             when (resource.type) { "songs" -> "song"; "artists" -> "artist"; "albums" -> "album"; "playlists" -> "playlist";
                 "music-videos" -> "music-video"; "stations" -> "station"; "uploaded-videos" -> "post"; else -> resource.type },
             resource.id, resource.name, resource.artist, resource.artworkUrl(500),
-            resource.toTrack().takeIf { resource.type == "songs" }, resource.explicit,
-            resource.type != "songs", resource.attributes)
+            resource.toTrack(storefront), resource.explicit,
+            resource.type != "songs", resource.attributes, country = storefront)
     }
 }

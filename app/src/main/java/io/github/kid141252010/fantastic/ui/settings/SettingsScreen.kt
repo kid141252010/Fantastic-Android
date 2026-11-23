@@ -41,12 +41,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.BuildConfig
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.AppleLyricsOptions
-import io.github.kid141252010.fantastic.data.AppleStorefront
 import io.github.kid141252010.fantastic.data.NeteaseCapabilities
 import io.github.kid141252010.fantastic.data.PlaybackCacheLimit
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.isValidAppleLyricsTag
+import io.github.kid141252010.fantastic.data.normalizeAppleStorefront
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3PreferenceRow
@@ -62,10 +62,9 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
     val diag by lyrics.diag.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val initialBaseUrl = remember { prefs.baseUrl }
-    var baseUrl by remember { mutableStateOf(prefs.baseUrl) }
-    val initialStorefront = remember { prefs.storefront }
-    var storefront by remember { mutableStateOf(prefs.storefront) }
+    val catalogSettings by app.appleStorefronts.state.collectAsStateWithLifecycle()
+    var baseUrl by remember { mutableStateOf(catalogSettings.baseUrl) }
+    var storefront by remember { mutableStateOf(catalogSettings.selected) }
     var qqQuality by remember { mutableStateOf(prefs.qqQuality) }
     var neteaseQuality by remember { mutableStateOf(prefs.neteaseQuality) }
     var appleDownloadQuality by remember { mutableStateOf(prefs.appleQuality) }
@@ -86,8 +85,6 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
     var wrapperStatus by remember { mutableStateOf<SourceStatus.Wrapper?>(null) }
     var wrapperError by remember { mutableStateOf<String?>(null) }
     var checkedAddress by remember { mutableStateOf<String?>(null) }
-    var appleStorefronts by remember { mutableStateOf<List<AppleStorefront>>(emptyList()) }
-    var storefrontServer by remember { mutableStateOf<String?>(null) }
     var storefrontError by remember { mutableStateOf<String?>(null) }
     var storefrontNotice by remember { mutableStateOf<String?>(null) }
     var neteaseCapabilities by remember { mutableStateOf<NeteaseCapabilities?>(null) }
@@ -106,6 +103,7 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
     }
 
     fun closeSettings() {
+        if (checking) return
         val language = appleLyricsLanguage.trim().ifEmpty { defaultLyricsOptions.language }
         val script = appleLyricsScript.trim().ifEmpty { defaultLyricsOptions.script }
         lyricsLanguageError = !isValidAppleLyricsTag(language)
@@ -117,26 +115,23 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
             saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
             return
         }
-        val original = SourceStatus.normalizeBaseUrl(initialBaseUrl)
-        val selectedStorefront = storefront.trim().lowercase()
-        if (!selectedStorefront.matches(Regex("[a-z]{2}"))) {
+        val selectedStorefront = normalizeAppleStorefront(storefront)
+        if (selectedStorefront == null) {
             saveError = "Apple Music 店面必须是两位英文字母代码，例如 us、tr 或 jp。"
             return
         }
-        val sourceChanged = normalized != original || selectedStorefront != initialStorefront
-        val storefrontWasVerified = storefrontServer == normalized && appleStorefronts.any { it.id == selectedStorefront }
-        if (sourceChanged && !storefrontWasVerified) {
-            saveError = "请先检查服务器；只保存该 Fantastic 服务器实际提供的 Apple Music 店面。"
-            return
-        }
-        if (normalized != original &&
-            (checkedAddress != normalized || wrapperStatus?.serverReachable != true)
-        ) {
+        val accepted = app.appleStorefronts.state.value
+        if (normalized != accepted.baseUrl) {
             saveError = "请先检查新服务器并确认其返回有效的 Fantastic /status。"
             return
         }
-        prefs.baseUrl = normalized
-        if (storefrontWasVerified) prefs.storefront = selectedStorefront
+        if (selectedStorefront != accepted.selected) {
+            if (accepted.available.none { it.id == selectedStorefront }) {
+                saveError = "请先检查服务器；只保存该 Fantastic 服务器实际提供的 Apple Music 店面。"
+                return
+            }
+            app.appleStorefronts.select(normalized, selectedStorefront)
+        }
         persistPlaybackSettings()
         val lyricsOptions = AppleLyricsOptions(language, script)
         if (lyricsOptions != prefs.appleLyricsOptions) {
@@ -147,14 +142,14 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
     }
 
     fun checkServer() {
+        if (checking) return
         val normalized = SourceStatus.normalizeBaseUrl(baseUrl)
         if (normalized == null) {
             saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
             return
         }
-        val previousStorefront = prefs.storefront
-        val requestedStorefront = storefront.trim().lowercase()
-        if (!requestedStorefront.matches(Regex("[a-z]{2}"))) {
+        val requestedStorefront = normalizeAppleStorefront(storefront)
+        if (requestedStorefront == null) {
             saveError = "Apple Music 店面必须是两位英文字母代码，例如 us、tr 或 jp。"
             return
         }
@@ -168,8 +163,6 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
         neteaseError = null
         checkedAddress = normalized
         checking = true
-        val previousBaseUrl = prefs.baseUrl
-        var serverAccepted = false
 
         scope.launch {
             try {
@@ -184,28 +177,24 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
                     wrapperError = "此地址未返回有效的 Fantastic /status。"
                     return@launch
                 }
+                if (status.httpCode !in 200..299) {
+                    wrapperError = "HTTP ${status.httpCode}，未保存服务器配置。"
+                    return@launch
+                }
 
-                prefs.baseUrl = normalized
                 coroutineScope {
-                    val storefrontRequest = async { sourceResult { app.apple.storefronts() } }
-                    val neteaseRequest = async { sourceResult { app.netease.capabilities() } }
+                    val storefrontRequest = async { sourceResult { app.apple.storefronts(normalized) } }
+                    val neteaseRequest = async { sourceResult { app.netease.capabilities(server = normalized) } }
 
                     val storefrontResult = storefrontRequest.await()
                     storefrontResult.fold(
                         onSuccess = { available ->
-                            val selected = available.firstOrNull { it.id == requestedStorefront }
-                            val fallback = selected ?: available.firstOrNull { it.id == previousStorefront } ?: available.firstOrNull()
-                            if (fallback == null) {
-                                storefrontError = "服务器未返回可用 Apple Music 店面。"
-                            } else {
-                                appleStorefronts = available
-                                storefrontServer = normalized
-                                prefs.storefront = fallback.id
-                                storefront = fallback.id
-                                serverAccepted = true
-                                if (selected == null) {
-                                    storefrontNotice = "店面 $requestedStorefront 不在此服务器的可用列表中；已改用 ${fallback.id}（${fallback.name}）。"
-                                }
+                            val accepted = app.appleStorefronts.acceptCheckedServer(normalized, requestedStorefront, available)
+                            baseUrl = accepted.baseUrl
+                            storefront = accepted.selected
+                            if (requestedStorefront != accepted.selected) {
+                                val name = accepted.available.first { it.id == accepted.selected }.name
+                                storefrontNotice = "店面 $requestedStorefront 不在此服务器的可用列表中；已改用 ${accepted.selected}（$name）。"
                             }
                         },
                         onFailure = { storefrontError = it.message ?: "无法读取 Apple Music 店面列表" },
@@ -215,10 +204,6 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
                         onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
                     )
                 }
-                if (!serverAccepted) prefs.baseUrl = previousBaseUrl
-            } catch (e: CancellationException) {
-                if (!serverAccepted) prefs.baseUrl = previousBaseUrl
-                throw e
             } finally {
                 checking = false
             }
@@ -231,7 +216,7 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
             topBar = {
                 TopAppBar(
                     title = { Text("设置") },
-                    actions = { TextButton(onClick = ::closeSettings) { Text("完成") } },
+                    actions = { TextButton(onClick = ::closeSettings, enabled = !checking) { Text("完成") } },
                 )
             },
         ) { innerPadding ->
@@ -242,6 +227,7 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
                 item {
                     Md3SectionHeader("服务器")
                     OutlinedTextField(
+                        enabled = !checking,
                         value = baseUrl,
                         onValueChange = { baseUrl = it; saveError = null },
                         label = { Text("Fantastic 服务器地址") },
@@ -252,6 +238,7 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
                         } else null,
                     )
                     OutlinedTextField(
+                        enabled = !checking,
                         value = storefront,
                         onValueChange = { storefront = it; saveError = null },
                         label = { Text("Apple Music 店面（如 us、tr、jp）") },
@@ -279,8 +266,9 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
                     wrapperError?.let {
                         StatusMessage("无法读取此 Fantastic 服务器的 /status：$it。请确认地址、网络及服务器是否允许客户端访问。", isError = true)
                     }
-                    if (storefrontServer != null) {
-                        StatusMessage("Apple Music 店面 (${appleStorefronts.size})：${appleStorefronts.joinToString { "${it.id} ${it.name}" }}")
+                    if (catalogSettings.available.isNotEmpty() && SourceStatus.normalizeBaseUrl(baseUrl) == catalogSettings.baseUrl) {
+                        val available = catalogSettings.available
+                        StatusMessage("Apple Music 店面 (${available.size})：${available.joinToString { "${it.id} ${it.name}" }}")
                     }
                     storefrontError?.let {
                         StatusMessage("无法验证 Apple 店面：$it。请确认该服务器提供 /amp/v1/storefronts。", isError = true)

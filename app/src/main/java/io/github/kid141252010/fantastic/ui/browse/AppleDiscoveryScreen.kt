@@ -34,6 +34,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,12 +50,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.AppleCatalogResource
 import io.github.kid141252010.fantastic.data.AppleCatalogResponse
 import io.github.kid141252010.fantastic.data.AppleCatalogApi
 import io.github.kid141252010.fantastic.data.CatalogHit
+import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
@@ -74,7 +77,22 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, onOpen: (CatalogHit) -> Unit, searchLanding: Boolean = false, modifier: Modifier = Modifier) {
-    val storefront = app.prefs.storefront
+    val settings by app.appleStorefronts.state.collectAsStateWithLifecycle()
+    key(settings.baseUrl, settings.selected) {
+        AppleDiscoveryContent(app, settings.selected, radio, onOpen, searchLanding, modifier)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppleDiscoveryContent(
+    app: FantasticApp,
+    storefront: String,
+    radio: Boolean,
+    onOpen: (CatalogHit) -> Unit,
+    searchLanding: Boolean,
+    modifier: Modifier,
+) {
     val initialArea = if (searchLanding) AREA_CATEGORIES else if (radio) AREA_RADIO else AREA_NEW
     var area by rememberSaveable(initialArea) { mutableStateOf(initialArea) }
     var stack by remember(initialArea) { mutableStateOf(emptyList<BrowseTarget>()) }
@@ -134,6 +152,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, onOpen: (CatalogHit)
                 title = destination.title,
                 artwork = artwork,
                 detailOnly = true,
+                country = storefront,
             ))
         } else {
             stack = stack + destination
@@ -147,7 +166,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, onOpen: (CatalogHit)
             openTarget(editorialTarget, resource.artworkUrl(500))
             return
         }
-        onOpen(resource.toCatalogHit())
+        onOpen(SearchCatalog.appleHit(resource, storefront))
     }
 
     val title = when {
@@ -631,31 +650,6 @@ private fun AppleCatalogResource.toEntry(
         resource = takeIf { type != "editorial-elements" },
         target = target,
         rank = rank,
-    )
-}
-
-private fun AppleCatalogResource.toCatalogHit(): CatalogHit {
-    val kind = when (type) {
-        "songs" -> "song"
-        "artists" -> "artist"
-        "albums" -> "album"
-        "playlists" -> "playlist"
-        "music-videos" -> "music-video"
-        "stations" -> "station"
-        "uploaded-videos" -> "post"
-        else -> type
-    }
-    return CatalogHit(
-        source = Source.Apple,
-        kind = kind,
-        id = id,
-        title = name,
-        subtitle = artist,
-        artwork = artworkUrl(500),
-        track = toTrack(),
-        explicit = explicit,
-        detailOnly = type != "songs",
-        attributes = attributes,
     )
 }
 

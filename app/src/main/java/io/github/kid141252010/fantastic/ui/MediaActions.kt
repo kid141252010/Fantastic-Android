@@ -53,6 +53,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
+import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.playback.DownloadStatus
@@ -116,8 +117,7 @@ internal fun MediaActionContent(
         snapshot.playlists.forEach { playlist ->
             SheetAction(playlist.name, Icons.AutoMirrored.Outlined.PlaylistAdd, detail = "本地播放列表", onClick = {
                 if (hit.kind == "song" || hit.kind == "music-video") library.addToPlaylist(playlist.id, hit)
-                else tracks.forEach { track -> library.addToPlaylist(playlist.id, CatalogHit(
-                    track.source, "song", track.id, track.title, track.artist, track.artwork(500), track, detailOnly = false)) }
+                else tracks.forEach { track -> library.addToPlaylist(playlist.id, SearchCatalog.trackHit(track)) }
                 onDismiss()
             })
         }

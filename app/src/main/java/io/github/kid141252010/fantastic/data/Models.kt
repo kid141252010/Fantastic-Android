@@ -1,9 +1,19 @@
 package io.github.kid141252010.fantastic.data
 
+import java.util.Locale
 import kotlinx.serialization.Serializable
 
 @Serializable
 enum class Source(val mediaPrefix: String) { Apple("apple"), QQ("qq"), Netease("ncm") }
+
+internal fun normalizeAppleStorefront(value: String?): String? = value?.trim()
+    ?.takeIf { it.length == 2 && it.all { c -> c in 'a'..'z' || c in 'A'..'Z' } }
+    ?.lowercase(Locale.ROOT)
+
+private val numericCatalogId = Regex("[1-9][0-9]{0,18}")
+
+internal fun isNumericCatalogId(value: String): Boolean =
+    numericCatalogId.matches(value) && value.toLongOrNull() != null
 
 /** 界面统一使用的歌曲。 */
 @Serializable
@@ -18,6 +28,7 @@ data class Track(
     val durationMs: Long,
     val artistId: String = "",
     val albumId: String = "",
+    val storefront: String? = null,
 ) {
     fun artwork(size: Int): String? {
         // QQ 封面只有固定几档尺寸，其他尺寸（如 600、120）返回 404；取不小于所需的最小一档
@@ -86,10 +97,11 @@ data class AmSongAttributes(
 
 @Serializable
 data class AmSong(val id: String, val type: String = "", val attributes: AmSongAttributes? = null) {
-    fun toTrack(): Track {
+    fun toTrack(storefront: String): Track {
         val a = attributes ?: AmSongAttributes()
         // Apple 的模板是 {w}x{h}bb.jpg，replace 后即可直接用。
-        return Track(id, Source.Apple, a.name, a.artistName, a.albumName, a.artwork?.url, a.durationInMillis)
+        return Track(id, Source.Apple, a.name, a.artistName, a.albumName, a.artwork?.url, a.durationInMillis,
+            storefront = storefront)
     }
 }
 

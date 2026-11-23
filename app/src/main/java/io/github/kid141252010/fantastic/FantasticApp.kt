@@ -2,6 +2,7 @@ package io.github.kid141252010.fantastic
 
 import android.app.Application
 import io.github.kid141252010.fantastic.data.AppleCatalogApi
+import io.github.kid141252010.fantastic.data.AppleStorefronts
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.MusicLibrary
 import io.github.kid141252010.fantastic.data.NeteaseApi
@@ -25,6 +26,7 @@ class FantasticApp : Application() {
     internal val downloads by lazy { OfflineDownloads(this, prefs, api) }
     internal val playbackCache by lazy { PlaybackCache(this, prefs, AudioFileTransfer(this, api)) }
     val apple by lazy { AppleCatalogApi(api, prefs, File(cacheDir, "apple-motion-artwork.json")) }
+    internal val appleStorefronts by lazy { AppleStorefronts(prefs, apple) }
     internal val motionArtworkDataSource by lazy { createMotionArtworkDataSource(this) }
     val netease by lazy { NeteaseApi(api, prefs) }
     val qq by lazy { QqApi(api) }
