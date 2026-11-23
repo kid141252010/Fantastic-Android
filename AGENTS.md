@@ -49,8 +49,8 @@ Local builds can optionally load fonts from the ignored directory `.work/local-a
 
 ## 提交与 APK 交付
 
-- 每轮修改完成后，在当前分支只提交本次任务的改动。逐块核对提交内容，保留工作区中其他已暂存和未暂存的改动。
-- 当前分支名称与改动范围不符时，先询问用户使用哪个分支，再提交。
+- 开始新任务前，按类型新建分支。新功能用 `feat/<主题>`，缺陷修复用 `fix/<主题>`，文档用 `docs/<主题>`，日常维护用 `chore/<主题>`。
+- 任务完成后，逐块核对并只提交本次改动，保留其他已暂存和未暂存的改动。主动将任务分支推送到 `origin`，无需等待用户提醒或另行确认。
 - 提交后用上文指定的 JDK、Gradle 和 SDK 重新编译并打包。先执行 `gradle :app:compileDebugKotlin --offline --rerun-tasks --console=plain`，再执行 `gradle :app:assembleDebug --offline --console=plain`。交付本次 APK 路径和构建结果，由用户安装并验收界面、设备和播放行为。
 
 ## Code Conventions & Common Patterns
