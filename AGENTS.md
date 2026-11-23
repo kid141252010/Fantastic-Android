@@ -39,6 +39,12 @@ gradle :app:assembleDebug --stacktrace
 
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in ignored `local.properties` or configure the Android SDK through the environment; do not commit machine-specific paths.
 
+## 提交与 APK 交付
+
+- 每轮修改完成后，在当前分支只提交本次任务的改动。逐块核对提交内容，保留工作区中其他已暂存和未暂存的改动。
+- 当前分支名称与改动范围不符时，先询问用户使用哪个分支，再提交。
+- 提交后用上文指定的 JDK、Gradle 和 SDK 重新编译并打包。先执行 `gradle :app:compileDebugKotlin --offline --rerun-tasks --console=plain`，再执行 `gradle :app:assembleDebug --offline --console=plain`。交付本次 APK 路径和构建结果，由用户安装并验收界面、设备和播放行为。
+
 ## Code Conventions & Common Patterns
 
 - Follow Kotlin official style (`kotlin.code.style=official`): four-space indentation, `PascalCase` types/composables, and `camelCase` functions/properties. User-visible strings and existing comments are predominantly Chinese.
