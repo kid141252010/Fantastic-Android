@@ -41,6 +41,12 @@ adb shell am start -n io.github.kid141252010.fantastic/.MainActivity
 
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in ignored `local.properties` or configure the Android SDK through the environment; do not commit machine-specific paths.
 
+### Local release APKs
+
+Build the unsigned release APK with `gradle :app:assembleRelease -PincludeLocalAmFonts=false`. Align `app/build/outputs/apk/release/app-release-unsigned.apk` with `zipalign`, then sign it with `apksigner` and the existing release key. The signing certificate must match the previous release for an in-place update.
+
+Local builds can optionally load fonts from the ignored directory `.work/local-am-fonts/assets/am-fonts/`. Set `-PincludeLocalAmFonts=false` to use the Android system fallback.
+
 ## 提交与 APK 交付
 
 - 每轮修改完成后，在当前分支只提交本次任务的改动。逐块核对提交内容，保留工作区中其他已暂存和未暂存的改动。
