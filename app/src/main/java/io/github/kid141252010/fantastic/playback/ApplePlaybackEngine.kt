@@ -78,7 +78,7 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
     private val closed = AtomicBoolean(false)
     private var webView: WebView? = null
     private var baseUrl = ""
-    private var loadStartedAt = 0L
+    private var readyStartedAt = 0L
     private var poller: Runnable? = null
     private var readyPoller: Runnable? = null
     private var lastPositionMs = 0L
@@ -105,6 +105,12 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
     private var variantDetailChannels: String? = null
     private var variantDetailBandwidth = 0L
     private var variantDetailValue: String? = null
+
+    internal fun prewarm(server: String) = onMain {
+        if (closed.get()) return@onMain
+        val normalized = SourceStatus.normalizeBaseUrl(server) ?: return@onMain
+        ensureCurrentServer(normalized)
+    }
 
     fun position(): Long {
         val state = _state.value
@@ -147,7 +153,14 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
             error = null, quality = null, qualityLabel = null, audioDetails = null, queue = songs.map { it.track }, queueIndex = index,
             hasPrevious = true, hasNext = index < songs.lastIndex,
             seekGeneration = previous.seekGeneration + 1)
-        if (!playWhenReady || !ensureCurrentServer(scope.server)) return@onMain
+        if (!playWhenReady) return@onMain
+        val normalized = SourceStatus.normalizeBaseUrl(scope.server) ?: run {
+            destroyView()
+            publishError("Fantastic 服务器地址无效")
+            return@onMain
+        }
+        readyStartedAt = SystemClock.uptimeMillis()
+        ensureCurrentServer(normalized)
         val run = HostedRun(baseUrl, scope.storefront, applePlaybackProfile(appContext, prefs))
         hostedRun = run
         schedulePoll()
@@ -415,7 +428,7 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
             return
         }
         recordStartup(StartupStage.Page)
-        if (android.os.SystemClock.uptimeMillis() - loadStartedAt > READY_TIMEOUT_MS) {
+        if (SystemClock.uptimeMillis() - readyStartedAt > READY_TIMEOUT_MS) {
             destroyView()
             publishError("连接 Fantastic 播放器超时")
             return
@@ -434,23 +447,20 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
         main.postDelayed(task, READY_POLL_MS)
     }
 
-    private fun ensureCurrentServer(server: String): Boolean {
-        if (closed.get()) return false
-        val normalized = SourceStatus.normalizeBaseUrl(server) ?: run {
-            destroyView()
-            publishError("Fantastic 服务器地址无效")
-            return false
-        }
-        if (normalized == baseUrl && webView != null) return true
+    private fun ensureCurrentServer(normalized: String) {
+        if (normalized == baseUrl && webView != null) return
         destroyView()
         baseUrl = normalized
-        loadStartedAt = android.os.SystemClock.uptimeMillis()
         _state.value = _state.value.copy(connected = false)
         recordStartup(StartupStage.Page)
         val view = newWebView(appContext, normalized)
         webView = view
         view.loadUrl("$normalized/")
-        return true
+    }
+
+    private fun failPage(message: String) {
+        destroyView()
+        if (waitingToPlay || hostedRun != null) publishError(message)
     }
 
     private fun destroyView() {
@@ -488,8 +498,7 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 if (view === webView && !sameOrigin(Uri.parse(server), Uri.parse(url))) {
-                    destroyView()
-                    publishError("已阻止跳转到其他播放服务器")
+                    failPage("已阻止跳转到其他播放服务器")
                 }
             }
 
@@ -508,16 +517,14 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 super.onReceivedError(view, request, error)
                 if (view === webView && request.isForMainFrame) {
-                    destroyView()
-                    publishError("Fantastic 播放页加载失败：${error.description}")
+                    failPage("Fantastic 播放页加载失败：${error.description}")
                 }
             }
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 super.onReceivedHttpError(view, request, response)
                 if (view === webView && request.isForMainFrame) {
-                    destroyView()
-                    publishError("Fantastic 播放页加载失败：HTTP ${response.statusCode}")
+                    failPage("Fantastic 播放页加载失败：HTTP ${response.statusCode}")
                 }
             }
         }

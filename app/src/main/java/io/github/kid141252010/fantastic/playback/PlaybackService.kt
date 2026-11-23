@@ -90,6 +90,7 @@ class PlaybackService : MediaSessionService() {
             })
         }
         player.restore()
+        apple.prewarm(app.prefs.baseUrl)
     }
 
     /**
