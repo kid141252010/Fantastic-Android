@@ -9,13 +9,13 @@
 
 ## Project Overview
 
-Fantastic Android is a Kotlin/Jetpack Compose client for a user-configured Fantastic server. Search supports QQ Music and Apple Music. QQ playback uses Media3; Apple playback is delegated to Fantastic’s web player through `ApplePlaybackEngine`. The app includes library and Apple discovery/radio surfaces; Home remains a placeholder. Project-authored code is Apache-2.0; bundled assets retain their own notices.
+Fantastic Android is a Kotlin and Jetpack Compose client for a user-configured Fantastic server. It supports Apple Music, QQ Music, and NetEase Cloud Music, with library, discovery, and radio screens. Home provides the settings entry point. [Features and setup](README.md)
 
 ## Architecture & Data Flow
 
 - `FantasticApp` is the process-wide manual dependency container. It creates shared `Prefs` and `FantasticApi` instances and lazily provides API clients, `PlayerConnection`, and `LyricsController`; reuse them instead of adding a DI framework.
-- `MainActivity` hosts `FantasticTheme` and `AppShell`. Navigation is Compose state and overlays, not a Navigation component graph. `SearchScreen` debounces input, calls `FantasticApi`, and maps serialized responses to `Track`.
-- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ/NetEase use the native ExoPlayer resolver path; Apple items are handled by `ApplePlaybackEngine` behind the same Media3 session. UI state and commands flow through `PlayerConnection` and read-only `StateFlow`.
+- `MainActivity` hosts `FantasticTheme` and `AppShell`. Compose state and overlays drive navigation. `SearchScreen` debounces queries and uses the source catalog clients to populate results.
+- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ Music, NetEase Cloud Music, and local audio use Media3. Online Apple Music uses Fantastic’s web player through `ApplePlaybackEngine`, with shared session state exposed through `PlayerConnection`.
 - `MusicLibrary` serializes mutations on an IO coroutine scope, persists snapshots with `AtomicFile`, and exposes immutable state through `StateFlow`.
 - The parser loads local ES modules through `WebViewAssetLoader` at `https://appassets.androidplatform.net/assets/lyrics/`, not `file://`. Preserve the `ready`/`status` bridge, `parseFantasticLyrics` contract, and attach-after-background-load lifecycle. The WebView parses; it does not render the playback surface.
 
@@ -23,12 +23,12 @@ Fantastic Android is a Kotlin/Jetpack Compose client for a user-configured Fanta
 
 Paths below are relative to `app/src/main/java/io/github/kid141252010/fantastic/` unless stated otherwise:
 
-- `data/`: preferences, Fantastic/Apple/QQ API clients, DTOs, and `Track` conversion.
+- `data/` owns preferences, source catalog clients, DTOs, and `Track` conversion.
 - `playback/`: service-owned player, Media3 session, and UI-facing connection/state.
 - `lyrics/`: lyric loading/parsing lifecycle, synchronization, RecyclerView layout, Canvas renderer, and motion curves.
 - `ui/`: Compose shell, search, player, settings, and theme.
 - `app/src/main/assets/lyrics/`: local parser modules, the optional ICU-backed word segmenter, and third-party dictionary notices.
-- `scripts/sync-lyrics.sh`: refreshes only the permissively licensed ICU dictionary; it must not overwrite local parser modules.
+- `scripts/sync-lyrics.sh` refreshes the ICU CJK dictionary and reads its notices from a Fantastic checkout. Keep the locally maintained parser modules in this repository.
 
 ## Development Commands
 
@@ -36,12 +36,9 @@ There is no Gradle wrapper. Use Gradle 8.11.1, JDK 17, and Android SDK 35 from t
 
 ```sh
 gradle :app:assembleDebug
-gradle :app:lintDebug # standard AGP task; not run by CI
 gradle :app:installDebug
 adb shell am start -n io.github.kid141252010.fantastic/.MainActivity
 bash scripts/sync-lyrics.sh /path/to/Fantastic
-# CI installs Temurin JDK 17 and Gradle 8.11.1, then runs:
-gradle :app:assembleDebug --stacktrace
 ```
 
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in ignored `local.properties` or configure the Android SDK through the environment; do not commit machine-specific paths.
@@ -72,9 +69,9 @@ The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in i
 - Root `LICENSE` is Apache-2.0 and `app/build.gradle.kts` copies it into the APK assets during `preBuild`.
 - `app/build.gradle.kts`, root `build.gradle.kts`, `settings.gradle.kts`, and `gradle.properties`: Android and Kotlin build configuration.
 - `.github/workflows/android.yml`: CI APK build and nightly publication.
-- `app/src/main/assets/lyrics/README.md`, `lyrics.mjs`, `ttml.mjs`, `word-segmenter.mjs`, and `CJDICT-LICENSE.txt`: local parser ownership and retained dictionary notice.
+- `app/src/main/assets/lyrics/` contains the local parser and provider adapters. The renderer guide explains the timing model and the dictionary guide records upstream attribution. [Lyrics](app/src/main/assets/lyrics/README.md) · [Dictionary](app/src/main/assets/lyrics/CJDICT-README.md)
 - `data/MusicLibrary.kt`, `ui/library/MusicLibraryScreen.kt`: local catalog library state and UI.
-- `ui/player/AppleMediaScreen.kt`, `ui/browse/AppleDiscoveryScreen.kt`, `APPLE_MUSIC_PARITY.md`: Apple media WebView surfaces, discovery, and implementation gaps.
+- `ui/player/AppleMediaScreen.kt` and `ui/browse/AppleDiscoveryScreen.kt` handle media pages and discovery. [Player behavior and device acceptance](APPLE_MUSIC_PARITY.md)
 
 ## Runtime/Tooling Preferences
 
