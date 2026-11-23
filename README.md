@@ -32,6 +32,6 @@ Android 8.0 及以上可以安装。
 
 ## 许可证
 
-本项目自己写的代码是 Apache-2.0。包里带上的第三方组件仍用它们自己的许可证。
+本项目自己写的代码是 Apache-2.0。
 
 启动图标改编自 Fantastic 的旧版红色图标。[上游 SVG](https://github.com/kid141252010/Fantastic/blob/73d1f19c7f49dc77413f5d32f92f639df2a850df/web/icons/icon.svg)
