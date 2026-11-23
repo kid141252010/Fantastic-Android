@@ -84,18 +84,16 @@ function normalizeContainerTokens(tokens, rightAligned) {
     const text = tokenText(token);
     const first = text.search(/\S/u);
     if (first < 0) {
-      pending += text;
+      if (text) pending = ' ';
       continue;
     }
     const end = text.trimEnd().length;
-    pending += text.slice(0, first);
-    if (result.length && !rightAligned) {
-      result[result.length - 1].text += pending;
-      pending = '';
-    }
-    const prefix = !result.length || rightAligned ? pending : '';
+    const leading = text.slice(0, first);
+    const gap = pending || leading ? ' ' : '';
+    if (result.length && !rightAligned && gap) result[result.length - 1].text += gap;
+    const prefix = result.length && rightAligned ? gap : '';
     result.push({ ...token, text: `${prefix}${text.slice(first, end)}`, whitespace: false, spaceAfter: false });
-    pending = text.slice(end);
+    pending = text.length > end ? ' ' : '';
   }
   return result;
 }
