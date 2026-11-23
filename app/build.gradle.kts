@@ -11,20 +11,24 @@ android {
     namespace = "io.github.kid141252010.fantastic"
     compileSdk = 35
     sourceSets.getByName("main").assets.srcDir(generatedLicenseAssets)
+    // Optional private fonts exist only in this checkout; CI without them uses Android fonts.
+    val localAmFontAssets = rootProject.file(".work/local-am-fonts/assets")
+    if (providers.gradleProperty("includeLocalAmFonts").orNull != "false" && localAmFontAssets.isDirectory) {
+        sourceSets.getByName("main").assets.srcDir(localAmFontAssets)
+    }
 
     defaultConfig {
         applicationId = "io.github.kid141252010.fantastic"
         minSdk = 26
         targetSdk = 35
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionName = "1.0.0"
         // 设置页「歌词诊断」显示构建对应的提交，便于确认手机上装的是哪个 nightly
         buildConfigField("String", "GIT_SHA", "\"${(System.getenv("GITHUB_SHA") ?: "local").take(7)}\"")
     }
 
     // 固定的调试签名（仓库里的 app/debug.keystore），每次 CI 构建签名一致，新包能直接覆盖安装。
-    // 这把密钥是公开的，只用于测试版；正式发布另用保存在 Secrets 里的密钥。
+    // 这把密钥是公开的，只用于调试版。发行包由专用密钥单独签名。
     signingConfigs {
         getByName("debug") {
             storeFile = file("debug.keystore")
@@ -38,7 +42,6 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -71,23 +74,17 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
-    // 测试里用 ComponentActivity 承载 WebView
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test:core-ktx:1.6.1")
-    androidTestImplementation("androidx.test:rules:1.6.1")
-    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
-    androidTestImplementation(composeBom)
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
 
     val media3 = "1.5.1"
     implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3")
+    implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-session:$media3")
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")

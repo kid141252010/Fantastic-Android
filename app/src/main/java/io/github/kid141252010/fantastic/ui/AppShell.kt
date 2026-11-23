@@ -1,12 +1,6 @@
 package io.github.kid141252010.fantastic.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionLayout
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -35,7 +29,6 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
@@ -47,22 +40,37 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.haze
 import io.github.kid141252010.fantastic.FantasticApp
-import io.github.kid141252010.fantastic.ui.player.MiniPlayer
-import io.github.kid141252010.fantastic.ui.player.NowPlaying
-import io.github.kid141252010.fantastic.ui.player.nowPlayingEnter
-import io.github.kid141252010.fantastic.ui.player.nowPlayingExit
+import io.github.kid141252010.fantastic.data.CatalogHit
+import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.ui.library.MusicLibraryScreen
+import io.github.kid141252010.fantastic.ui.browse.AppleDiscoveryScreen
+import io.github.kid141252010.fantastic.ui.player.AppleMediaScreen
+import io.github.kid141252010.fantastic.ui.player.PlayerPane
+import io.github.kid141252010.fantastic.ui.player.PlayerSheetHost
+import io.github.kid141252010.fantastic.ui.search.CatalogDetails
 import io.github.kid141252010.fantastic.ui.search.SearchScreen
 import io.github.kid141252010.fantastic.ui.settings.SettingsScreen
 import io.github.kid141252010.fantastic.ui.theme.TabAccent
-
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import kotlin.math.exp
 enum class Tab(val label: String, val icon: ImageVector) {
     Home("主页", Icons.Rounded.Home),
     New("新发现", Icons.Rounded.GridView),
@@ -73,77 +81,124 @@ enum class Tab(val label: String, val icon: ImageVector) {
 
 /**
  * 外壳：页面铺满全屏（内容一直延伸到屏幕底部），底部悬浮玻璃迷你播放条 + 玻璃标签栏，
- * 玻璃取样页面内容做模糊。全屏播放页从迷你条展开，封面共享元素过渡。
+ * 玻璃取样页面内容做模糊；迷你、全屏播放器与主底栏由同一 sheet progress 驱动。
  */
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun AppShell(app: FantasticApp) {
     var tab by rememberSaveable { mutableStateOf(Tab.Home) }
     var nowPlaying by rememberSaveable { mutableStateOf(false) }
-    var settings by remember { mutableStateOf(false) }
-    val player by app.player.state.collectAsStateWithLifecycle()
-    // 提前建好歌词控制器：切歌时就预取歌词，打开歌词时不用等
+    var settings by rememberSaveable { mutableStateOf(false) }
+    var playerPane by rememberSaveable {
+        mutableStateOf(PlayerPane.entries.firstOrNull { it.name == app.prefs.lastPlayerPane } ?: PlayerPane.Cover)
+    }
+    var lyricTranslation by rememberSaveable { mutableStateOf(app.prefs.lyricTranslation) }
+    var lyricPronunciation by rememberSaveable { mutableStateOf(app.prefs.lyricPronunciation) }
+    val playerConnection = app.player
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val savedPane = rememberUpdatedState(playerPane)
+    DisposableEffect(lifecycleOwner, app.prefs, playerConnection) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> playerConnection.connectIfNeeded()
+                Lifecycle.Event.ON_STOP -> {
+                    app.prefs.lastPlayerPane = savedPane.value.name
+                    playerConnection.disconnectIfIdle()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    var catalog by remember { mutableStateOf<CatalogHit?>(null) }
+    val appleMedia = catalog?.takeIf { it.source == Source.Apple && it.kind in setOf("music-video", "station", "post") }
+    val glassSheetState = remember { mutableStateOf(false) }
+    val glassSheetVisibility = remember { { visible: Boolean -> glassSheetState.value = visible } }
+    val player by playerConnection.state.collectAsStateWithLifecycle()
     remember { app.lyrics }
     val haze = remember { HazeState() }
     val hasTrack = player.mediaId != null
-
+    val playerExpanded = hasTrack && nowPlaying
+    if (playerExpanded && playerPane == PlayerPane.Lyrics && !settings && appleMedia == null && !glassSheetState.value) {
+        val view = LocalView.current
+        LifecycleResumeEffect(view) {
+            val previouslyKeptOn = view.keepScreenOn
+            view.keepScreenOn = true
+            onPauseOrDispose { view.keepScreenOn = previouslyKeptOn }
+        }
+    }
     val nav = WindowInsets.navigationBars.asPaddingValues()
+    val navBottomPx = with(LocalDensity.current) { nav.calculateBottomPadding().toPx() }
     val barsHeight = Dimens.BarBottom + Dimens.TabBarHeight +
         (if (hasTrack) Dimens.BarGap + Dimens.MiniPlayerHeight else 0.dp) + Dimens.BarGap
     val barsPadding = PaddingValues(bottom = nav.calculateBottomPadding() + barsHeight)
 
-    SharedTransitionLayout(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
         CompositionLocalProvider(
-            LocalSharedTransition provides this,
             LocalHaze provides haze,
             LocalBarsPadding provides barsPadding,
+            LocalGlassSheetVisibility provides glassSheetVisibility,
         ) {
             Box(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxSize().haze(haze).statusBarsPadding()) {
+                Box(
+                    Modifier.fillMaxSize().haze(haze).statusBarsPadding()
+                        .then(if (playerExpanded || settings || catalog != null) Modifier.clearAndSetSemantics {} else Modifier),
+                ) {
                     when (tab) {
-                        Tab.Search -> SearchScreen(app)
-                        else -> Placeholder(tab, onSettings = { settings = true })
+                        Tab.Search -> SearchScreen(app, onOpen = { catalog = it })
+                        Tab.Library -> MusicLibraryScreen(app, onOpen = { catalog = it })
+                        Tab.New -> AppleDiscoveryScreen(app, radio = false, onOpen = { catalog = it })
+                        Tab.Radio -> AppleDiscoveryScreen(app, radio = true, onOpen = { catalog = it })
+                        Tab.Home -> Placeholder(tab, onSettings = { settings = true })
                     }
                 }
+                catalog?.takeIf { appleMedia == null }?.let { hit ->
+                    CatalogDetails(app, hit.source, hit.kind, hit.id,
+                        modifier = Modifier.fillMaxSize().haze(haze),
+                        interactive = !playerExpanded && !settings && !glassSheetState.value,
+                        onClose = { catalog = null })
+                }
 
-                Column(
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(start = Dimens.Page, end = Dimens.Page, bottom = Dimens.BarBottom),
-                ) {
-                    if (hasTrack) {
-                        AnimatedVisibility(
-                            visible = !nowPlaying,
-                            enter = fadeIn(tween(Motion.Enter, easing = Motion.EmphasizedDecelerate)),
-                            exit = fadeOut(tween(Motion.Exit, easing = Motion.EmphasizedAccelerate)),
+                PlayerSheetHost(
+                    state = player,
+                    player = playerConnection,
+                    lyrics = app.lyrics,
+                    library = app.library,
+                    apple = app.apple,
+                    pane = playerPane,
+                    onPaneChange = { playerPane = it },
+                    translation = lyricTranslation,
+                    pronunciation = lyricPronunciation,
+                    onTranslationChange = { lyricTranslation = it; app.prefs.lyricTranslation = it },
+                    onPronunciationChange = { lyricPronunciation = it; app.prefs.lyricPronunciation = it },
+                    onOpenCatalog = { catalog = it },
+                    onOpenSettings = { settings = true },
+                    initiallyExpanded = nowPlaying,
+                    onExpandedChange = { isExpanded ->
+                        nowPlaying = isExpanded
+                        if (!isExpanded) app.prefs.lastPlayerPane = playerPane.name
+                    },
+                    chromeVisible = !glassSheetState.value,
                     bottomBar = { frame, chromeInteractive ->
+                        Box(
+                            Modifier.fillMaxWidth().graphicsLayer {
+                                translationY = (1f - exp(-20f * frame.progress)) * (size.height + navBottomPx)
+                            },
                         ) {
-                            Column {
-                                MiniPlayer(player, app.player, visibility = this@AnimatedVisibility, onOpen = { nowPlaying = true })
-                                Spacer(Modifier.height(Dimens.BarGap))
-                            }
+                            TabBar(
+                                selected = tab,
+                                onSelect = { catalog = null; tab = it },
                                 enabled = !glassSheetState.value && chromeInteractive,
+                            )
                         }
-                        if (nowPlaying) Spacer(Modifier.height(Dimens.MiniPlayerHeight + Dimens.BarGap))
-                    }
-                    TabBar(tab, onSelect = { tab = it })
-                }
-
-                AnimatedVisibility(
-                    visible = nowPlaying && hasTrack,
-                    enter = nowPlayingEnter,
-                    exit = nowPlayingExit,
-                ) {
-                    NowPlaying(player, app.player, app.lyrics, visibility = this, onClose = { nowPlaying = false })
-                }
-                if (nowPlaying) BackHandler { nowPlaying = false }
+                    },
+                )
 
                 if (settings) {
-                    SettingsScreen(app.prefs, app.lyrics, onClose = { settings = false })
-                    BackHandler { settings = false }
+                    if (!glassSheetState.value) BackHandler { settings = false }
+                    SettingsScreen(app, app.lyrics, onClose = { settings = false })
                 }
+                appleMedia?.let { hit -> AppleMediaScreen(app, hit, onClose = { catalog = null }) }
             }
         }
     }
@@ -151,7 +206,7 @@ fun AppShell(app: FantasticApp) {
 
 /** 悬浮玻璃标签栏：选中项用系统强调色（Material You 动态取色，录屏里是蓝色） */
 @Composable
-private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit) {
+private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit, enabled: Boolean = true) {
     Glass(CircleShape, Modifier.fillMaxWidth().height(Dimens.TabBarHeight)) {
         Row(Modifier.fillMaxSize().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
             Tab.entries.forEach { t ->
@@ -161,6 +216,7 @@ private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit) {
                         .weight(1f)
                         .fillMaxHeight()
                         .clickable(
+                            enabled = enabled,
                             interactionSource = remember { MutableInteractionSource() },
                             indication = ripple(bounded = false, radius = 32.dp),
                         ) { onSelect(t) },
@@ -175,20 +231,19 @@ private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit) {
     }
 }
 
-/** 第一阶段还没做的页面：大标题 + 右上角设置入口。 */
+/** Playback-driven placeholders for the pages in the migration roadmap. */
 @Composable
 private fun Placeholder(tab: Tab, onSettings: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxWidth().padding(top = 8.dp)) {
             LargeTitle(tab.label)
-            IconButton(onClick = onSettings, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp)) {
+            CircularIconButton(onClick = onSettings, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp)) {
                 Icon(Icons.Rounded.AccountCircle, contentDescription = "设置", tint = MaterialTheme.colorScheme.primary)
             }
         }
-        Text(
-            "这一页还在做，先去「搜索」试试 QQ 音乐播放。",
-            modifier = Modifier.padding(horizontal = Dimens.Page, vertical = 8.dp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (tab == Tab.Home) {
+            Text("在搜索中查找歌曲、专辑、艺人或歌单。", Modifier.padding(horizontal = Dimens.Page, vertical = 8.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }

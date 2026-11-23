@@ -1,32 +1,56 @@
 package io.github.kid141252010.fantastic.ui
 
-import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.BoundsTransform
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionScope
+import android.os.Build
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeChild
+
+/** 只关闭圆形控件的矩形补命中，不改变 Material 的布局占位。 */
+@Composable
+internal fun CircularTouchScope(content: @Composable () -> Unit) {
+    val configuration = LocalViewConfiguration.current
+    val circularConfiguration = remember(configuration) {
+        object : ViewConfiguration by configuration {
+            override val minimumTouchTargetSize = DpSize.Zero
+        }
+    }
+    CompositionLocalProvider(LocalViewConfiguration provides circularConfiguration, content = content)
+}
+
+@Composable
+internal fun CircularIconButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    CircularTouchScope {
+        IconButton(onClick = onClick, modifier = modifier, enabled = enabled, content = content)
+    }
+}
 
 /**
  * 统一的尺寸与动效。数值来自 Apple Music 安卓版录屏（1080×2400，按 2.625 换算 dp），
@@ -58,71 +82,42 @@ val LocalBarsPadding = compositionLocalOf { PaddingValues(0.dp) }
 /** 背后内容的模糊源，玻璃条从这里取样 */
 val LocalHaze = staticCompositionLocalOf<HazeState?> { null }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
-val LocalSharedTransition = staticCompositionLocalOf<SharedTransitionScope?> { null }
-
-const val ARTWORK_KEY = "now-playing-artwork"
+/** 当前窗口内操作面板的可见性；外壳据此隐藏底层导航与迷你播放条。 */
+val LocalGlassSheetVisibility = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
 
 /**
- * 封面在迷你播放条、全屏封面、歌词页小封面之间的共享元素过渡：
- * 同一时刻只有一处是可见的，切换时封面从旧位置连续地飞到新位置。
- */
-@OptIn(ExperimentalSharedTransitionApi::class)
-@Composable
-fun Modifier.sharedArtwork(visibility: AnimatedVisibilityScope?): Modifier {
-    val shared = LocalSharedTransition.current ?: return this
-    if (visibility == null) return this
-    return with(shared) {
-        this@sharedArtwork.sharedElement(
-            rememberSharedContentState(ARTWORK_KEY),
-            visibility,
-            boundsTransform = ArtworkBounds,
-        )
-    }
-}
-
-@OptIn(ExperimentalSharedTransitionApi::class)
-private val ArtworkBounds = BoundsTransform { _, _ -> tween(Motion.Enter, easing = Motion.Emphasized) }
-
-/**
- * 类液态玻璃：背后内容高斯模糊 + 半透明底色 + 上亮下暗的细描边 + 顶部一道柔和高光。
- * API 31 以下 haze 自动退化为半透明底色。
+ * 播放条、菜单与展开控件共用的 Material 玻璃材质。
+ * API 31+ 在当前窗口的 LocalHaze 源上模糊；无源或低版本使用不透明底色，保证可读性。
  */
 @Composable
 fun Glass(
-    shape: Shape,
+    shape: Shape = MaterialTheme.shapes.extraLarge,
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val dark = isSystemInDarkTheme()
+    val colors = MaterialTheme.colorScheme
+    val surface = colors.surfaceContainerHigh
     val haze = LocalHaze.current
-    val tint = if (dark) Color(0xFF262628).copy(alpha = 0.62f) else Color(0xFFF5F5F7).copy(alpha = 0.66f)
-    val style = HazeStyle(
-        backgroundColor = if (dark) Color.Black else Color.White,
-        tint = HazeTint(tint),
-        blurRadius = 24.dp,
-        noiseFactor = 0.08f,
-        fallbackTint = HazeTint(tint.copy(alpha = 0.94f)),
-    )
-    val rim = Brush.verticalGradient(
-        if (dark) listOf(Color.White.copy(alpha = 0.32f), Color.White.copy(alpha = 0.06f), Color.White.copy(alpha = 0.14f))
-        else listOf(Color.White.copy(alpha = 0.9f), Color.Black.copy(alpha = 0.06f), Color.Black.copy(alpha = 0.1f)),
-    )
-    val sheen = Brush.verticalGradient(
-        0f to Color.White.copy(alpha = if (dark) 0.10f else 0.35f),
-        0.45f to Color.Transparent,
-    )
-    Box(
-        modifier
-            .shadow(16.dp, shape, ambientColor = Color.Black.copy(alpha = 0.25f), spotColor = Color.Black.copy(alpha = 0.3f))
-            .clip(shape)
-            .then(if (haze != null) Modifier.hazeChild(haze, style) else Modifier)
-            .drawWithContent {
-                if (haze == null) drawRect(tint.copy(alpha = 0.94f))
-                drawRect(sheen, topLeft = Offset.Zero)
-                drawContent()
-            }
-            .border(0.6.dp, rim, shape),
-        content = content,
-    )
+    val style = remember(surface) {
+        HazeStyle(
+            backgroundColor = surface,
+            tint = HazeTint(surface.copy(alpha = 0.8f)),
+            blurRadius = 24.dp,
+            noiseFactor = 0.02f,
+            fallbackTint = HazeTint(surface),
+        )
+    }
+    CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
+        Box(
+            modifier
+                .shadow(8.dp, shape)
+                .clip(shape)
+                .then(
+                    if (haze != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Modifier.hazeChild(haze, style)
+                    else Modifier.background(surface),
+                )
+                .border(1.dp, colors.outlineVariant.copy(alpha = 0.8f), shape),
+            content = content,
+        )
+    }
 }

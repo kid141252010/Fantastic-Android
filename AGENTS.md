@@ -1,5 +1,12 @@
 # Repository Guidelines
 
+## 第一要点（强制）：以原版 Apple Music 为准
+
+- 本项目所有内容及实现改动，包括界面、交互、歌词、动画、排版、时序和参数，必须以原版 Apple Music 为实现与验收基准，不得以个人偏好或自创方案替代。
+- 用户的提示词只是建议和宽泛的目标描述，不是精确规格，也不是具体参数的依据。不得完全顺从或机械照搬用户描述；必须先对照原版 Apple Music，依据核实后的实际行为与具体参数落实修改。用户描述与原版不一致时，应指出差异，不得直接按描述改造原版行为。
+- 修改前必须核对 Apple 官方资料或原版官方客户端、网页的可验证实现，明确参考平台、版本及参数来源。官方未公开的参数，只能依据原版的可复现测量或实现取证确定；不得把第三方仿制库、经验值或推测冒充 Apple 官方参数。
+- 缺少可核验证据时，保留相关现状并说明缺失的依据，不得猜测数值、编造参数、擅自采用自己的实现方式，或以“改进”为由偏离原版。
+
 ## Project Overview
 
 Fantastic Android is a Kotlin/Jetpack Compose client for a user-configured Fantastic server. Search supports QQ Music and Apple Music. QQ playback uses Media3; Apple playback is delegated to Fantastic’s web player through `ApplePlaybackEngine`. The app includes library and Apple discovery/radio surfaces; Home remains a placeholder. Project-authored code is Apache-2.0; bundled assets retain their own notices.
@@ -78,6 +85,6 @@ The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in i
 ## Testing & QA
 
 - The repository currently has no automated test sources, fixtures, test-only dependencies, or coverage threshold. Do not add, modify, or run automated tests/assertions unless explicitly requested.
-- CI builds the debug APK and publishes a nightly release from `main`; it has no test, lint, or device-install job.
+- CI builds the debug APK and publishes a nightly release from `main`; it has no device-install job.
 - Build success does not verify the RecyclerView/Canvas lyric surface or network-backed playback. Device, server, and playback acceptance is performed manually; state explicitly which such checks were not run.
 - In Settings → 歌词诊断, tap the report to copy lyric status/build details; WebView load errors use the `FantasticLyrics` Logcat tag.

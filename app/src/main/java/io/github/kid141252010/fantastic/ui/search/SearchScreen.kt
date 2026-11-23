@@ -1,147 +1,348 @@
 package io.github.kid141252010.fantastic.ui.search
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SearchBarDefaults
+import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import android.widget.Toast
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.kid141252010.fantastic.ui.browse.AppleDiscoveryScreen
 import io.github.kid141252010.fantastic.FantasticApp
+import io.github.kid141252010.fantastic.data.CatalogHit
+import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
-import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.ui.Dimens
-import io.github.kid141252010.fantastic.ui.LargeTitle
+import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
-import io.github.kid141252010.fantastic.ui.SongRow
+import io.github.kid141252010.fantastic.ui.Md3EmptyState
+import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
+import io.github.kid141252010.fantastic.ui.Md3MediaRow
+import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
+import io.github.kid141252010.fantastic.ui.MediaActionContent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
-@Composable
-fun SearchScreen(app: FantasticApp) {
-    var query by rememberSaveable { mutableStateOf("") }
-    var source by rememberSaveable { mutableStateOf(Source.QQ) }
-    var results by remember { mutableStateOf<List<Track>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val player by app.player.state.collectAsStateWithLifecycle()
-    val context = LocalContext.current
+private val searchTabs = listOf(
+    null to "综合", SearchCatalog.Kind.Artist to "艺人", SearchCatalog.Kind.Album to "专辑",
+    SearchCatalog.Kind.Song to "歌曲", SearchCatalog.Kind.Playlist to "歌单", SearchCatalog.Kind.Video to "音乐视频",
+)
+private val sources = listOf(Source.Apple to "Apple Music", Source.QQ to "QQ 音乐", Source.Netease to "网易云")
 
-    LaunchedEffect(query, source) {
-        val q = query.trim()
-        if (q.isEmpty()) {
-            results = emptyList(); error = null; loading = false
-            return@LaunchedEffect
-        }
-        delay(350) // 输入防抖
-        loading = true
-        error = null
+private class SearchResults(
+    initialItems: List<CatalogHit> = emptyList(),
+    initialNext: SearchCatalog.Cursor? = null,
+    initiallyLoaded: Boolean = false,
+) {
+    var items by mutableStateOf(initialItems)
+    var groups by mutableStateOf<List<SearchCatalog.Group>>(emptyList())
+    var failures by mutableStateOf<List<SearchCatalog.GroupFailure>>(emptyList())
+    var next by mutableStateOf(initialNext)
+    var suggestions by mutableStateOf<List<SearchCatalog.Suggestion>>(emptyList())
+    var busy by mutableStateOf(false)
+    var loaded by mutableStateOf(initiallyLoaded)
+    var error by mutableStateOf<String?>(null)
+    var pageRequest by mutableIntStateOf(0)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SearchScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var source by rememberSaveable { mutableStateOf(Source.Apple) }
+    var kind by rememberSaveable { mutableStateOf<SearchCatalog.Kind?>(null) }
+    var editing by remember { mutableStateOf(false) }
+    val term = query.trim()
+    val selectedKind = kind
+    val search = remember(app) { SearchCatalog(app.apple, app.netease, app.qq, app.prefs) }
+    val overview = remember(term, source, app.prefs.baseUrl, app.prefs.storefront) { SearchResults() }
+    val category = remember(term, source, selectedKind, app.prefs.baseUrl, app.prefs.storefront) {
+        val seed = selectedKind?.let { selected -> overview.groups.firstOrNull { it.kind == selected } }
+        SearchResults(seed?.items.orEmpty(), seed?.next, seed != null)
+    }
+    val result = if (selectedKind == null) overview else category
+    val player by app.player.state.collectAsStateWithLifecycle()
+    val focus = LocalFocusManager.current
+
+    LaunchedEffect(result, result.pageRequest, selectedKind) {
+        if (term.isEmpty()) return@LaunchedEffect
+        if (result.loaded && result.pageRequest == 0) return@LaunchedEffect
+        if (result.loaded && selectedKind != null && result.next == null) return@LaunchedEffect
+        if (result.pageRequest == 0) delay(330)
+        result.busy = true
+        result.error = null
         try {
-            results = when (source) {
-                Source.QQ -> app.api.qqSearch(q)
-                Source.Apple -> app.api.amSearch(q)
+            if (selectedKind == null) {
+                val grouped = search.searchAll(source, term)
+                result.groups = grouped.groups
+                result.failures = grouped.failures
+                result.loaded = true
+            } else if (!result.loaded) {
+                val page = search.search(source, selectedKind, term)
+                result.items = page.items.distinctBy { "${it.kind}:${it.id}" }
+                result.next = page.next
+                result.loaded = true
+            } else {
+                val cursor = result.next ?: return@LaunchedEffect
+                val page = search.more(cursor)
+                result.items = (result.items + page.items).distinctBy { "${it.kind}:${it.id}" }
+                result.next = page.next
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            error = e.message ?: e.javaClass.simpleName
-            results = emptyList()
+            result.error = e.message ?: "请检查 Fantastic 服务器连接"
         } finally {
-            loading = false
+            result.busy = false
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        LargeTitle("搜索", Modifier.padding(top = 8.dp))
-        // 搜索框
-        Row(
-            Modifier
-                .padding(horizontal = Dimens.Page)
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
-                .padding(horizontal = 10.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Rounded.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Box(Modifier.padding(start = 6.dp).weight(1f)) {
-                if (query.isEmpty()) {
-                    Text("艺人、歌曲、歌词及更多", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 17.sp)
-                }
-                BasicTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
+    LaunchedEffect(result, editing) {
+        if (!editing || term.isEmpty()) return@LaunchedEffect
+        delay(220)
+        try {
+            result.suggestions = search.suggestions(source, term)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            result.suggestions = emptyList()
         }
-        SingleChoiceSegmentedButtonRow(
-            Modifier.padding(horizontal = Dimens.Page, vertical = 10.dp).fillMaxWidth(),
-        ) {
-            val options = listOf(Source.Apple to "Apple Music", Source.QQ to "QQ 音乐")
-            options.forEachIndexed { i, (s, label) ->
-                SegmentedButton(
-                    selected = source == s,
-                    onClick = { source = s },
-                    shape = SegmentedButtonDefaults.itemShape(i, options.size),
-                    icon = {},
-                ) { Text(label, fontSize = 13.sp) }
-            }
-        }
-        when {
-            loading && results.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-            error != null -> Text(
-                "搜索失败：$error",
-                Modifier.padding(Dimens.Page),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    }
+
+    Column(Modifier.fillMaxSize().imePadding()) {
+        if (!editing && term.isEmpty()) {
+            Text(
+                "搜索",
+                Modifier.padding(horizontal = Dimens.Page, vertical = 12.dp),
+                style = MaterialTheme.typography.headlineLarge,
             )
-            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = LocalBarsPadding.current) {
-                itemsIndexed(results, key = { _, t -> "${t.source}:${t.id}" }) { i, t ->
-                    SongRow(t, playing = player.mediaId == "qq:${t.id}") {
-                        if (t.source == Source.Apple) {
-                            Toast.makeText(context, "Apple Music 播放会在后续阶段接入", Toast.LENGTH_SHORT).show()
-                        } else {
-                            app.player.playQueue(results, i)
+        }
+        Surface(
+            Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 8.dp),
+            shape = SearchBarDefaults.inputFieldShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            SearchBarDefaults.InputField(
+                query = query,
+                onQueryChange = { query = it },
+                onSearch = { focus.clearFocus() },
+                expanded = editing,
+                onExpandedChange = { if (!it) focus.clearFocus() },
+                modifier = Modifier.fillMaxWidth().onFocusChanged { editing = it.isFocused }
+                    .semantics { contentDescription = "搜索关键词" },
+                placeholder = { Text("艺人、歌曲、专辑及更多内容", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                leadingIcon = {
+                    if (editing || query.isNotEmpty()) {
+                        IconButton(onClick = { query = ""; kind = null; focus.clearFocus() }) {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回搜索")
                         }
+                    } else Icon(Icons.Rounded.Search, contentDescription = null)
+                },
+                trailingIcon = if (query.isNotEmpty()) {
+                    {
+                        IconButton(onClick = { query = ""; kind = null }) {
+                            Icon(Icons.Rounded.Close, "清除搜索")
+                        }
+                    }
+                } else null,
+            )
+        }
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 4.dp)) {
+            sources.forEachIndexed { index, (choice, title) ->
+                SegmentedButton(
+                    selected = source == choice,
+                    onClick = {
+                        if (choice == Source.Netease && kind == SearchCatalog.Kind.Video) kind = null
+                        source = choice
+                    },
+                    shape = SegmentedButtonDefaults.itemShape(index, sources.size),
+                    icon = {},
+                ) { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+        }
+        if (term.isNotEmpty()) {
+            val tabs = remember(source) { searchTabs.filter { source != Source.Netease || it.first != SearchCatalog.Kind.Video } }
+            val selected = tabs.indexOfFirst { it.first == kind }.coerceAtLeast(0)
+            SecondaryScrollableTabRow(selectedTabIndex = selected, edgePadding = Dimens.Page) {
+                tabs.forEach { (filter, label) ->
+                    Tab(
+                        selected = filter == kind,
+                        onClick = { kind = filter; focus.clearFocus() },
+                        text = { Text(label, maxLines = 1) },
+                    )
+                }
+            }
+        }
+        if (term.isEmpty() && !editing && source == Source.Apple) {
+            Box(Modifier.weight(1f)) {
+                AppleDiscoveryScreen(app, radio = false, onOpen = onOpen, searchLanding = true)
+            }
+            return@Column
+        }
+        key(result) {
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = LocalBarsPadding.current) {
+                if (editing && result.suggestions.isNotEmpty()) {
+                    item("suggestions") { Md3MediaSectionHeader("搜索建议") }
+                    items(result.suggestions, key = { "suggestion:${it.hit?.source}:${it.hit?.kind}:${it.hit?.id}:${it.query}" }) { suggestion ->
+                        Md3MediaRow(
+                            title = suggestion.title,
+                            subtitle = suggestion.hit?.subtitle.orEmpty(),
+                            leading = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                            onClick = {
+                                focus.clearFocus()
+                                val hit = suggestion.hit
+                                if (hit?.track != null) app.player.play(hit.track)
+                                else if (hit != null) onOpen(hit)
+                                else suggestion.query?.let { query = it }
+                            },
+                        )
+                    }
+                }
+                if (kind == null) {
+                    result.groups.forEach { group ->
+                        val previewLimit = when (group.kind) {
+                            SearchCatalog.Kind.Song -> 9
+                            SearchCatalog.Kind.Video -> 4
+                            else -> 6
+                        }
+                        item(key = "group-title:${group.key}") {
+                            Md3MediaSectionHeader(group.title) {
+                                if (group.kind != null && (group.items.size > previewLimit || group.next != null)) {
+                                    TextButton(onClick = { kind = group.kind; focus.clearFocus() }) { Text("查看全部") }
+                                }
+                            }
+                        }
+                        items(group.items.take(previewLimit), key = { "${group.key}:${it.kind}:${it.id}" }) { hit ->
+                            SearchHitRow(app, hit, player.mediaId, focus, onOpen)
+                        }
+                    }
+                    items(result.failures, key = { "failure:${it.kind.id}" }) { failure ->
+                        Row(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page), verticalAlignment = Alignment.CenterVertically) {
+                            Text("${failure.kind.title}搜索失败：${failure.message}", Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
+                            TextButton(enabled = !result.busy, onClick = { result.pageRequest++ }) { Text("重试") }
+                        }
+                    }
+                } else {
+                    items(result.items, key = { "${it.source}:${it.kind}:${it.id}" }) { hit ->
+                        SearchHitRow(app, hit, player.mediaId, focus, onOpen)
+                    }
+                }
+                val noResults = if (kind == null) result.groups.isEmpty() && result.failures.isEmpty() else result.items.isEmpty()
+                val error = result.error
+                if (result.busy) item("loading") {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
+                } else if (error != null) item("error") {
+                    Md3EmptyState("搜索失败", error, icon = Icons.Rounded.ErrorOutline) {
+                        FilledTonalButton(onClick = { result.pageRequest++ }) { Text("重试") }
+                    }
+                } else if (result.loaded && noResults) item("empty") {
+                    Md3EmptyState("没有搜索结果", "试试其他关键词或音乐来源。", icon = Icons.Rounded.Search)
+                } else if (kind != null && result.next != null) item("more") {
+                    FilledTonalButton(onClick = { result.pageRequest++ }, modifier = Modifier.padding(Dimens.Page)) {
+                        Text("加载更多")
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun SearchHitRow(
+    app: FantasticApp,
+    hit: CatalogHit,
+    playingMediaId: String?,
+    focus: FocusManager,
+    onOpen: (CatalogHit) -> Unit,
+) {
+    val track = hit.track
+    var actionsOpen by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
+    val subtitle = if (track != null) track.artist else {
+        listOf(searchKindLabel(hit.kind), hit.subtitle).filter { it.isNotBlank() }.distinct().joinToString(" · ")
+    }
+    Md3MediaRow(
+        title = hit.title,
+        subtitle = subtitle,
+        playing = track != null && playingMediaId == "${track.source.mediaPrefix}:${track.id}",
+        onClick = {
+            focus.clearFocus()
+            if (track != null) app.player.play(track) else onOpen(hit)
+        },
+        leading = {
+            Md3MediaArtwork(
+                hit.artwork ?: track?.artwork(120), Modifier.size(48.dp),
+                shape = if (hit.kind == "artist") CircleShape else MaterialTheme.shapes.small,
+            )
+        },
+        trailing = {
+            if (track == null) Icon(Icons.Rounded.ChevronRight, contentDescription = null)
+            else IconButton(onClick = { focus.clearFocus(); actionsOpen = true }) {
+                Icon(Icons.Rounded.MoreHoriz, "${hit.title}更多操作")
+            }
+        },
+    )
+    if (track != null && actionsOpen) {
+        GlassSheet(hit.title, onDismissRequest = { actionsOpen = false }, showHeader = false) {
+            MediaActionContent(hit, app.library, listOf(track),
+                onPlay = { actionsOpen = false; app.player.play(track) },
+                onView = { actionsOpen = false; onOpen(hit) },
+                onDismiss = { actionsOpen = false })
+        }
+    }
+}
+
+
+private fun searchKindLabel(kind: String): String = when (kind.lowercase()) {
+    "song", "songs" -> "歌曲"
+    "album", "albums" -> "专辑"
+    "artist", "artists" -> "艺人"
+    "playlist", "playlists" -> "歌单"
+    "music-video", "music-videos", "mv" -> "音乐视频"
+    else -> "详情"
 }

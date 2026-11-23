@@ -87,15 +87,83 @@ function wordSpans(node) {
   });
 }
 
+function finalParenthesisGroup(text) {
+  const close = text.trimEnd().length - 1;
+  if (text[close] !== ')' && text[close] !== '）') return null;
+  const stack = [];
+  let open = -1;
+  for (let index = 0; index <= close; index++) {
+    const char = text[index];
+    if (char === '(' || char === '（') {
+      if (!stack.length) open = index;
+      stack.push(char === '(' ? ')' : '）');
+    } else if (char === ')' || char === '）') {
+      if (stack.pop() !== char) return null;
+      if (index === close && !stack.length && text.slice(open + 1, close).trim()) return [open, close];
+    }
+  }
+  return null;
+}
+
+function backingWrapper(text) {
+  const group = finalParenthesisGroup(text);
+  return group && !text.slice(0, group[0]).trim() ? group : null;
+}
+
+export function unwrapBackingText(text) {
+  const group = backingWrapper(text);
+  return group ? text.slice(group[0] + 1, group[1]).trim() : text;
+}
+
+export function unwrapBackingTokens(tokens) {
+  const group = backingWrapper(tokens.map(token => token.text).join(''));
+  if (!group) return;
+  // Work backwards within each span so deleting the closing character preserves the opening index.
+  let offset = 0;
+  for (const token of tokens) {
+    const end = offset + token.text.length;
+    for (let index = group.length - 1; index >= 0; index--) {
+      const at = group[index] - offset;
+      if (at >= 0 && group[index] < end) token.text = token.text.slice(0, at) + token.text.slice(at + 1);
+    }
+    offset = end;
+  }
+}
+
+function optionalTime(value) {
+  if (!value) return null;
+  try {
+    const parsed = parseTime(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function qrcBackgroundClock(node, tokens, fallbackBegin, fallbackEnd) {
+  const visible = tokens.filter(token => !token.whitespace &&
+    Number.isSafeInteger(token.begin) && token.begin >= 0 &&
+    Number.isSafeInteger(token.end) && token.end >= token.begin);
+  const visibleBegin = visible.length ? Math.min(...visible.map(token => token.begin)) : fallbackBegin;
+  const visibleEnd = visible.length ? Math.max(...visible.map(token => token.end)) : fallbackEnd;
+  const begin = optionalTime(node.getAttribute('begin'));
+  const end = optionalTime(node.getAttribute('end'));
+  if (begin === null || end === null || end < begin) {
+    return { qrcBegin: visibleBegin, qrcEnd: visibleEnd };
+  }
+  return { qrcBegin: begin, qrcEnd: end };
+}
+
 function voice(node, translationNode, romanizationNode, preferred) {
   const translation = translationNode || inlineRole(node, 'x-translation', preferred);
   const romanization = romanizationNode || inlineRole(node, 'x-roman', preferred);
+  const pronunciationTokens = wordSpans(romanization);
   return {
     text: textWithoutRoles(node),
     tokens: wordSpans(node),
     translation: translation?.textContent?.trim() || '',
-    pronunciation: children(romanization, 'span').length ? '' : textWithoutRoles(romanization),
-    pronunciationTokens: wordSpans(romanization),
+    pronunciation: pronunciationTokens.length ? '' : textWithoutRoles(romanization),
+    pronunciationTokens,
   };
 }
 
@@ -108,7 +176,7 @@ function chineseScript(language) {
   return ({ cn: 'hans', sg: 'hans', tw: 'hant', hk: 'hant', mo: 'hant' })[region] || '';
 }
 
-export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage) {
+export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage, qrcBackgroundTiming = false) {
   if (!Parser) throw new Error('需要 DOMParser');
   const document = new Parser().parseFromString(xml, 'application/xml');
   const root = document.documentElement;
@@ -119,9 +187,10 @@ export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage)
   if (!body) throw new Error('TTML 缺少 body');
 
   const head = first(root, 'head');
-  const metadata = first(first(head, 'metadata'), 'iTunesMetadata');
-  const agents = {};
-  for (const agent of children(head, 'agent')) {
+  const headMetadata = first(head, 'metadata');
+  const metadata = first(headMetadata, 'iTunesMetadata');
+  const agents = Object.create(null);
+  for (const agent of [...children(head, 'agent'), ...children(headMetadata, 'agent')]) {
     if (agent.namespaceURI !== META_NS) continue;
     const id = attribute(agent, XML_NS, 'id');
     if (!id) continue;
@@ -150,15 +219,25 @@ export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage)
     end: parseTime(section.getAttribute('end') || '0'),
     type: (attribute(section, APPLE_NS, 'songPart', 'Verse') || 'Verse').toLowerCase(),
     lines: children(section, 'p').map((paragraph, lineIndex) => {
+      const rawBegin = paragraph.getAttribute('begin');
+      const rawEnd = paragraph.getAttribute('end');
+      const begin = parseTime(rawBegin || '0');
+      const end = parseTime(rawEnd || '0');
+      const hasParagraphTiming = Boolean(rawBegin && rawEnd && end > begin);
       const key = attribute(paragraph, APPLE_NS, 'key', `${sectionIndex}:${lineIndex}`);
-      const translationNode = translationInfo.entries.get(key);
-      const pronunciationNode = pronunciationInfo.entries.get(key);
+      const translationNode = translationInfo.entries.get(key) ?? inlineRole(paragraph, 'x-translation', preferredLanguage);
+      const pronunciationNode = pronunciationInfo.entries.get(key) ?? inlineRole(paragraph, 'x-roman', preferredLanguage);
       const backgroundNode = children(paragraph, 'span').find(item => roleOf(item) === 'x-bg') || null;
+      const backgroundTranslations = children(translationNode, 'span').filter(item => roleOf(item) === 'x-bg');
       const background = voice(backgroundNode,
-        children(translationNode, 'span').find(item => roleOf(item) === 'x-bg') || null,
-        children(pronunciationNode, 'span').find(item => roleOf(item) === 'x-bg') || null,
+        backgroundTranslations.find(item => textWithoutRoles(item)),
+        children(pronunciationNode, 'span').find(item => roleOf(item) === 'x-bg' && textWithoutRoles(item)),
         preferredLanguage);
       const main = voice(paragraph, translationNode, pronunciationNode, preferredLanguage);
+      if (qrcBackgroundTiming && backgroundNode) {
+        Object.assign(background, qrcBackgroundClock(backgroundNode, background.tokens, begin, end));
+      }
+      if (backgroundTranslations.length) main.translation = textWithoutRoles(translationNode);
 
       if (allowReplacement) {
         const replacement = replacementInfo.entries.get(key);
@@ -173,15 +252,28 @@ export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage)
         }
       }
 
-      const parenthesized = main.translation.match(/[（(]+([^）)]+)[）)]+/)?.[1]?.trim() || '';
-      const backgroundTranslation = background.translation.replace(/[()（）]/g, '').trim() || parenthesized;
-      if (parenthesized) main.translation = main.translation.replace(/[（(]+[^）)]+[）)]+/, '').trim();
-      background.translation = backgroundTranslation;
-      const agent = attribute(paragraph, META_NS, 'agent', 'v1');
+      background.text = unwrapBackingText(background.text);
+      unwrapBackingTokens(background.tokens);
+      background.pronunciation = unwrapBackingText(background.pronunciation);
+      unwrapBackingTokens(background.pronunciationTokens);
+      background.translation = unwrapBackingText(background.translation);
+      if (background.text && !backgroundTranslations.length && !background.translation) {
+        const group = finalParenthesisGroup(main.translation);
+        if (group) {
+          const mainText = main.translation.slice(0, group[0]).trim();
+          if (mainText) {
+            background.translation = main.translation.slice(group[0] + 1, group[1]).trim();
+            main.translation = mainText;
+          }
+        }
+      }
+      const agent = attribute(paragraph, META_NS, 'agent');
       return {
         key,
-        begin: parseTime(paragraph.getAttribute('begin') || '0'),
-        end: parseTime(paragraph.getAttribute('end') || '0'),
+        begin,
+        end,
+        paragraphBegin: hasParagraphTiming ? begin : null,
+        paragraphEnd: hasParagraphTiming ? end : null,
         agent,
         ...main,
         background,
@@ -213,15 +305,42 @@ export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage)
   };
 }
 
-export function duetSides(song) {
-  let previousAgent = '';
-  let side = false;
-  return song.lines.map(line => {
-    const type = song.agents?.[line.agent]?.type;
-    if (type === 'group') return false;
-    if (!previousAgent) side = type === 'other';
-    else if (line.agent !== previousAgent) side = !side;
-    previousAgent = line.agent;
-    return side;
+function lyricStartsRtl(text) {
+  const letter = text.match(/\p{L}/u)?.[0];
+  return Boolean(letter && letter >= '\u0590' && letter <= '\u06ff');
+}
+
+export function duetLineLayout(song) {
+  if (song.timing !== 'Word') return null;
+  let people = 0;
+  let others = 0;
+  for (const { type } of Object.values(song.agents)) {
+    if (type === 'person') people++;
+    else if (type === 'other') others++;
+  }
+  if (people + others < 2) return null;
+
+  let previous = -1;
+  let opposite = false;
+  let hasOpposite = false;
+  const layout = song.lines.map((line, index) => {
+    const type = song.agents[line.agent]?.type;
+    let lineOpposite = false;
+    const canStart = type === 'person' || type === 'other';
+    if (line.agent && type !== 'group' && (previous >= 0 || canStart)) {
+      if (previous < 0) {
+        opposite = type === 'other';
+      } else if (line.agent !== song.lines[previous].agent) {
+        // s0 walks past neutral rows and compares the two rows at the previous singer boundary.
+        const before = lyricStartsRtl(song.lines[previous].text);
+        const after = lyricStartsRtl(song.lines[previous + 1].text);
+        if (before === after) opposite = !opposite;
+      }
+      previous = index;
+      lineOpposite = opposite;
+      hasOpposite ||= opposite;
+    }
+    return { duetRightAligned: lyricStartsRtl(line.text) !== lineOpposite, narrow: type !== 'person' || people > 1 };
   });
+  return hasOpposite ? layout : null;
 }
