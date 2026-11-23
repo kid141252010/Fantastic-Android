@@ -1,48 +1,37 @@
 # Fantastic Android
 
-Fantastic 的 Android 客户端，支持 Android 8.0 及以上。[Fantastic 服务端](https://github.com/kid141252010/Fantastic)
+[Fantastic](https://github.com/kid141252010/Fantastic) 的安卓客户端。在手机上搜歌、听歌、看歌词。
 
-## 安装与配置
+歌不在这个 App 里。先准备好自己的 Fantastic 服务器，打开后把地址填进去。能搜到什么、能播什么，取决于那台服务器和上面的账号。这个 App 不收集、也不发送网易云 Cookie。
 
-从 Nightly 下载 `fantastic-debug.apk`。首次打开应用后，从「主页」右上角进入设置，填写你的 Fantastic 服务器地址。[Nightly](https://github.com/kid141252010/Fantastic-Android/releases/tag/nightly)
+Android 8.0 及以上可以安装。
 
-## 功能
+## 亮点
 
-- 搜索和播放 Apple Music、QQ 音乐、网易云音乐。搜索结果可播放单曲，也可从专辑、艺人或歌单建立队列。重开应用时恢复曲目、进度、随机和循环状态，等待手动播放。
-- 原生歌词支持逐词高亮、翻译、音译、对唱和伴唱。歌词页在前台展开时常亮。Apple 默认优先显示 AMLL 词库中的歌词，缺失或加载失败时使用 Apple 官方歌词。[歌词来源、时序与排版](app/src/main/assets/lyrics/README.md)
-- 播放页按窗口宽度请求封面。部分 Apple Music 曲目支持动态封面和取色背景。封面、歌词、待播清单与迷你条共用播放器状态。[播放器对照与验收](APPLE_MUSIC_PARITY.md)
-- 在资料库管理收藏与歌单。从「资料库 → 已下载」播放、重试或移除手动下载的歌曲。「设置 → 播放 → 播放缓存上限」控制三种音源共享的整曲缓存，默认 500 MB。手动下载独立保存。
+- **一个搜索，三个音源。** QQ 音乐、Apple Music、网易云。歌曲、专辑、艺人、歌单都能点开听，从你点的那首开始。
+- **歌词跟着唱。** 歌词画在手机上，唱到哪个字，哪个字亮。翻译和音译可以单独打开。对唱左右分开，背景人声单独显示。看歌词时屏幕保持亮着。
+- **播放器拉上来就能用。** 底部是正在播放的小条。展开后有封面、歌词和接下来要播的歌，收起来音乐继续。再打开还是上次看的那一页。
+- **资料库在手机上。** 可以建歌单和文件夹，收藏，导入和导出。想离线听，在菜单里下载，到「资料库 → 已下载」播放。下载的歌不会被播放缓存清掉。
+- **Apple Music 可以逛。** 「新发现」和「广播」用来找内容和电台。音质、空间音频和切歌方式在设置里选。
 
-歌词加载有问题时，可在「设置 → 歌词诊断」复制报告。
+听过的在线歌曲会在手机里留一份，下次不用整首重下。缓存满了，先清最久没听、也没在用的。大小在设置里改。Apple Music 如果开了自动混音、交叉淡化，或者这首歌只能用网页播放，就继续在线播。
 
-## 构建
+关掉再打开，歌、进度、待播顺序、随机和循环都还在，但不会自动接着播。
 
-使用 JDK 17、Gradle 8.11.1 和 Android SDK 35。在 `local.properties` 设置 `sdk.dir`，或通过环境变量指定 SDK。
+主页现在还是空的。找歌用底部的「搜索」。设置在主页右上角。
 
-```sh
-gradle :app:assembleDebug
-```
+## 安装
 
-调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。`main` 构建成功后更新 Nightly。
+每天构建的安装包在 [Nightly](https://github.com/kid141252010/Fantastic-Android/releases/tag/nightly)，文件名是 `fantastic-debug.apk`。这是预发布调试包，不是应用商店的正式版。签名固定，新包可以直接盖住旧包。
 
-### 发行 APK
+1. 装上并打开。
+2. 主页右上角进入设置，填写 Fantastic 服务器地址，点「检查并保存服务器」。
+3. 去「搜索」选音源，搜一首歌播放。
 
-```sh
-gradle :app:assembleRelease -PincludeLocalAmFonts=false
-```
-
-构建生成 `app/build/outputs/apk/release/app-release-unsigned.apk`。使用 Android SDK Build Tools 中的 `zipalign` 对齐，再用 `apksigner` 和专用发行密钥签名。同包名的发行更新使用同一把密钥。
-
-### 本地可选 AM 字体
-
-将可选的本地字体放在 Git 忽略的 `.work/local-am-fonts/assets/am-fonts/`。目录存在时，Debug 和 Release 可将本地字体用于歌词、歌曲信息与 Compose 主题。公开构建使用 Android 系统字体。可显式禁用本地字体以生成同类产物。
-
-```sh
-gradle :app:assembleDebug -PincludeLocalAmFonts=false
-```
+地址要是完整的 `http://` 或 `https://`，不要带账号和问号后面的参数。明文 HTTP 只建议在局域网里用。
 
 ## 许可证
 
-项目自有代码采用 Apache-2.0。[项目许可证](LICENSE)
+本项目自己写的代码是 Apache-2.0。包里带上的第三方组件仍用它们自己的许可证。
 
 启动图标改编自 Fantastic 的旧版红色图标。[上游 SVG](https://github.com/kid141252010/Fantastic/blob/73d1f19c7f49dc77413f5d32f92f639df2a850df/web/icons/icon.svg)
