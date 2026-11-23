@@ -1,5 +1,6 @@
 package io.github.kid141252010.fantastic.ui.theme
 
+import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
@@ -40,33 +41,41 @@ private val Dark = darkColorScheme(
     outlineVariant = Color(0xFF38383A),
 )
 
+private fun TextStyle.withLocalAmFont(context: Context): TextStyle {
+    val weight = fontWeight?.weight ?: 400
+    val face = LocalAmFonts.typeface(context, fontSize.value, weight) ?: return this
+    return copy(fontFamily = FontFamily(face), fontWeight = FontWeight(LocalAmFonts.resolvedWeight(weight)))
+}
+
+@Composable
+internal fun TextStyle.withLocalAmFont(): TextStyle {
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    return remember(this, context, configuration) { withLocalAmFont(context) }
+}
+
 @Composable
 fun FantasticTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val typography = remember(context.assets, configuration.locales, configuration.fontScale, configuration.densityDpi) {
         val defaults = Typography()
-        fun TextStyle.withLocalFont(): TextStyle {
-            val weight = fontWeight?.weight ?: 400
-            val face = LocalAmFonts.typeface(context, fontSize.value, weight) ?: return this
-            return copy(fontFamily = FontFamily(face), fontWeight = FontWeight(LocalAmFonts.resolvedWeight(weight)))
-        }
         defaults.copy(
-            displayLarge = defaults.displayLarge.withLocalFont(),
-            displayMedium = defaults.displayMedium.withLocalFont(),
-            displaySmall = defaults.displaySmall.withLocalFont(),
-            headlineLarge = defaults.headlineLarge.withLocalFont(),
-            headlineMedium = defaults.headlineMedium.withLocalFont(),
-            headlineSmall = defaults.headlineSmall.withLocalFont(),
-            titleLarge = defaults.titleLarge.withLocalFont(),
-            titleMedium = defaults.titleMedium.withLocalFont(),
-            titleSmall = defaults.titleSmall.withLocalFont(),
-            bodyLarge = defaults.bodyLarge.withLocalFont(),
-            bodyMedium = defaults.bodyMedium.withLocalFont(),
-            bodySmall = defaults.bodySmall.withLocalFont(),
-            labelLarge = defaults.labelLarge.withLocalFont(),
-            labelMedium = defaults.labelMedium.withLocalFont(),
-            labelSmall = defaults.labelSmall.withLocalFont(),
+            displayLarge = defaults.displayLarge.withLocalAmFont(context),
+            displayMedium = defaults.displayMedium.withLocalAmFont(context),
+            displaySmall = defaults.displaySmall.withLocalAmFont(context),
+            headlineLarge = defaults.headlineLarge.withLocalAmFont(context),
+            headlineMedium = defaults.headlineMedium.withLocalAmFont(context),
+            headlineSmall = defaults.headlineSmall.withLocalAmFont(context),
+            titleLarge = defaults.titleLarge.withLocalAmFont(context),
+            titleMedium = defaults.titleMedium.withLocalAmFont(context),
+            titleSmall = defaults.titleSmall.withLocalAmFont(context),
+            bodyLarge = defaults.bodyLarge.withLocalAmFont(context),
+            bodyMedium = defaults.bodyMedium.withLocalAmFont(context),
+            bodySmall = defaults.bodySmall.withLocalAmFont(context),
+            labelLarge = defaults.labelLarge.withLocalAmFont(context),
+            labelMedium = defaults.labelMedium.withLocalAmFont(context),
+            labelSmall = defaults.labelSmall.withLocalAmFont(context),
         )
     }
     MaterialTheme(colorScheme = if (isSystemInDarkTheme()) Dark else Light, typography = typography, content = content)

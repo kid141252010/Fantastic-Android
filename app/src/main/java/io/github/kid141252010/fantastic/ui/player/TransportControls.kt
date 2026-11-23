@@ -66,6 +66,7 @@ import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.qualityPresentation
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
+import io.github.kid141252010.fantastic.ui.theme.withLocalAmFont
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -384,7 +385,7 @@ private fun LiveRadioTrack(modifier: Modifier) {
             "LIVE",
             Modifier.padding(horizontal = 10.dp),
             style = TextStyle(color = TransportSecondary, fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                lineHeight = 15.6.sp),
+                lineHeight = 15.6.sp).withLocalAmFont(),
             maxLines = 1,
         )
         Canvas(Modifier.weight(1f).height(7.dp)) {
@@ -400,7 +401,7 @@ private fun TransportText(value: String, color: Color, modifier: Modifier, size:
         text = value,
         modifier = modifier,
         style = TextStyle(color = color, fontWeight = weight,
-            fontSize = size.sp, lineHeight = (size * 1.2f).sp, fontFeatureSettings = "tnum"),
+            fontSize = size.sp, lineHeight = (size * 1.2f).sp, fontFeatureSettings = "tnum").withLocalAmFont(),
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
