@@ -111,12 +111,6 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
     internal var onUserScroll: (() -> Unit)? = null
     internal var onSheetDragBy: ((Float) -> Boolean)? = null
     internal var onSheetScrollEnd: ((Float, Float) -> Boolean)? = null
-    internal var onShareLyrics: ((List<LyricShareLine>, Int) -> Unit)? = null
-        set(value) {
-            if (field === value) return
-            field = value
-            updateShareAvailability()
-        }
 
     internal val hasSheetTouch get() = sheetTouchTracker != null && touch
 
@@ -139,14 +133,6 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
         tapTargetStartY = startY
         controlsTapExclusive = exclusive
         onControlsTap = onTap
-    }
-
-    private fun updateShareAvailability() {
-        for (index in 0 until childCount) {
-            val child = getChildAt(index)
-            val row = displayed.getOrNull(getChildAdapterPosition(child))
-            child.isLongClickable = onShareLyrics != null && row?.lyric != null && song?.timing != "None"
-        }
     }
 
     private fun updateViewport() {
@@ -792,22 +778,6 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
         }
     }
 
-
-    private fun shareFrom(row: Row) {
-        val value = song ?: return
-        val callback = onShareLyrics ?: return
-        val sourceIndex = row.lyricIndex
-        if (value.timing == "None" || sourceIndex !in value.lines.indices) return
-        val eligible = ArrayList<Pair<Int, LyricShareLine>>(value.lines.size)
-        for ((index, line) in value.lines.withIndex()) {
-            if (line.main.text.isBlank() || line.begin < 0 || line.end < line.begin) continue
-            eligible += index to LyricShareLine(line.main.text, line.begin)
-        }
-        val tappedIndex = eligible.indexOfFirst { it.first == sourceIndex }
-        if (tappedIndex < 0) return
-        callback(eligible.map { it.second }, tappedIndex)
-    }
-
     private inner class InkAdapter : Adapter<ViewHolder>() {
         init { setHasStableIds(true) }
         override fun getItemCount() = displayed.size
@@ -844,12 +814,6 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
             }
             view.bind(row.lyric, timing, row.credits, row.attribution, row.dots, translation, pronunciation)
             if (row.lyric != null) {
-                view.setOnLongClickListener {
-                    if (!view.rowActivationAllowed) return@setOnLongClickListener false
-                    if (serial == generation) shareFrom(row)
-                    true
-                }
-                view.isLongClickable = onShareLyrics != null && timing != "None"
                 view.setOnClickListener {
                     if (view.rowActivationAllowed && serial == generation && timing != "None") {
                         onSeek(row.begin)
@@ -859,9 +823,7 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
                 view.isClickable = timing != "None"
             } else {
                 view.setOnClickListener(null)
-                view.setOnLongClickListener(null)
                 view.isClickable = false
-                view.isLongClickable = false
             }
             updateInk(view, row, snapScaleChanges, SystemClock.uptimeMillis())
         }

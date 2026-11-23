@@ -103,8 +103,6 @@ class LyricsController(
         })
     }
 
-    internal fun shareLines(): List<String> = currentSong?.lines?.map { it.main.text }.orEmpty()
-
     fun showAnnotations(translation: Boolean, pronunciation: Boolean) {
         this.translation = translation
         this.pronunciation = pronunciation

@@ -39,7 +39,6 @@ import io.github.kid141252010.fantastic.data.AppleCatalogApi
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
 import io.github.kid141252010.fantastic.data.Source
-import io.github.kid141252010.fantastic.lyrics.LyricShareLine
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
@@ -54,7 +53,6 @@ internal sealed interface PlayerPanel {
     data object Track : PlayerPanel
     data object Entities : PlayerPanel
     data object Quality : PlayerPanel
-    data class Share(val lines: List<LyricShareLine>, val startIndex: Int = 0) : PlayerPanel
 }
 
 private fun String.isMissingCatalogId() = isBlank() || this == "0"
@@ -86,10 +84,6 @@ internal fun NowPlayingContent(
 ) {
     var panel by remember(state.mediaId) { mutableStateOf<PlayerPanel?>(null) }
     SideEffect { onArtworkUnobscuredChange(panel == null) }
-    var shareSelection by remember(state.mediaId, panel) {
-        val share = panel as? PlayerPanel.Share
-        mutableStateOf(if (share != null && share.startIndex in share.lines.indices) setOf(share.startIndex) else emptySet())
-    }
     val libraryState by library.snapshot.collectAsStateWithLifecycle()
     val rawTrack = state.currentTrack
     var menuTrack by remember(rawTrack) { mutableStateOf(rawTrack) }
@@ -220,7 +214,6 @@ internal fun NowPlayingContent(
                                 lyrics, state.mediaId, state.isPlaying, lyricsStatus, lyricsError, inset, interactive,
                                 translation, pronunciation,
                                 annotations.translation, annotations.pronunciation, onTranslationChange, onPronunciationChange,
-                                onShare = { lines, index -> panel = PlayerPanel.Share(lines, index) },
                                 onSheetDragBy = onLyricsDragBy,
                                 onSheetScrollEnd = onLyricsScrollEnd,
                                 header = header, controls = controls,
@@ -239,19 +232,12 @@ internal fun NowPlayingContent(
         PlayerPanels(
             panel = panel,
             onDismiss = { panel = null },
-            artwork = state.artworkUri,
-            shareSelection = shareSelection,
-            onShareSelection = { shareSelection = it },
             trackPanel = { palette ->
                 state.error?.let { error -> androidx.compose.material3.Text(error, Modifier.padding(16.dp), color = palette.label) }
                 hit?.let { song ->
                     io.github.kid141252010.fantastic.ui.MediaActionContent(song, library, listOfNotNull(menuTrack), nowPlaying = true,
                         hasLyrics = lyricsStatus == LyricsController.Status.Ready,
-                        onEntities = openEntities.takeIf { entities.isNotEmpty() },
                         onQuality = { panel = PlayerPanel.Quality },
-                        onShareLyrics = if (lyricsStatus == LyricsController.Status.Ready) ({
-                            panel = PlayerPanel.Share(lyrics.shareLines().map { LyricShareLine(it, null) })
-                        }) else null,
                         pronunciation = pronunciation,
                         onPronunciation = if (pane == PlayerPane.Lyrics && annotations.pronunciation) ({ onPronunciationChange(!pronunciation); panel = null }) else null,
                         translation = translation,

@@ -3,7 +3,6 @@ package io.github.kid141252010.fantastic.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Album
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.GraphicEq
@@ -19,13 +17,10 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.LibraryAdd
 import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Lyrics
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.PushPin
-import androidx.compose.material.icons.outlined.Radio
-import androidx.compose.material.icons.outlined.Report
 import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material.icons.outlined.Share
@@ -33,7 +28,6 @@ import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.ThumbDownOffAlt
 import androidx.compose.material.icons.outlined.Timer
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -57,11 +51,9 @@ import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.mediaId
+import io.github.kid141252010.fantastic.playback.validSongId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
 
 /** C3469t.h/b/d/f/g/a ordering, with local-library actions explicitly distinguished from Apple sync. */
 @Composable
@@ -74,9 +66,7 @@ internal fun MediaActionContent(
     shareText: String? = catalogShareText(hit),
     onPlay: (() -> Unit)? = null,
     onView: (() -> Unit)? = null,
-    onEntities: (() -> Unit)? = null,
     onQuality: (() -> Unit)? = null,
-    onShareLyrics: (() -> Unit)? = null,
     pronunciation: Boolean = false,
     onPronunciation: (() -> Unit)? = null,
     translation: Boolean = false,
@@ -110,6 +100,7 @@ internal fun MediaActionContent(
     val media = hit.kind in setOf("song", "album", "playlist", "music-video")
     val favoriteEntity = media || hit.kind == "artist"
     var playlists by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
+    var showCredits by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
     if (playlists) {
         BackHandler { playlists = false }
         SheetAction("返回${hit.title}", onClick = { playlists = false })
@@ -124,8 +115,7 @@ internal fun MediaActionContent(
         return
     }
     val palette = actionSheetColors()
-    Row(Modifier.fillMaxWidth().then(if (onEntities != null) Modifier.clickable(onClick = onEntities) else Modifier)
-        .padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
         Artwork(hit.artwork, 80.dp, 5.dp)
         Column(Modifier.weight(1f).padding(start = 16.dp)) {
             Text(hit.title, color = palette.label, fontSize = 17.sp, fontWeight = FontWeight.Bold,
@@ -177,8 +167,6 @@ internal fun MediaActionContent(
                 onClick = if (resolving) null else ({ withSongs { app.player.enqueue(it, next = false) } }))
         }
     }
-    if (hit.kind == "album" || hit.kind == "artist") SheetAction("创建电台", Icons.Outlined.Radio,
-        detail = "Fantastic 未提供基于此资源的电台生成")
     SheetDivider()
     SheetAction("分享${catalogKindLabel(hit.kind)}", Icons.Outlined.Share,
         detail = if (shareText == null) "缺少已验证的资源链接" else null,
@@ -189,17 +177,17 @@ internal fun MediaActionContent(
             onDismiss()
         } })
     if (hit.kind == "song") {
-        if (hasLyrics) SheetAction("分享歌词", Icons.Outlined.Lyrics,
-            detail = if (onShareLyrics == null) "请在播放器中长按歌词行选择" else null, onClick = onShareLyrics)
-        SheetAction("查看歌曲制作信息", Icons.Outlined.Info, detail = "当前接口未提供完整制作人员资料")
-        if (hasLyrics) SheetAction("报告问题", Icons.Outlined.Report, detail = "Fantastic 未接入 Apple 歌词反馈")
-        SheetAction("创建电台", Icons.Outlined.Radio, detail = "Fantastic 未提供基于此歌曲的电台生成")
+        if (hasLyrics) SheetAction("分享歌词", Icons.Outlined.Lyrics)
+        val validId = hit.source.validSongId(hit.id)
+        SheetAction(
+            "查看歌曲制作信息",
+            Icons.Outlined.Info,
+            detail = if (validId) null else "缺少有效的歌曲 ID",
+            onClick = if (validId) ({ showCredits = true }) else null,
+        )
         if (onPronunciation != null) SheetAction(if (pronunciation) "隐藏音译" else "显示音译", Icons.Outlined.RecordVoiceOver, onClick = onPronunciation)
         if (onTranslation != null) SheetAction(if (translation) "隐藏翻译" else "显示翻译", Icons.Outlined.Translate, onClick = onTranslation)
         if (nowPlaying) SheetAction("睡眠定时器", Icons.Outlined.Timer, detail = "当前播放器未提供定时停止")
-    }
-    if (hit.kind == "playlist" && ((hit.attributes as? JsonObject)?.get("playlistType") as? JsonPrimitive)?.contentOrNull == "user-shared") {
-        SheetAction("报告问题", Icons.Outlined.Report, detail = "Fantastic 未接入 Apple 播放列表反馈")
     }
     if (favoriteEntity) {
         SheetDivider()
@@ -209,14 +197,6 @@ internal fun MediaActionContent(
         if (saved?.isFavorite != true) SheetAction("减少推荐", Icons.Outlined.ThumbDownOffAlt,
             detail = "Fantastic 未提供推荐偏好反馈")
     }
-    if (onEntities != null || (nowPlaying && hit.track != null)) {
-        SheetDivider()
-        if (onEntities != null) SheetAction("查看艺人/专辑", Icons.Outlined.Person, onClick = onEntities)
-        else {
-            SheetAction("查看艺人", Icons.Outlined.Person, detail = "曲目未提供艺人 ID")
-            SheetAction("查看专辑", Icons.Outlined.Album, detail = "曲目未提供专辑 ID")
-        }
-    }
     if (onPlay != null || onView != null || onQuality != null || hit.kind == "artist") {
         SheetDivider()
         if (onPlay != null) SheetAction("播放", Icons.Outlined.PlayArrow, onClick = onPlay)
@@ -225,6 +205,7 @@ internal fun MediaActionContent(
         if (hit.kind == "artist") SheetAction(if (saved == null) "添加到本机资料库" else "从本机资料库移除",
             Icons.Outlined.LibraryMusic, onClick = { if (saved == null) library.add(hit) else library.remove(hit); onDismiss() })
     }
+    if (showCredits) SongCreditsDialog(app, hit) { showCredits = false }
 }
 
 internal fun catalogKindLabel(kind: String): String = when (kind) {

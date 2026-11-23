@@ -7,7 +7,9 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.intOrNull
 import okhttp3.Request
 import java.io.IOException
 import java.net.URI
@@ -49,6 +51,23 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
             song = json.decodeFromJsonElement(NeteaseSong.serializer(), data),
             meta = data["meta"],
         )
+    }
+
+    internal suspend fun songCredits(id: String): List<SongCreditSection> {
+        val invalid = "Invalid Netease song credits response"
+        val root = getJson(
+            "/api/song/lyric?id=${validId(id)}&lv=1&tv=0",
+            server = "https://music.163.com",
+        ) as? JsonObject ?: throw IOException(invalid)
+        val code = root["code"] as? JsonPrimitive
+        if (code == null || code.isString || code.intOrNull != 200) throw IOException(invalid)
+
+        val field = root["lrc"] ?: return emptyList()
+        val lrc = field as? JsonObject ?: throw IOException(invalid)
+        val lyric = lrc["lyric"] ?: return emptyList()
+        val text = (lyric as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw IOException(invalid)
+        val entries = lrcSongCredits(text)
+        return if (entries.isEmpty()) emptyList() else listOf(SongCreditSection("网易云音乐歌词署名", entries))
     }
 
     suspend fun album(id: String): NeteaseAlbumPage =
@@ -145,8 +164,8 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
         throw IOException("Invalid Netease response", e)
     }
 
-    private suspend fun getJson(path: String): JsonElement = try {
-        json.parseToJsonElement(request(path))
+    private suspend fun getJson(path: String, server: String = prefs.baseUrl): JsonElement = try {
+        json.parseToJsonElement(request(path, server))
     } catch (e: SerializationException) {
         throw IOException("Invalid Netease response", e)
     }

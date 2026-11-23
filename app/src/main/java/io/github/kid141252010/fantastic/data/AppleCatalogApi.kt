@@ -138,6 +138,39 @@ class AppleCatalogApi(
             ?: throw IOException("Apple Music resource not found")
     }
 
+    internal suspend fun songCredits(id: String): List<SongCreditSection> {
+        val path = "${catalog(prefs.storefront)}/${Entity.Song.route}/${segment(id)}"
+        val response = try {
+            request(path, mapOf("include" to "credits", "extend[role-categories]" to "titleInTitleCase,title"))
+        } catch (error: AppleCatalogHttpException) {
+            if (error.statusCode != 400) throw error
+            request(path)
+        }
+        val song = response.data.firstOrNull { it.id == id && it.type == Entity.Song.route }
+            ?: throw IOException("Apple Music resource not found")
+        val sections = song.relationships["credits"]?.data.orEmpty().mapNotNull { category ->
+            if (category.type != "role-categories") return@mapNotNull null
+            val artists = category.relationships["credit-artists"]?.data ?: return@mapNotNull null
+            val entries = buildSet {
+                for (artist in artists) {
+                    if (artist.type != "credit-artists") continue
+                    val name = artist.attributes.nonBlankString("name")?.trim() ?: continue
+                    val roles = (artist.attributes["roleNames"] as? JsonArray)?.mapNotNullTo(LinkedHashSet()) { value ->
+                        (value as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
+                    }?.toList().orEmpty()
+                    add(SongCredit(name, roles))
+                }
+            }
+            if (entries.isEmpty()) return@mapNotNull null
+            val title = category.attributes.nonBlankString("titleInTitleCase")
+                ?: category.attributes.nonBlankString("title")
+            SongCreditSection(title?.trim(), entries.toList())
+        }
+        if (sections.isNotEmpty()) return sections
+        val composer = song.attributes.nonBlankString("composerName") ?: return emptyList()
+        return listOf(SongCreditSection(null, listOf(SongCredit(composer, listOf("作曲")))))
+    }
+
     /** Batch lookup; API limits remain type-specific and are not silently truncated. */
     suspend fun entities(
         type: Entity,
