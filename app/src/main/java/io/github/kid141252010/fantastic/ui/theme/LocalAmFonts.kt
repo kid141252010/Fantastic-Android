@@ -12,13 +12,19 @@ import android.util.Log
 import android.util.LongSparseArray
 import android.util.TypedValue
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /** Optional assets supplied only by the developer's ignored local font directory. */
 internal object LocalAmFonts {
     private const val directory = "am-fonts"
+    private const val pingFangCollection = "pingfang_ui.ttc"
     private var availableFonts: Set<String>? = null
     private val typefaces = LongSparseArray<Typeface?>()
+    private var pingFangData: ByteBuffer? = null
+    private val pingFangFamilies = LongSparseArray<FontFamily>()
     private val fallbackFiles = arrayOf(
         "sf_armenian.ttf", "sf_georgian.ttf", "sf_hebrew.ttf", "sf_bangla.ttf",
         "sf_devanagari.ttf", "sf_gujarati.ttf", "sf_gurmukhi.ttf", "sf_kannada.ttf",
@@ -48,16 +54,18 @@ internal object LocalAmFonts {
         val opticalSize = (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sizeSp, metrics) /
             metrics.density).roundToInt().coerceAtLeast(1)
         val resolvedWeight = resolvedWeight(weight)
-        val nastaliq = context.resources.configuration.locales[0].language == "ur"
-        val key = (opticalSize.toLong() shl 12) or (resolvedWeight.toLong() shl 2) or
-            (if (rounded) 1L else 0L) or (if (nastaliq) 2L else 0L)
+        val locale = context.resources.configuration.locales[0]
+        val nastaliq = locale.language == "ur"
+        val pingFangIndex = if (Build.VERSION.SDK_INT >= 29 && pingFangCollection in files) pingFangFaceIndex(locale) else -1
+        val key = (opticalSize.toLong() shl 15) or (resolvedWeight.toLong() shl 5) or
+            ((pingFangIndex + 1L) shl 2) or (if (rounded) 1L else 0L) or (if (nastaliq) 2L else 0L)
         val cached = typefaces.indexOfKey(key)
         if (cached >= 0) return typefaces.valueAt(cached)
 
         val variations = "'wght' $resolvedWeight, 'opsz' $opticalSize"
         val typeface = try {
             if (Build.VERSION.SDK_INT >= 29) {
-                buildFallbackChain(assets, files, primary, variations, resolvedWeight, rounded, nastaliq)
+                buildFallbackChain(assets, files, primary, variations, resolvedWeight, rounded, nastaliq, pingFangIndex)
             } else {
                 Typeface.Builder(assets, "$directory/$primary")
                     .setWeight(resolvedWeight)
@@ -76,10 +84,38 @@ internal object LocalAmFonts {
         return typeface
     }
 
+    // Faces in the locally supplied PingFang UI collection in TTC order.
+    private fun pingFangFaceIndex(locale: Locale): Int = when {
+        locale.language == "ja" -> 4
+        locale.language != "zh" || locale.script == "Hans" -> 0
+        locale.country == "HK" -> 2
+        locale.country == "MO" -> 3
+        locale.country == "TW" || locale.script == "Hant" -> 1
+        else -> 0
+    }
+
+    @TargetApi(29)
+    private fun pingFangFamily(assets: AssetManager, index: Int, weight: Int): FontFamily {
+        val cjkWeight = weight.coerceIn(100, 900)
+        val key = (index.toLong() shl 10) or cjkWeight.toLong()
+        pingFangFamilies[key]?.let { return it }
+        val buffer = pingFangData ?: assets.openFd("$directory/$pingFangCollection").use { descriptor ->
+            descriptor.createInputStream().use { stream ->
+                stream.channel.map(FileChannel.MapMode.READ_ONLY, descriptor.startOffset, descriptor.length)
+            }
+        }.also { pingFangData = it }
+        val font = Font.Builder(buffer)
+            .setTtcIndex(index)
+            .setWeight(cjkWeight)
+            .setFontVariationSettings("'wght' $cjkWeight")
+            .build()
+        return FontFamily.Builder(font).build().also { pingFangFamilies.put(key, it) }
+    }
+
     @TargetApi(29)
     private fun buildFallbackChain(
         assets: AssetManager, files: Set<String>, primary: String, variations: String,
-        weight: Int, rounded: Boolean, nastaliq: Boolean,
+        weight: Int, rounded: Boolean, nastaliq: Boolean, pingFangIndex: Int,
     ): Typeface {
         fun family(file: String, variable: Boolean = true): FontFamily {
             val builder = Font.Builder(assets, "$directory/$file")
@@ -88,6 +124,7 @@ internal object LocalAmFonts {
         }
 
         val builder = Typeface.CustomFallbackBuilder(family(primary))
+        if (pingFangIndex >= 0) builder.addCustomFallback(pingFangFamily(assets, pingFangIndex, weight))
         for (file in fallbackFiles) {
             if (nastaliq && file == "sf_arabic.ttf") continue
             val selected = if (rounded) when (file) {

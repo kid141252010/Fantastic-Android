@@ -43,9 +43,9 @@ The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in i
 
 ### Local release APKs
 
-Build the unsigned release APK with `gradle :app:assembleRelease -PincludeLocalAmFonts=false`. Align `app/build/outputs/apk/release/app-release-unsigned.apk` with `zipalign`, then sign it with `apksigner` and the existing release key. The signing certificate must match the previous release for an in-place update.
+Build the unsigned release APK with `gradle :app:assembleRelease`. Align `app/build/outputs/apk/release/app-release-unsigned.apk` with `zipalign`, then sign it with `apksigner` and the existing release key. The signing certificate must match the previous release for an in-place update.
 
-Local builds can optionally load fonts from the ignored directory `.work/local-am-fonts/assets/am-fonts/`. Set `-PincludeLocalAmFonts=false` to use the Android system fallback.
+For a local build with fonts, place the SF Pro assets and the complete `pingfang_ui.ttc` collection under the ignored `.work/local-am-fonts/assets/am-fonts/` directory and use `-PincludeLocalAmFonts=true`. Use `-PincludeLocalAmFonts=false` for a build using Android system fonts. On Android 10 and later, the shared typeface for lyrics and app text selects a PingFang UI face by app locale and defaults to SC. Android system fonts supply remaining glyphs. Android 8 and 9 use system fallbacks for CJK.
 
 ## 提交与 APK 交付
 

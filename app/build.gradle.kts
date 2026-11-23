@@ -15,6 +15,10 @@ android {
     val localAmFontAssets = rootProject.file(".work/local-am-fonts/assets")
     if (providers.gradleProperty("includeLocalAmFonts").orNull != "false" && localAmFontAssets.isDirectory) {
         sourceSets.getByName("main").assets.srcDir(localAmFontAssets)
+        // Map the large font collection directly from the APK and share it across typefaces.
+        if (localAmFontAssets.resolve("am-fonts/pingfang_ui.ttc").isFile) {
+            androidResources.noCompress += "ttc"
+        }
     }
 
     defaultConfig {
