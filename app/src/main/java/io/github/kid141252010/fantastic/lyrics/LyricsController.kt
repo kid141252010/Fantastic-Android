@@ -47,7 +47,7 @@ class LyricsController(
     enum class Status { None, Loading, Ready, Missing, Failed }
 
     private val scope = MainScope()
-    private val parser by lazy { LyricParser(context) }
+    private val parser = LyricParser()
     private val cache = LyricsCache(context)
     private val qqJson = Json { ignoreUnknownKeys = true; explicitNulls = false }
     private val _status = MutableStateFlow(Status.None)
@@ -336,13 +336,13 @@ class LyricsController(
         val annotations = api.qqQrcAnnotations(document, rawRoma, rawTrans)
         val enriched = root.toMutableMap()
         enriched.putAll(annotations)
-        return parser.parse("qq", JsonObject(enriched).toString())
+        return parser.parse("qq", payload = JsonObject(enriched))
     }
 
     private suspend fun tryParseQqSummary(root: JsonObject, candidates: List<JsonElement>): LyricSong? {
-        val payload = JsonObject(root.toMutableMap().apply { put("candidates", JsonArray(candidates)) }).toString()
+        val payload = JsonObject(root.toMutableMap().apply { put("candidates", JsonArray(candidates)) })
         return try {
-            parser.parse("qq", payload)
+            parser.parse("qq", payload = payload)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {

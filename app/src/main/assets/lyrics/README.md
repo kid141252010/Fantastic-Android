@@ -1,15 +1,15 @@
 # 歌词渲染器
 
-`LyricsController` 加载歌词并控制同步。`lyrics.mjs` 整理各音源的候选数据，`ttml.mjs` 在 `WebViewAssetLoader` 中解析 TTML。`NativeLyricsView` 用 RecyclerView 布局，`LyricInkView` 用 Canvas 绘制，`LyricMotion.kt` 保存时序和曲线。AMLL 提供歌词数据，播放界面由 Android 原生渲染。
+`LyricsController` 加载歌词并控制同步。`LyricParser` 在 `Dispatchers.Default` 选择候选源、解析 TTML 或计时文本，并组装可序列化的 `LyricSong`。`NativeLyricsView` 用 RecyclerView 布局，`LyricInkView` 用 Canvas 绘制，`LyricMotion.kt` 保存时序和曲线。AMLL 提供歌词数据。
 
-解析模块由本项目维护，需保留 `parseFantasticLyrics`、`ready` 和 `status` 桥接协议。
+原生解析模块分为 TTML XML 读取、网易云计时文本和 QQ 注释对齐。切歌会取消在途解析。
 
 ## 歌词来源与缓存
 
 - 默认参数下并行请求 Apple 官方歌词与 AMLL TTML。AMLL 按 `appleMusicId` 匹配。若结果可用，则显示该结果并取消尚未完成的官方请求。若未收录、请求失败或内容无效，则读取已发起的官方请求。切歌取消两路请求。AMLL 地址取自当前 Fantastic `/assets/host.js` 的 `amllApi`。缺省时使用公共词库地址。[AMLL 接口](https://amll.dev/reference/http-api/native.html)
 - Apple 官方歌词默认使用 `language=zh-Hans-CN`、`script=zh-Latn`。自定义语言或字形以及修改设置后的同曲刷新走官方接口。暂停或缓冲时将同曲刷新合并到恢复播放。`language` 用于选择 TTML 译文，`script` 作为请求参数传给服务端。
-- QQ 的有效 AMLL 候选优先于待补注释的 QRC。走 QRC 时按返回的标志补取可用音译和译文，再由 `qrc-annotations.mjs` 对齐。网易云歌词使用返回的 YRC、LRC 及其注释。
-- 成功解析的整首歌词保存到 16 MiB 独立磁盘缓存。缓存区分音源、服务地址、曲目以及 Apple 店面、语言、字形和来源策略。「设置 → 歌词诊断」和 `FantasticLyrics` 记录缓存、来源、耗时及回退原因。单次解析超时为 15 秒。
+- QQ 的有效 AMLL 候选优先于待补注释的 QRC。走 QRC 时按返回的标志补取可用音译和译文，再由 `NativeQrcAnnotations` 对齐。网易云歌词使用返回的 YRC、LRC 及其注释。
+- 成功解析的整首歌词保存到 `lyrics-v1` 磁盘缓存，总容量 16 MiB，单文档上限 4 MiB。缓存区分音源、服务地址、曲目以及 Apple 店面、语言、字形和来源策略。命中旧缓存时直接读取 `LyricSong`。「设置 → 歌词诊断」和 `FantasticLyrics` 记录缓存、来源、耗时及回退原因。单次解析超时为 15 秒。
 
 ## 时间轴与排版
 
