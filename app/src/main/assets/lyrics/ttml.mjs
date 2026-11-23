@@ -1,195 +1,346 @@
-/**
- * Parse the Apple lyric dialect, and the AMLL TTML DB dialect (https://github.com/amll-dev/amll-ttml-db), which writes
- * translations and romanizations inline as <span ttm:role="x-translation|x-roman"> and credits authors in <amll:meta>.
- * All times in the public model are milliseconds.
- */
+const APPLE_NS = 'http://music.apple.com/lyric-ttml-internal';
+const META_NS = 'http://www.w3.org/ns/ttml#metadata';
+const XML_NS = 'http://www.w3.org/XML/1998/namespace';
+
+const children = (node, name) => Array.from(node?.children ?? []).filter(item => item.localName === name);
+const first = (node, name) => children(node, name)[0] ?? null;
+const attribute = (node, namespace, name, fallback = '') =>
+  node?.getAttributeNS(namespace, name) || fallback;
+const roleOf = node => attribute(node, META_NS, 'role');
+
 export function parseTime(value = '0') {
-  const parts = String(value).split(':');
-  if (parts.length > 3 || parts.some(part => !/^\d+(?:\.\d+)?$/.test(part))) {
+  const fields = String(value).trim().split(':');
+  if (fields.length > 3 || fields.some(field => !/^\d+(?:\.\d+)?$/.test(field))) {
     throw new Error(`无效的时间：${value}`);
   }
-  return Math.round(parts.reduce((total, part) => total * 60 + Number(part), 0) * 1000);
+  return Math.round(fields.reduce((seconds, field) => seconds * 60 + Number(field), 0) * 1000);
 }
 
-const APPLE = 'http://music.apple.com/lyric-ttml-internal';
-const META = 'http://www.w3.org/ns/ttml#metadata';
-const XML = 'http://www.w3.org/XML/1998/namespace';
-const children = (node, name) => [...(node?.children || [])].filter(child => child.localName === name);
-const child = (node, name) => children(node, name)[0];
-const attribute = (node, ns, name, fallback = '') => node?.getAttributeNS(ns, name) || fallback;
-const role = node => attribute(node, META, 'role');
-const isBackground = node => role(node) === 'x-bg';
-const inline = (node, name, prefLang) => selectLanguage(children(node, 'span').filter(span => role(span) === name), prefLang);
-// Text of the node itself, without background vocals or inline translations
-const cleanText = node => [...(node?.childNodes || [])]
-  .filter(n => n.nodeType === 3 || (n.nodeType === 1 && !role(n)))
-  .map(n => n.textContent).join('').trim().replace(/\s+/g, ' ');
-
-function tokens(node) {
-  return children(node, 'span').filter(span => !role(span)).map(span => ({
-    begin: parseTime(span.getAttribute('begin') || '0'),
-    end: parseTime(span.getAttribute('end') || '0'),
-    text: span.textContent || '',
-    spaceAfter: span.nextSibling?.nodeType === 3,
-  }));
+function normalizedLanguage(value) {
+  return String(value || '').trim().replaceAll('_', '-').toLowerCase();
 }
 
-const normalizeLanguage = (language) => String(language || '').trim().replaceAll('_', '-').toLowerCase();
-
-function languageScore(language, prefLang) {
-  language = normalizeLanguage(language);
-  const preferred = normalizeLanguage(prefLang);
-  if (!preferred || !language) return 0;
-  if (language === preferred) return 1000;
-  const preferredParts = preferred.split('-').filter(Boolean);
-  const primary = preferredParts[0];
-  const preferredScript = preferredParts.find(part => /^[a-z]{4}$/.test(part)) || (primary === 'zh' ? 'hans' : '');
-  const preferredRegion = primary === 'zh' ? (preferredScript === 'hant' ? 'tw' : 'cn') : primary === 'en' ? 'us' : '';
-  const parts = language.split('-').filter(Boolean);
-  if (parts[0] !== primary) return 0;
-  const script = parts.find(part => /^[a-z]{4}$/.test(part));
-  const region = parts.slice(1).find(part => /^(?:[a-z]{2}|\d{3})$/.test(part));
-  if (script === preferredScript) return 300;
-  if (region === preferredRegion) return 200;
-  return 100;
+function languageRank(candidate, preferred) {
+  const candidateParts = normalizedLanguage(candidate).split('-').filter(Boolean);
+  const preferredParts = normalizedLanguage(preferred).split('-').filter(Boolean);
+  if (!preferredParts.length || !candidateParts.length) return 0;
+  if (candidateParts.join('-') === preferredParts.join('-')) return 5;
+  if (candidateParts[0] !== preferredParts[0]) return 0;
+  const candidateScript = candidateParts.find(part => /^[a-z]{4}$/.test(part));
+  const preferredScript = preferredParts.find(part => /^[a-z]{4}$/.test(part));
+  if (candidateScript && preferredScript) return candidateScript === preferredScript ? 4 : 1;
+  const candidateRegion = candidateParts.find(part => /^[a-z]{2}$/.test(part) || /^\d{3}$/.test(part));
+  const preferredRegion = preferredParts.find(part => /^[a-z]{2}$/.test(part) || /^\d{3}$/.test(part));
+  if (candidateRegion && candidateRegion === preferredRegion) return 3;
+  return 2;
 }
 
-function selectLanguage(candidates, prefLang) {
-  let source = candidates[0];
-  let best = languageScore(attribute(source, XML, 'lang'), prefLang);
-  for (const candidate of candidates.slice(1)) {
-    const candidateScore = languageScore(attribute(candidate, XML, 'lang'), prefLang);
-    if (candidateScore > best) {
-      source = candidate;
-      best = candidateScore;
+function chooseLanguage(items, preferred) {
+  let chosen = items[0] ?? null;
+  let rank = chosen ? languageRank(attribute(chosen, XML_NS, 'lang'), preferred) : -1;
+  for (let index = 1; index < items.length; index++) {
+    const nextRank = languageRank(attribute(items[index], XML_NS, 'lang'), preferred);
+    if (nextRank > rank) {
+      chosen = items[index];
+      rank = nextRank;
     }
   }
-  return source;
+  return chosen;
 }
 
-function localization(candidates, prefLang) {
-  const source = selectLanguage(candidates, prefLang);
+function localizedRecords(items, preferred) {
+  const selected = chooseLanguage(items, preferred);
   return {
-    language: attribute(source, XML, 'lang'),
-    automatic: source?.getAttribute('automaticallyCreated') === 'true',
-    type: source?.getAttribute('type') || '',
-    entries: new Map(children(source, 'text').map(text => [text.getAttribute('for'), text])),
+    node: selected,
+    language: attribute(selected, XML_NS, 'lang'),
+    type: selected?.getAttribute('type') || '',
+    automatic: selected?.getAttribute('automaticallyCreated') === 'true',
+    entries: new Map(children(selected, 'text').map(item => [item.getAttribute('for') || '', item])),
   };
 }
 
-function readVoice(node, translation, pronunciation, prefLang) {
-  translation ||= inline(node, 'x-translation', prefLang);
-  pronunciation ||= inline(node, 'x-roman', prefLang);
+function inlineRole(node, role, preferred) {
+  return chooseLanguage(children(node, 'span').filter(item => roleOf(item) === role), preferred);
+}
+
+function textWithoutRoles(node) {
+  return Array.from(node?.childNodes ?? [])
+    .filter(item => item.nodeType === 3 || (item.nodeType === 1 && !roleOf(item)))
+    .map(item => item.textContent || '').join('').trim().replace(/\s+/g, ' ');
+}
+
+function wordSpans(node) {
+  return Array.from(node?.childNodes ?? []).flatMap(item => {
+    if (item.nodeType === 3) {
+      const text = item.textContent || '';
+      return text && text.trim().length === 0 ? [{ begin: 0, end: 0, text, whitespace: true, spaceAfter: false }] : [];
+    }
+    if (item.nodeType !== 1 || item.localName !== 'span' || roleOf(item)) return [];
+    const text = item.textContent || '';
+    return [{
+      begin: parseTime(item.getAttribute('begin') || '0'),
+      end: parseTime(item.getAttribute('end') || '0'),
+      text,
+      whitespace: text.trim().length === 0,
+      spaceAfter: false,
+    }];
+  });
+}
+
+function finalParenthesisGroup(text) {
+  const close = text.trimEnd().length - 1;
+  if (text[close] !== ')' && text[close] !== '）') return null;
+  const stack = [];
+  let open = -1;
+  for (let index = 0; index <= close; index++) {
+    const char = text[index];
+    if (char === '(' || char === '（') {
+      if (!stack.length) open = index;
+      stack.push(char === '(' ? ')' : '）');
+    } else if (char === ')' || char === '）') {
+      if (stack.pop() !== char) return null;
+      if (index === close && !stack.length && text.slice(open + 1, close).trim()) return [open, close];
+    }
+  }
+  return null;
+}
+
+function backingWrapper(text) {
+  const group = finalParenthesisGroup(text);
+  return group && !text.slice(0, group[0]).trim() ? group : null;
+}
+
+export function unwrapBackingText(text) {
+  const group = backingWrapper(text);
+  return group ? text.slice(group[0] + 1, group[1]).trim() : text;
+}
+
+export function unwrapBackingTokens(tokens) {
+  const group = backingWrapper(tokens.map(token => token.text).join(''));
+  if (!group) return;
+  // Work backwards within each span so deleting the closing character preserves the opening index.
+  let offset = 0;
+  for (const token of tokens) {
+    const end = offset + token.text.length;
+    for (let index = group.length - 1; index >= 0; index--) {
+      const at = group[index] - offset;
+      if (at >= 0 && group[index] < end) token.text = token.text.slice(0, at) + token.text.slice(at + 1);
+    }
+    offset = end;
+  }
+}
+
+function optionalTime(value) {
+  if (!value) return null;
+  try {
+    const parsed = parseTime(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function qrcBackgroundClock(node, tokens, fallbackBegin, fallbackEnd) {
+  const visible = tokens.filter(token => !token.whitespace &&
+    Number.isSafeInteger(token.begin) && token.begin >= 0 &&
+    Number.isSafeInteger(token.end) && token.end >= token.begin);
+  const visibleBegin = visible.length ? Math.min(...visible.map(token => token.begin)) : fallbackBegin;
+  const visibleEnd = visible.length ? Math.max(...visible.map(token => token.end)) : fallbackEnd;
+  const begin = optionalTime(node.getAttribute('begin'));
+  const end = optionalTime(node.getAttribute('end'));
+  if (begin === null || end === null || end < begin) {
+    return { qrcBegin: visibleBegin, qrcEnd: visibleEnd };
+  }
+  return { qrcBegin: begin, qrcEnd: end };
+}
+
+function voice(node, translationNode, romanizationNode, preferred) {
+  const translation = translationNode || inlineRole(node, 'x-translation', preferred);
+  const romanization = romanizationNode || inlineRole(node, 'x-roman', preferred);
+  const pronunciationTokens = wordSpans(romanization);
   return {
-    text: cleanText(node), tokens: tokens(node),
-    translation: translation?.textContent.trim() || '',
-    pronunciation: children(pronunciation, 'span').length ? '' : cleanText(pronunciation),
-    pronunciationTokens: tokens(pronunciation),
+    text: textWithoutRoles(node),
+    tokens: wordSpans(node),
+    translation: translation?.textContent?.trim() || '',
+    pronunciation: pronunciationTokens.length ? '' : textWithoutRoles(romanization),
+    pronunciationTokens,
   };
 }
 
-export function parseTTML(xml, Parser = globalThis.DOMParser, prefLang) {
+function chineseScript(language) {
+  const parts = normalizedLanguage(language).split('-');
+  if (parts[0] !== 'zh') return '';
+  const explicit = parts.find(part => /^[a-z]{4}$/.test(part));
+  if (explicit) return explicit;
+  const region = parts.find(part => /^[a-z]{2}$/.test(part));
+  return ({ cn: 'hans', sg: 'hans', tw: 'hant', hk: 'hant', mo: 'hant' })[region] || '';
+}
+
+export function parseTTML(xml, Parser = globalThis.DOMParser, preferredLanguage, qrcBackgroundTiming = false) {
   if (!Parser) throw new Error('需要 DOMParser');
   const document = new Parser().parseFromString(xml, 'application/xml');
-  if (document.querySelector('parsererror') || document.documentElement.localName !== 'tt') {
+  const root = document.documentElement;
+  if (!root || root.localName !== 'tt' || document.getElementsByTagName('parsererror').length) {
     throw new Error('无法解析 TTML：XML 格式不正确');
   }
-  const root = document.documentElement;
-  const body = child(root, 'body');
+  const body = first(root, 'body');
   if (!body) throw new Error('TTML 缺少 body');
-  const head = child(child(root, 'head'), 'metadata');
-  const metadata = child(head, 'iTunesMetadata');
-  const agents = Object.fromEntries(children(head, 'agent').filter(node => node.namespaceURI === META).flatMap(node => {
-    const id = attribute(node, XML, 'id');
-    if (!id) return [];
-    const type = node.getAttribute('type');
-    const name = children(node, 'name').find(name => name.namespaceURI === META)?.textContent.trim();
-    return [[id, { id, ...(type ? { type } : {}), ...(name ? { name } : {}) }]];
-  }));
-  const amllMeta = key => children(head, 'meta').filter(meta => meta.getAttribute('key') === key).map(meta => meta.getAttribute('value'));
-  // 替换段（type="replacement"，如繁中原文的简体字形）与逐句翻译（subtitle）分开选：同一份 TTML 可能两种都有
-  const translations = children(child(metadata, 'translations'), 'translation');
-  const isReplacement = node => node.getAttribute('type') === 'replacement';
-  const translation = localization(translations.filter(node => !isReplacement(node)), prefLang);
-  const replacements = localization(translations.filter(isReplacement), prefLang);
-  const chineseScript = language => {
-    const [primary, ...parts] = normalizeLanguage(language).split('-');
-    if (primary !== 'zh') return undefined;
-    return parts.find(part => /^[a-z]{4}$/.test(part)) || parts.map(part => ({
-      cn: 'hans', sg: 'hans', tw: 'hant', hk: 'hant', mo: 'hant',
-    })[part]).find(Boolean);
-  };
-  const preferredScript = chineseScript(prefLang);
-  const replacementScript = chineseScript(replacements.language);
-  const skipReplacement = preferredScript && replacementScript && preferredScript !== replacementScript;
-  const pronunciation = localization(children(child(metadata, 'transliterations'), 'transliteration'), prefLang);
-  // How much later each audio version plays than the lyric timing, e.g. <audio lyricOffset="0.929" role="spatial"/>
-  // (Atmos and its binaural / downmixed renditions); ms, keyed by role
-  const audioOffsets = Object.fromEntries(children(metadata, 'audio').flatMap((node) => {
-    const offset = Number(node.getAttribute('lyricOffset'));
-    const name = node.getAttribute('role');
-    return name && Number.isFinite(offset) && offset ? [[name, Math.round(offset * 1000)]] : [];
-  }));
+
+  const head = first(root, 'head');
+  const headMetadata = first(head, 'metadata');
+  const metadata = first(headMetadata, 'iTunesMetadata');
+  const agents = Object.create(null);
+  for (const agent of [...children(head, 'agent'), ...children(headMetadata, 'agent')]) {
+    if (agent.namespaceURI !== META_NS) continue;
+    const id = attribute(agent, XML_NS, 'id');
+    if (!id) continue;
+    const name = children(agent, 'name').find(item => item.namespaceURI === META_NS)?.textContent?.trim();
+    agents[id] = { id, ...(agent.getAttribute('type') ? { type: agent.getAttribute('type') } : {}), ...(name ? { name } : {}) };
+  }
+
+  const translationNodes = children(first(metadata, 'translations'), 'translation');
+  const replacementNodes = translationNodes.filter(item => item.getAttribute('type') === 'replacement');
+  const translationInfo = localizedRecords(translationNodes.filter(item => item.getAttribute('type') !== 'replacement'), preferredLanguage);
+  const replacementInfo = localizedRecords(replacementNodes, preferredLanguage);
+  const pronunciationInfo = localizedRecords(children(first(metadata, 'transliterations'), 'transliteration'), preferredLanguage);
+  const wantedScript = chineseScript(preferredLanguage);
+  const replacementScript = chineseScript(replacementInfo.language);
+  const allowReplacement = !wantedScript || !replacementScript || wantedScript === replacementScript;
+
+  const audioOffsets = {};
+  for (const audio of children(metadata, 'audio')) {
+    const name = audio.getAttribute('role');
+    const offset = Number(audio.getAttribute('lyricOffset'));
+    if (name && Number.isFinite(offset) && offset !== 0) audioOffsets[name] = Math.round(offset * 1000);
+  }
+
   const sections = children(body, 'div').map((section, sectionIndex) => ({
     begin: parseTime(section.getAttribute('begin') || '0'),
     end: parseTime(section.getAttribute('end') || '0'),
-    type: attribute(section, APPLE, 'songPart', 'Verse').toLowerCase(),
-    lines: children(section, 'p').map((line, lineIndex) => {
-      const key = attribute(line, APPLE, 'key', `${sectionIndex}:${lineIndex}`);
-      const pr = pronunciation.entries.get(key);
-      // A replacement (e.g. zh-Hans-CN for a zh-Hant original) supersedes the lyrics, keeping its own word timing
-      const replacement = skipReplacement ? null : replacements.entries.get(key);
-      const tr = translation.entries.get(key);
-      const bgNode = children(line, 'span').find(isBackground);
-      const background = readVoice(bgNode, children(tr, 'span').find(isBackground), children(pr, 'span').find(isBackground), prefLang);
-      const main = readVoice(line, tr, pr, prefLang);
-      if (replacement) {
-        Object.assign(main, { text: cleanText(replacement), tokens: tokens(replacement) });
-        const bgReplacement = children(replacement, 'span').find(isBackground);
-        if (bgReplacement) Object.assign(background, { text: cleanText(bgReplacement), tokens: tokens(bgReplacement) });
+    type: (attribute(section, APPLE_NS, 'songPart', 'Verse') || 'Verse').toLowerCase(),
+    lines: children(section, 'p').map((paragraph, lineIndex) => {
+      const rawBegin = paragraph.getAttribute('begin');
+      const rawEnd = paragraph.getAttribute('end');
+      const begin = parseTime(rawBegin || '0');
+      const end = parseTime(rawEnd || '0');
+      const hasParagraphTiming = Boolean(rawBegin && rawEnd && end > begin);
+      const key = attribute(paragraph, APPLE_NS, 'key', `${sectionIndex}:${lineIndex}`);
+      const translationNode = translationInfo.entries.get(key) ?? inlineRole(paragraph, 'x-translation', preferredLanguage);
+      const pronunciationNode = pronunciationInfo.entries.get(key) ?? inlineRole(paragraph, 'x-roman', preferredLanguage);
+      const backgroundNode = children(paragraph, 'span').find(item => roleOf(item) === 'x-bg') || null;
+      const backgroundTranslations = children(translationNode, 'span').filter(item => roleOf(item) === 'x-bg');
+      const background = voice(backgroundNode,
+        backgroundTranslations.find(item => textWithoutRoles(item)),
+        children(pronunciationNode, 'span').find(item => roleOf(item) === 'x-bg' && textWithoutRoles(item)),
+        preferredLanguage);
+      const main = voice(paragraph, translationNode, pronunciationNode, preferredLanguage);
+      if (qrcBackgroundTiming && backgroundNode) {
+        Object.assign(background, qrcBackgroundClock(backgroundNode, background.tokens, begin, end));
       }
-      // It separates a parenthesized background translation even when that row
-      // has no timed background vocal (e.g. 01.ttml L2).
-      const bgText = background.translation.replace(/[()]/g, '') || main.translation.match(/\(+([^)]+)\)+/)?.[1]?.trim() || '';
-      if (bgText) main.translation = main.translation.replaceAll(`(${bgText})`, '').trim();
-      background.translation = bgText;
-      return { key, begin: parseTime(line.getAttribute('begin') || '0'), end: parseTime(line.getAttribute('end') || '0'), agent: attribute(line, META, 'agent', 'v1'), ...main, background };
+      if (backgroundTranslations.length) main.translation = textWithoutRoles(translationNode);
+
+      if (allowReplacement) {
+        const replacement = replacementInfo.entries.get(key);
+        if (replacement) {
+          main.text = textWithoutRoles(replacement);
+          main.tokens = wordSpans(replacement);
+          const replacementBackground = children(replacement, 'span').find(item => roleOf(item) === 'x-bg');
+          if (replacementBackground) {
+            background.text = textWithoutRoles(replacementBackground);
+            background.tokens = wordSpans(replacementBackground);
+          }
+        }
+      }
+
+      background.text = unwrapBackingText(background.text);
+      unwrapBackingTokens(background.tokens);
+      background.pronunciation = unwrapBackingText(background.pronunciation);
+      unwrapBackingTokens(background.pronunciationTokens);
+      background.translation = unwrapBackingText(background.translation);
+      if (background.text && !backgroundTranslations.length && !background.translation) {
+        const group = finalParenthesisGroup(main.translation);
+        if (group) {
+          const mainText = main.translation.slice(0, group[0]).trim();
+          if (mainText) {
+            background.translation = main.translation.slice(group[0] + 1, group[1]).trim();
+            main.translation = mainText;
+          }
+        }
+      }
+      const agent = attribute(paragraph, META_NS, 'agent');
+      return {
+        key,
+        begin,
+        end,
+        paragraphBegin: hasParagraphTiming ? begin : null,
+        paragraphEnd: hasParagraphTiming ? end : null,
+        agent,
+        ...main,
+        background,
+      };
     }),
   }));
+
   const lines = sections.flatMap(section => section.lines);
-  const timing = attribute(root, APPLE, 'timing') || (
-    lines.some(line => line.tokens.length || line.background.tokens.length) ? 'Word' :
-      lines.some(line => line.begin !== 0 || line.end !== 0) ? 'Line' : 'None'
-  );
+  const hasWordTimes = lines.some(item => item.tokens.some(token => !token.whitespace) || item.background.tokens.some(token => !token.whitespace));
+  const hasLineTimes = lines.some(item => item.begin || item.end);
+  const timing = attribute(root, APPLE_NS, 'timing') || (hasWordTimes ? 'Word' : hasLineTimes ? 'Line' : 'None');
+  const duration = parseTime(body.getAttribute('dur') || '0') || Math.max(0, ...lines.map(item => item.end));
+  const authors = children(head, 'meta').filter(item => item.getAttribute('key') === 'ttmlAuthorGithubLogin')
+    .map(item => item.getAttribute('value') || '');
+  const credits = children(first(metadata, 'songwriters'), 'songwriter').map(textWithoutRoles);
+
   return {
     timing,
-    language: attribute(root, XML, 'lang', 'en'),
-    duration: parseTime(body.getAttribute('dur') || '0'),
+    language: attribute(root, XML_NS, 'lang', 'en'),
+    duration,
     audioOffsets,
     agents,
-    sections, lines,
-    credits: children(child(metadata, 'songwriters'), 'songwriter').map(cleanText),
-    authors: amllMeta('ttmlAuthorGithubLogin'),
-    translation: { language: translation.language, type: translation.type, automatic: translation.automatic },
-    pronunciation: { language: pronunciation.language, automatic: pronunciation.automatic },
+    sections,
+    lines,
+    credits,
+    authors,
+    translation: { language: translationInfo.language, type: translationInfo.type, automatic: translationInfo.automatic },
+    pronunciation: { language: pronunciationInfo.language, automatic: pronunciationInfo.automatic },
   };
 }
 
-/**
- * Which side each of song.lines shows on (true = duet side), as AMLL's amll-converter (packages/ttml) decides it:
- * the first singer takes the main side (or the duet side when its type is 'other'), the same singer keeps the side,
- * a singer change flips it, and group lines (e.g. v1000) are never duet-side and do not disturb the alternation.
- * Undeclared agents count as people.
- */
-export function duetSides(song) {
-  let lastAgent = null;
-  let lastSide = false;
-  return song.lines.map(({ agent }) => {
-    const type = song.agents?.[agent]?.type;
-    if (type === 'group') return false;
-    if (lastAgent === null) lastSide = type === 'other';
-    else if (agent !== lastAgent) lastSide = !lastSide;
-    lastAgent = agent;
-    return lastSide;
+function lyricStartsRtl(text) {
+  const letter = text.match(/\p{L}/u)?.[0];
+  return Boolean(letter && letter >= '\u0590' && letter <= '\u06ff');
+}
+
+export function duetLineLayout(song) {
+  if (song.timing !== 'Word') return null;
+  let people = 0;
+  let others = 0;
+  for (const { type } of Object.values(song.agents)) {
+    if (type === 'person') people++;
+    else if (type === 'other') others++;
+  }
+  if (people + others < 2) return null;
+
+  let previous = -1;
+  let opposite = false;
+  let hasOpposite = false;
+  const layout = song.lines.map((line, index) => {
+    const type = song.agents[line.agent]?.type;
+    let lineOpposite = false;
+    const canStart = type === 'person' || type === 'other';
+    if (line.agent && type !== 'group' && (previous >= 0 || canStart)) {
+      if (previous < 0) {
+        opposite = type === 'other';
+      } else if (line.agent !== song.lines[previous].agent) {
+        // s0 walks past neutral rows and compares the two rows at the previous singer boundary.
+        const before = lyricStartsRtl(song.lines[previous].text);
+        const after = lyricStartsRtl(song.lines[previous + 1].text);
+        if (before === after) opposite = !opposite;
+      }
+      previous = index;
+      lineOpposite = opposite;
+      hasOpposite ||= opposite;
+    }
+    return { duetRightAligned: lyricStartsRtl(line.text) !== lineOpposite, narrow: type !== 'person' || people > 1 };
   });
+  return hasOpposite ? layout : null;
 }

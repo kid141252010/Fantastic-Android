@@ -1,168 +1,182 @@
-/*
- * 安卓 WebView 里的歌词页：原生把 Fantastic 的 /qq/song/:mid/lyrics 结果交给 fantastic.setLyrics()，
- * 并用 fantastic.sync() 推送播放进度锚点；这里每帧外推时间交给 AMLL 的 DomLyricPlayer。
- * 点歌词行经 FantasticBridge.seek() 让原生播放器跳转。
- * amllLine / toAmllLines 照搬 Fantastic web/lyrics/panel.mjs。
- */
-import { DomLyricPlayer, setWordSegmenter } from './amll-core.mjs';
-import { parseTTML, duetSides } from './ttml.mjs';
-import { ensureWordSegmenter } from './word-segmenter.mjs';
+import { parseTTML, duetLineLayout } from './ttml.mjs';
+import { applyQrcAnnotations, pairQrcReadings } from './qrc-annotations.mjs';
 
-const bridge = globalThis.FantasticBridge || { ready() {}, seek() {}, status() {} };
+const emptyVoice = () => ({ text: '', tokens: [] });
+const line = (begin, end, text, tokens = []) => ({ begin, end, text, tokens, background: emptyVoice() });
 
-const validTokens = (voice) => voice.tokens.filter((token) => token.begin !== 0 || token.end !== 0);
-const plainText = (voice) => validTokens(voice).map((t) => t.text + (t.spaceAfter ? ' ' : '')).join('').trim() || voice.text;
-const same = (a, b) => a.replace(/[()]/g, '').trim().toLowerCase() === b.replace(/[()]/g, '').trim().toLowerCase();
-
-function amllLine(voice, line, { isBG, isDuet, translation, pronunciation }) {
-  const tokens = validTokens(voice);
-  const clean = (text) => (isBG ? text.replace(/[()]/g, '') : text);
-  const text = plainText(voice);
-  const romanTokens = pronunciation && !tokens.every((t) => t.text === voice.pronunciationTokens[voice.tokens.indexOf(t)]?.text);
-  const words = tokens.length
-    ? tokens.map((token) => {
-      const roman = romanTokens ? voice.pronunciationTokens[voice.tokens.indexOf(token)]?.text : '';
-      return {
-        startTime: token.begin, endTime: Math.max(token.begin, token.end),
-        word: clean(token.text) + (token.spaceAfter ? ' ' : ''),
-        ...(roman ? { romanWord: clean(roman) } : {}),
-      };
-    })
-    : [{ startTime: line.begin, endTime: Math.max(line.begin, line.end), word: clean(voice.text) }];
-  const begin = Math.min(...words.map((w) => w.startTime));
-  const end = Math.max(...words.map((w) => w.endTime));
-  return {
-    words, startTime: begin, endTime: end, isBG, isDuet,
-    translatedLyric: translation && voice.translation && !same(voice.translation, text) ? voice.translation : '',
-    romanLyric: pronunciation && voice.pronunciation && !same(voice.pronunciation, text) ? voice.pronunciation : '',
-  };
-}
-
-function toAmllLines(song, options) {
-  const sides = duetSides(song);
-  return song.lines.flatMap((line, i) => {
-    const isDuet = sides[i];
-    const main = amllLine(line, line, { ...options, isBG: false, isDuet });
-    if (!line.background.tokens.length && !line.background.text) return [main];
-    return [main, amllLine(line.background, line, { ...options, isBG: true, isDuet })];
-  });
-}
-
-/** 同 Fantastic 的 QQ 歌词优先级：AMLL 歌词库 → QRC → LRC（选 QRC 优先时 QRC → AMLL → LRC） */
-const PRIORITY = { amll: ['amll', 'qrc', 'lrc'], qrc: ['qrc', 'amll', 'lrc'] };
-function selectSong(candidates, prefer) {
-  for (const source of PRIORITY[prefer] || PRIORITY.amll) {
-    for (const candidate of candidates || []) {
-      if (candidate.source !== source || typeof candidate.text !== 'string' || !candidate.text.trim()) continue;
-      try {
-        const song = parseTTML(candidate.text, undefined, 'zh-Hans');
-        if (song?.lines?.length) return song;
-      } catch { /* 换下一个来源 */ }
+// NetEase times are absolute milliseconds. LRC may have repeated timestamps and an offset.
+function parseTimedText(value, word) {
+  const lines = [];
+  const text = value || '';
+  const offset = Number(text.match(/\[offset:([+-]?\d+)\]/i)?.[1] || 0);
+  for (const raw of text.split(/\r?\n/)) {
+    if (word) {
+      const row = raw.trim().match(/^\[(\d+),(\d+)\](.*)$/);
+      if (!row) continue;
+      const tokens = [...row[3].matchAll(/\((\d+),(\d+)(?:,\d+)?\)([^]*?)(?=\(\d+,\d+(?:,\d+)?\)|$)/g)]
+        .map(m => ({ begin: Number(m[1]), end: Number(m[1]) + Number(m[2]), text: m[3], spaceAfter: false }));
+      const sung = tokens.map(t => t.text).join('');
+      if (sung.trim()) lines.push(line(Number(row[1]), Math.max(Number(row[1]) + Number(row[2]), ...tokens.map(t => t.end)), sung, tokens));
+    } else {
+      const sung = raw.replace(/\[[^\]]*\]/g, '').trim();
+      if (!sung) continue;
+      for (const m of raw.matchAll(/\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]/g)) {
+        lines.push(line(Math.max(0, +m[1] * 60000 + +m[2] * 1000 + +((m[3] || '').padEnd(3, '0')) + offset), 0, sung));
+      }
     }
+  }
+  lines.sort((a, b) => a.begin - b.begin);
+  if (!word) lines.forEach((item, i) => { item.end = lines[i + 1]?.begin ?? item.begin + 5000; });
+  return { timing: word ? 'Word' : 'Line', duration: lines.at(-1)?.end || 0, lines, agents: {} };
+}
+
+function applyAnnotations(song, data) {
+  const translations = parseTimedText(data.rawTransText, false).lines;
+  const romans = parseTimedText(data.rawRomaText, false).lines;
+  const romanWords = parseTimedText(data.rawYromaText, true).lines;
+  function nearest(lines, time) {
+    let match = null, distance = 501;
+    for (const item of lines) {
+      const delta = Math.abs(item.begin - time);
+      if (delta < distance) { match = item; distance = delta; }
+    }
+    return match;
+  }
+  for (const item of song.lines) {
+    item.translation = nearest(translations, item.begin)?.text || '';
+    const words = nearest(romanWords, item.begin);
+    item.pronunciationTokens = words?.tokens || [];
+    item.pronunciation = nearest(romans, item.begin)?.text || '';
+  }
+}
+
+function select(kind, payload, language) {
+  if (kind === 'apple') return parseTTML(payload, undefined, language);
+  const data = JSON.parse(payload);
+  const order = kind === 'ncm' ? ['amll', 'yrc', 'lrc'] : ['amll', 'qrc', 'lrc'];
+  for (const source of order) for (const candidate of data.candidates || []) {
+    if (candidate.source !== source || typeof candidate.text !== 'string' || !candidate.text.trim()) continue;
+    try {
+      const rawNcm = kind === 'ncm' && source !== 'amll';
+      const song = rawNcm ? parseTimedText(candidate.text, source === 'yrc') :
+        parseTTML(candidate.text, undefined, language, kind === 'qq' && source === 'qrc');
+      if (!song?.lines?.length) continue;
+      if (rawNcm) applyAnnotations(song, data);
+      if (kind === 'qq' && source === 'qrc') applyQrcAnnotations(song, data);
+      return song;
+    } catch { /* Malformed candidate: keep the upstream fallback order. */ }
   }
   return null;
 }
 
-const view = new DomLyricPlayer();
-document.getElementById('lyrics').append(view.getElement());
-view.setEnableSpring(true);
-view.setEnableScale(true);
-
-let lines = [];
-const options = { translation: true, pronunciation: false };
-
-// 播放进度锚点：原生给出的位置（毫秒）与收到时的 performance.now()
-let anchor = { pos: 0, at: performance.now(), playing: false };
-const now = () => (anchor.playing ? anchor.pos + (performance.now() - anchor.at) : anchor.pos);
-
-view.addEventListener('line-click', (event) => {
-  // AMLL 会把行的开始时间提前用于入场动画；跳到第一个词的原始时间
-  const line = event.line.getLine();
-  bridge.seek(line.words[0]?.startTime ?? line.startTime);
-});
-
-let lastFrame = 0;
-let frames = 0;
-function frame(ts) {
-  if (++frames % 10 === 0 && fixSize()) relayout();
-  view.setCurrentTime(Math.round(now()));
-  view.update(lastFrame ? ts - lastFrame : 0);
-  lastFrame = ts;
-  requestAnimationFrame(frame);
-}
-requestAnimationFrame(frame);
-
-let laidOut = { w: -1, h: -1 };
-/*
- * AMLL 只渲染「在可视范围内」的行，范围取自它自己 ResizeObserver 记下的 size。
- * WebView 在后台（未挂到界面）加载时 ResizeObserver 记到 0 高度，挂上后安卓 WebView 113 不一定再回调，
- * 结果所有行都被判定在范围外、一行都不插入 DOM（真机/模拟器上歌词全空）。这里直接用元素实际尺寸校正。
- */
-function fixSize() {
-  const el = view.getElement();
-  // 后台加载的 WebView 里 100% 高度一直解析成 0（模拟器 WebView 113 实测），直接写像素高度
-  if (innerHeight > 0 && el.style.height !== `${innerHeight}px`) el.style.height = `${innerHeight}px`;
-  const w = el.clientWidth;
-  const h = el.clientHeight;
-  if (!w || !h || (view.size?.[0] === w && view.size?.[1] === h)) return false;
-  view.size[0] = w;
-  view.size[1] = h;
-  try { view.onResize?.(); } catch { /* 旧版 AMLL 没有 */ }
-  return true;
-}
-function relayout() {
-  laidOut = { w: innerWidth, h: innerHeight };
-  fixSize();
-  if (lines.length) {
-    view.setLyricLines(lines, Math.round(now()));
-    view.setCurrentTime(Math.round(now()), true);
-  }
-}
-
-globalThis.fantastic = {
-  /** json：/qq/song/:mid/lyrics 的响应文本；null 清空 */
-  setLyrics(json, prefer = 'amll') {
-    try {
-      const song = json ? selectSong(JSON.parse(json).candidates, prefer) : null;
-      lines = song ? toAmllLines(song, options) : [];
-      laidOut = { w: innerWidth, h: innerHeight };
-      fixSize();
-      view.setLyricLines(lines, Math.round(now()));
-      view.setCurrentTime(Math.round(now()), true);
-      if (json) bridge.status(lines.length ? 'ready' : 'missing');
-    } catch (error) {
-      lines = [];
-      bridge.status(`error:${error?.message || error}`);
-    }
-  },
-  /** pos：播放位置（毫秒）；seek：刚跳转过，歌词直接跳到位置而不是滚过去 */
-  sync(pos, playing, seek) {
-    const drift = pos - now();
-    // 小于 30ms 的偏差当作测量抖动，不重设锚点，免得歌词来回抖
-    if (seek || playing !== anchor.playing || Math.abs(drift) > 30) {
-      anchor = { pos, at: performance.now(), playing };
-    }
-    if (playing) view.resume(); else view.pause();
-    if (seek) view.setCurrentTime(Math.round(pos), true);
-  },
-  /** 原生在 WebView 挂上界面、尺寸变化后调用：后台加载时排版用的是 0 尺寸，必须重排 */
-  relayout() {
-    if (innerWidth !== laidOut.w || innerHeight !== laidOut.h) relayout();
-  },
-  /** 测试 / 诊断用 */
-  debug() {
-    const els = [...document.querySelectorAll('#lyrics *')].filter((e) => !e.childElementCount && e.textContent.trim());
-    const r = els[0]?.getBoundingClientRect();
-    return JSON.stringify({
-      iw: innerWidth, ih: innerHeight, laidOut, amllSize: view.size, el: [view.getElement().clientWidth, view.getElement().clientHeight], host: document.getElementById('lyrics').clientHeight, body: document.body.clientHeight, frames, lines: lines.length, textEls: els.length,
-      first: r ? [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] : null,
-      hidden: document.hidden,
-    });
-  },
+const isTimed = token => token.begin !== 0 || token.end !== 0;
+const tokenText = token => {
+  const text = token?.text || '';
+  return token?.spaceAfter && !/\s$/u.test(text) ? `${text} ` : text;
 };
+const readingText = tokens => tokens.map(tokenText).join('').trim();
+const normalizedReading = text => text.replace(/\s+/g, ' ').trim();
 
-// WebView 先在后台加载（宽高为 0），挂到界面上才有尺寸；宽或高变化都重新排版（AMLL 的行位置依赖高度）
-addEventListener('resize', () => globalThis.fantastic.relayout());
+function normalizeContainerTokens(tokens, rightAligned) {
+  const result = [];
+  let pending = '';
+  for (const token of tokens || []) {
+    const text = tokenText(token);
+    const first = text.search(/\S/u);
+    if (first < 0) {
+      pending += text;
+      continue;
+    }
+    const end = text.trimEnd().length;
+    pending += text.slice(0, first);
+    if (result.length && !rightAligned) {
+      result[result.length - 1].text += pending;
+      pending = '';
+    }
+    const prefix = !result.length || rightAligned ? pending : '';
+    result.push({ ...token, text: `${prefix}${text.slice(first, end)}`, whitespace: false, spaceAfter: false });
+    pending = text.slice(end);
+  }
+  return result;
+}
 
-void ensureWordSegmenter(setWordSegmenter, relayout);
-bridge.ready();
+function pairReadings(tokens, readings) {
+  if (!tokens.some(isTimed) || !readings.length) return null;
+  const starts = new Map();
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const text = tokenText(token);
+    if (!isTimed(token) || !text.trim()) continue;
+    if (!starts.has(token.begin)) starts.set(token.begin, []);
+    starts.get(token.begin).push(i);
+  }
+  const paired = new Map();
+  // Untimed but explicitly segmented annotations can be positional. Timed ones must never be zipped by count.
+  const positional = readings.length === tokens.length && !readings.some(isTimed);
+  let lastIndex = -1;
+  for (let i = 0; i < readings.length; i++) {
+    const reading = readings[i];
+    const readingValue = tokenText(reading);
+    if (!readingValue.trim()) continue;
+    let index = positional ? i : undefined;
+    if (!positional && isTimed(reading)) {
+      const sameStart = starts.get(reading.begin);
+      if (sameStart?.length === 1) index = sameStart[0];
+      else if (sameStart?.length) {
+        const sameEnd = sameStart.filter(i => tokens[i].end === reading.end);
+        if (sameEnd.length === 1) index = sameEnd[0];
+      } else {
+        // A more finely segmented reading can still belong to one original span.
+        const containing = tokens.flatMap((token, i) => {
+          const text = tokenText(token);
+          return text.trim() && token.begin < reading.begin && reading.begin < token.end && reading.end <= token.end ? [i] : [];
+        });
+        if (containing.length === 1) index = containing[0];
+      }
+    }
+    if (index === undefined || index < lastIndex) return null;
+    lastIndex = index;
+    paired.set(index, (paired.get(index) || '') + readingValue);
+  }
+  return paired.size ? tokens.map((token, i) => paired.has(i) ? { ...token, pronunciation: paired.get(i) } : token) : null;
+}
+
+function voice(value, wordTimed, rightAligned) {
+  const tokens = normalizeContainerTokens(value.tokens || [], rightAligned);
+  const readings = normalizeContainerTokens(value.pronunciationTokens || [], rightAligned);
+  const original = normalizedReading(value.text) || normalizedReading(readingText(tokens));
+  const timedText = readingText(readings);
+  const timedReading = original && normalizedReading(timedText) === original ? '' : timedText;
+  const plainText = value.pronunciation || '';
+  const plainReading = original && normalizedReading(plainText) === original ? '' : plainText;
+  const paired = wordTimed && timedReading ?
+    (value.qrcReadingClock ? pairQrcReadings(tokens, readings, value.qrcReadingClock) : pairReadings(tokens, readings)) : null;
+  return { text: value.text, tokens: paired || tokens, translation: value.translation || '',
+    pronunciation: paired ? '' : plainReading || timedReading };
+}
+
+globalThis.parseFantasticLyrics = (kind, payload, language) => {
+  try {
+    const song = select(kind, payload, language);
+    if (!song?.lines?.length) return null;
+    const duetLayout = duetLineLayout(song);
+    return {
+      timing: song.timing, duration: song.duration, credits: song.credits || [], audioOffsets: song.audioOffsets || {},
+      translationAutomatic: song.translation?.automatic || false,
+      pronunciationAutomatic: song.pronunciation?.automatic || false,
+      lines: song.lines.map((item, i) => {
+        const background = item.background || emptyVoice();
+        const rawTokens = [...item.tokens, ...background.tokens].filter(t => t.begin || t.end);
+        const begin = item.begin || (rawTokens.length ? Math.min(...rawTokens.map(t => t.begin)) : 0);
+        const rightAligned = duetLayout?.[i]?.duetRightAligned === true;
+        return { begin, end: Math.max(begin, item.end, ...rawTokens.map(t => t.end)),
+          paragraphBegin: item.paragraphBegin ?? null, paragraphEnd: item.paragraphEnd ?? null,
+          main: voice(item, song.timing === 'Word', rightAligned),
+          background: voice(background, song.timing === 'Word', rightAligned),
+          ...duetLayout?.[i] };
+      }),
+    };
+  } catch (error) { return { error: String(error?.message || error) }; }
+};
+globalThis.FantasticBridge?.ready();
+

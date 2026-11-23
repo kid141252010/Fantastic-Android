@@ -2,14 +2,20 @@ package io.github.kid141252010.fantastic.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import android.os.Build
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 
 /** Apple Music 的品牌红。 */
 val AppleRed = Color(0xFFFA2D48)
@@ -36,7 +42,34 @@ private val Dark = darkColorScheme(
 
 @Composable
 fun FantasticTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) Dark else Light, content = content)
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val typography = remember(context.assets, configuration.locales, configuration.fontScale, configuration.densityDpi) {
+        val defaults = Typography()
+        fun TextStyle.withLocalFont(): TextStyle {
+            val weight = fontWeight?.weight ?: 400
+            val face = LocalAmFonts.typeface(context, fontSize.value, weight) ?: return this
+            return copy(fontFamily = FontFamily(face), fontWeight = FontWeight(LocalAmFonts.resolvedWeight(weight)))
+        }
+        defaults.copy(
+            displayLarge = defaults.displayLarge.withLocalFont(),
+            displayMedium = defaults.displayMedium.withLocalFont(),
+            displaySmall = defaults.displaySmall.withLocalFont(),
+            headlineLarge = defaults.headlineLarge.withLocalFont(),
+            headlineMedium = defaults.headlineMedium.withLocalFont(),
+            headlineSmall = defaults.headlineSmall.withLocalFont(),
+            titleLarge = defaults.titleLarge.withLocalFont(),
+            titleMedium = defaults.titleMedium.withLocalFont(),
+            titleSmall = defaults.titleSmall.withLocalFont(),
+            bodyLarge = defaults.bodyLarge.withLocalFont(),
+            bodyMedium = defaults.bodyMedium.withLocalFont(),
+            bodySmall = defaults.bodySmall.withLocalFont(),
+            labelLarge = defaults.labelLarge.withLocalFont(),
+            labelMedium = defaults.labelMedium.withLocalFont(),
+            labelSmall = defaults.labelSmall.withLocalFont(),
+        )
+    }
+    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) Dark else Light, typography = typography, content = content)
 }
 
 /**

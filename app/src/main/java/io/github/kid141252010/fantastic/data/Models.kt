@@ -2,9 +2,11 @@ package io.github.kid141252010.fantastic.data
 
 import kotlinx.serialization.Serializable
 
-enum class Source { Apple, QQ }
+@Serializable
+enum class Source(val mediaPrefix: String) { Apple("apple"), QQ("qq"), Netease("ncm") }
 
 /** 界面统一使用的歌曲。 */
+@Serializable
 data class Track(
     val id: String,
     val source: Source,
@@ -14,6 +16,8 @@ data class Track(
     /** 带 {w}/{h} 占位符的封面模板。 */
     val artworkTemplate: String?,
     val durationMs: Long,
+    val artistId: String = "",
+    val albumId: String = "",
 ) {
     fun artwork(size: Int): String? {
         // QQ 封面只有固定几档尺寸，其他尺寸（如 600、120）返回 404；取不小于所需的最小一档
@@ -28,6 +32,9 @@ data class Track(
         val QQ_ARTWORK_SIZES = listOf(90, 150, 300, 500, 800)
     }
 }
+
+fun NeteaseSong.toTrack() = Track(id, Source.Netease, name, artists.joinToString(" / ") { it.name }, album,
+    cover.ifBlank { null }, durationMs, artists.firstOrNull()?.mid.orEmpty(), albumMid)
 
 // ---- QQ：/qq/search ----
 
@@ -55,6 +62,8 @@ data class QqSong(
         album = album,
         artworkTemplate = cover,
         durationMs = durationMs,
+        artistId = artists.firstOrNull()?.mid.orEmpty(),
+        albumId = albumMid,
     )
 }
 

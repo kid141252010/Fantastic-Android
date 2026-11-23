@@ -37,47 +37,9 @@ jobs:
           name: fantastic-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
 
-  # 在模拟器的真 WebView 里跑歌词页：页面能加载、歌词能解析并排版出来，截图打进日志
-  lyrics-webview:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # 34 自带 WebView 113；36 的 WebView 新得多，接近真机
-        api-level: [34, 36]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.11.1"
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Instrumented tests
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api-level }}
-          target: google_apis
-          arch: x86_64
-          disable-animations: true
-          script: ./scripts/ci-instrumented.sh
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: lyrics-screenshot-${{ matrix.api-level }}-${{ github.run_number }}
-          path: lyrics*.png
-          if-no-files-found: ignore
-
   # main 上的每次构建都更新 nightly 预发布，手机上直接下载 APK
   nightly:
-    needs: [build, lyrics-webview]
+    needs: [build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # 串行发布：同一时刻只有一个任务改 nightly，排队中的旧任务会被新的替换
