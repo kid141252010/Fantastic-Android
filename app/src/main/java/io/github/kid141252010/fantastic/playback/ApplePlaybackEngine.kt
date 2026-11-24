@@ -410,8 +410,9 @@ internal class ApplePlaybackEngine(
         val quality = codecGroup(group)
         val duration = track.playlist.totalDurationMs.takeIf { it > 0 } ?: song.track.durationMs
         val label = qualityLabel(track)
+        val codec = if ("alac" in group.lowercase() && "alac" !in track.variant.codecs.lowercase()) "alac" else track.variant.codecs
         val details = reportedAudioDetails(
-            codec = track.variant.codecs,
+            codec = codec,
             sampleRate = track.variant.sampleRate,
             bitDepth = track.variant.bitDepth,
             channels = track.variant.channels.toString(),
