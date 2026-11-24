@@ -51,8 +51,10 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 
 - 开始新任务前，按类型新建分支。新功能用 `feat/<主题>`，缺陷修复用 `fix/<主题>`，文档用 `docs/<主题>`，日常维护用 `chore/<主题>`。
 - 任务完成后，逐块核对并只提交本次改动，保留其他已暂存和未暂存的改动。主动将任务分支推送到 `origin`，无需等待用户提醒或另行确认。
-- 推送成功后，询问用户是否将该任务分支合入 `main`。用户明确同意后再合入。
-- 提交后用上文指定的 JDK、Gradle 和 SDK 重新编译并打包。先执行 `gradle :app:compileDebugKotlin --offline --rerun-tasks --console=plain`，再执行 `gradle :app:assembleDebug --offline --console=plain`。交付本次 APK 路径和构建结果，由用户安装并验收界面、设备和播放行为。
+- 推送成功后，询问用户是否合入。用户明确批准后，同一个任务改动先合入发行主线 `main`，再将 `main` 同步到本地调试主线 `fix/debug-side-by-side`。已明确批准时不重复询问。
+- `main` 与 `origin/main` 保持同步，保留正式应用 ID `io.github.kid141252010.fantastic` 和发行签名。`fix/debug-side-by-side` 不推远端、不反向合入 `main`；保留 Debug 的 `.debug` 应用 ID 后缀和现有调试签名，以便与正式版并存。两条线的功能源码保持一致，合入后核对差异只涉及 Debug 安装身份。
+- 双线交付使用上文固定的工具链和独立构建目录：从 `main` 构建并用既有发行密钥签署 Release APK，从本地 Debug 分支执行 `:app:compileDebugKotlin --offline --rerun-tasks --console=plain` 与 `:app:assembleDebug --offline --console=plain`。两边本机交付均显式传 `-PincludeLocalAmFonts=true`，缺少字体则停止交付；不提交私有字体和签名材料，公开 CI 继续使用系统字体。
+- 交付前核对两种应用 ID、APK 签名、字体资产和 SHA-256，分别给出 Release 和 Debug 路径。构建和静态检查通过不等于实机验收。
 
 ## Code Conventions & Common Patterns
 
