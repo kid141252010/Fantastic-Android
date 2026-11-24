@@ -5,27 +5,21 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.NeteaseApi
+import io.github.kid141252010.fantastic.data.NeteasePlayFailure
 import io.github.kid141252010.fantastic.data.NeteaseAudio
-import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import java.io.File
 import java.io.IOException
-import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
+import java.io.EOFException
+import java.io.RandomAccessFile
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Request
-import okhttp3.Response
 
 internal data class FullAudioRequest(
     val track: Track,
@@ -50,13 +44,12 @@ internal data class AudioFileInfo(
 )
 
 /** Transfers one complete source file into the caller-owned temporary file. */
-internal class AudioFileTransfer(private val context: Context, private val api: FantasticApi) {
-    private val client = api.client.newBuilder()
-        .callTimeout(0, TimeUnit.MILLISECONDS)
-        .followRedirects(false)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
-    private val netease = NeteaseApi(api, Prefs(context))
+internal class AudioFileTransfer(
+    private val context: Context,
+    private val api: FantasticApi,
+    private val http: NativeAudioHttp,
+    private val netease: NeteaseApi,
+) {
 
     suspend fun transfer(
         request: FullAudioRequest,
@@ -66,170 +59,207 @@ internal class AudioFileTransfer(private val context: Context, private val api: 
     ): AudioFileInfo {
         require(request.maxBytes > 0) { "缓存上限无效" }
         withContext(Dispatchers.IO) { target.parentFile?.mkdirs() }
-        val result = when (request.track.source) {
-            Source.Apple -> AppleNativeExporter(api, context).export(request, target, reserve, progress)
-            Source.Netease -> transferNetease(request, target, reserve, progress)
-            Source.QQ -> transferDirect(request, target, reserve, progress)
+        val duration = maxOf(request.track.durationMs, request.expectedDurationMs)
+        if (request.track.source == Source.Apple) {
+            val result = AppleNativeExporter(api, context).export(request, target, reserve, progress)
+            return verifyAudio(target, duration, request.strict, request.quality)
+                .copy(quality = result.quality.ifBlank { request.quality })
         }
-        val effectiveDuration = maxOf(request.track.durationMs, request.expectedDurationMs).takeIf { it > 0 } ?: 0
-        val inspected = verifyAudio(target, effectiveDuration, request.strict, request.quality)
-        return inspected.copy(quality = result.quality.ifBlank { request.quality })
+        val qqPlayFallback = transferNative(request, target, reserve, progress, duration)
+        return withContext(Dispatchers.IO) { verifyAudio(target, duration, request.strict || qqPlayFallback, request.quality) }
     }
 
-    private suspend fun transferNetease(
+    /** Returns true only for QQ's same-rendition fallback to the playback resolver. */
+    private suspend fun transferNative(
         request: FullAudioRequest,
         target: File,
         reserve: (Long) -> Unit,
         progress: (Int?) -> Unit,
-    ): AudioFileInfo {
-        val captured = request.resolvedNetease
-        if (captured == null) return transferDirect(request, target, reserve, progress)
-        netease.validateCdnUrl(captured.url)
-        try {
-            readInto(captured.url.toHttpUrlOrNull() ?: throw IOException("Invalid Netease audio URL"), target,
-                request.maxBytes, reserve, progress, captured.sizeBytes, allowRedirect = false)
-        } catch (error: ExpiredCdnException) {
-            val refreshed = netease.resolvePlay(
-                request.track.id,
-                request.requestedNeteaseQuality ?: captured.quality,
-                request.server,
-            )
-            if (refreshed.quality != captured.quality) throw IOException("音质已变化，未保存为完整歌曲")
-            netease.validateCdnUrl(refreshed.url)
-            readInto(refreshed.url.toHttpUrlOrNull() ?: throw IOException("Invalid Netease audio URL"), target,
-                request.maxBytes, reserve, progress, refreshed.sizeBytes, allowRedirect = false)
-        }
-        return AudioFileInfo(target.length(), null, null, null, captured.quality)
-    }
-
-    private suspend fun transferDirect(
-        request: FullAudioRequest,
-        target: File,
-        reserve: (Long) -> Unit,
-        progress: (Int?) -> Unit,
-    ): AudioFileInfo {
-        val endpoint = request.server.toHttpUrlOrNull()?.newBuilder()
-            ?.addPathSegment(request.track.source.mediaPrefix)
-            ?.addPathSegment("song")
-            ?.addPathSegment(request.track.id)
-            ?.addPathSegment("download")
-            ?.addQueryParameter("quality", request.quality)
-            ?.build() ?: throw IOException("服务器地址无效")
-        val redirect = readInto(endpoint, target, request.maxBytes, reserve, progress, null, allowRedirect = true)
-        if (redirect != null) {
-            validateRedirect(redirect, request.track.source)
-            readInto(redirect, target, request.maxBytes, reserve, progress, null, allowRedirect = false)
-        }
-        return AudioFileInfo(target.length(), null, null, null, request.quality)
-    }
-
-    private suspend fun readInto(
-        url: HttpUrl,
-        target: File,
-        maxBytes: Long,
-        reserve: (Long) -> Unit,
-        progress: (Int?) -> Unit,
-        expectedLength: Long?,
-        allowRedirect: Boolean,
-    ): HttpUrl? {
-        val finished = CompletableDeferred<Unit>()
-        val call = client.newCall(Request.Builder().url(url).build())
-        return try {
-            suspendCancellableCoroutine { continuation ->
-                continuation.invokeOnCancellation { call.cancel() }
-                try {
-                    call.enqueue(object : Callback {
-                        override fun onFailure(call: Call, error: IOException) {
-                            try {
-                                if (continuation.isActive) continuation.resumeWithException(IOException("下载网络连接失败", error))
-                            } finally { finished.complete(Unit) }
-                        }
-
-                        override fun onResponse(call: Call, response: Response) {
-                            try {
-                                val redirect = response.use { current ->
-                                    if (!continuation.isActive) return
-                                    if (allowRedirect && current.isRedirect) {
-                                        current.header("Location")?.let(url::resolve) ?: throw IOException("下载重定向没有地址")
-                                    } else {
-                                        saveBody(current, target, maxBytes, expectedLength, reserve, progress) { continuation.isActive }
-                                        null
-                                    }
-                                }
-                                if (continuation.isActive) continuation.resume(redirect)
-                            } catch (error: Throwable) {
-                                if (continuation.isActive) continuation.resumeWithException(error)
-                            } finally { finished.complete(Unit) }
-                        }
-                    })
-                } catch (error: Exception) {
-                    finished.complete(Unit)
-                    if (continuation.isActive) continuation.resumeWithException(error)
+        duration: Long,
+    ): Boolean {
+        val song = NativeSong(request.track.source, request.track.id, request.quality, request.server)
+        val wire = http.transfer(song, downloading = true)
+        var stage = AudioStage.Download
+        var resolved = request.resolvedNetease
+        var legacyNetease = false
+        var sequentialOnly = false
+        var refreshed = false
+        var retried = false
+        while (true) {
+            try {
+                if (song.source == Source.Netease && !legacyNetease && resolved == null) {
+                    resolved = netease.resolveAudio(song.copy(quality = request.requestedNeteaseQuality ?: song.quality))
                 }
+                val audio = resolved
+                if (audio != null && audio.quality != song.quality) throw IOException("网易云未返回所选音质，未保存文件")
+                val address = audio?.cdnAddress() ?: song.route(stage)
+                wire.save(address, audio?.sizeBytes?.takeIf { it > 0 }, request.maxBytes, target, reserve, progress, sequentialOnly)
+                return stage == AudioStage.Play
+            } catch (error: IOException) {
+                when {
+                    song.source == Source.QQ && stage == AudioStage.Download && error is AudioHttpFailure &&
+                        error.stage == AudioStage.Download && error.status == 502 -> {
+                        if (duration <= 0) throw IOException("QQ 下载入口 HTTP 502，缺少曲目时长，无法确认备用音源为整曲", error)
+                        wire.note("download HTTP 502 -> same-quality play")
+                        stage = AudioStage.Play
+                    }
+                    song.source == Source.Netease && !legacyNetease && request.resolvedNetease == null &&
+                        error is NeteasePlayFailure && (error.status == 404 || error.status == 405) -> {
+                        legacyNetease = true
+                    }
+                    error is AudioHttpFailure && error.shouldResolveAgain && !refreshed -> {
+                        wire.note("resolve again after CDN HTTP ${error.status}")
+                        refreshed = true
+                        resolved = null
+                    }
+                    !sequentialOnly && (error is AudioRangeRejected || error is AudioChanged) -> {
+                        sequentialOnly = true
+                        if (error is AudioChanged) resolved = null
+                        wire.note("restart with one complete stream")
+                    }
+                    !retried && error.audioRetryable() -> {
+                        retried = true
+                        delay(350L)
+                    }
+                    stage == AudioStage.Play -> throw IOException("QQ 下载入口 HTTP 502；${error.message}", error)
+                    else -> throw error
+                }
+                progress(0)
             }
-        } finally {
-            // The caller can delete the temporary file after the callback has closed the writer.
-            withContext(NonCancellable) { finished.await() }
         }
     }
 
-    private fun saveBody(
-        response: Response,
-        target: File,
+    private suspend fun NativeAudioHttp.Transfer.save(
+        address: AudioAddress,
+        expected: Long?,
         maxBytes: Long,
-        expectedLength: Long?,
+        target: File,
         reserve: (Long) -> Unit,
         progress: (Int?) -> Unit,
-        active: () -> Boolean,
+        sequentialOnly: Boolean,
     ) {
-        if (response.code != 200) {
-            if (response.code == 401 || response.code == 403 || response.code == 404) throw ExpiredCdnException(response.code)
-            throw IOException("音源未返回完整文件（HTTP ${response.code}）")
+        val probe = AudioRange(0, 0)
+        if (sequentialOnly) {
+            background { open(address).use { it.saveFull(expected, maxBytes, target, reserve, progress) } }
+            return
         }
-        val body = response.body ?: throw IOException("没有下载文件")
-        val length = body.contentLength()
-        val expected = expectedLength?.takeIf { it > 0 }
-        if (length > maxBytes || expected != null && expected > maxBytes) throw IOException("下载文件过大")
-        if (expected != null && length >= 0 && length != expected) throw IOException("下载文件长度不一致")
-        val knownSize = expected ?: length
-        if (knownSize > 0) reserve(knownSize)
-        val buffer = ByteArray(64 * 1024)
-        var written = 0L
-        var lastProgress = -1
-        body.byteStream().use { input ->
-            target.outputStream().use { output ->
-                while (active()) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    val nextSize = written + count
-                    if (nextSize > maxBytes || knownSize > 0 && nextSize > knownSize) throw IOException("下载文件长度不一致")
-                    if (knownSize <= 0) reserve(nextSize)
-                    output.write(buffer, 0, count)
-                    written = nextSize
-                    if (knownSize > 0) {
-                        val percent = (written * 100 / knownSize).toInt().coerceIn(0, 99)
-                        if (percent != lastProgress) {
-                            lastProgress = percent
-                            progress(percent)
-                        }
+        var endpoint = address
+        var size = 0L
+        val audio = background {
+            val response = try { open(address, probe) }
+            catch (error: AudioHttpFailure) { if (error.rangeUnsupported) throw AudioRangeRejected(); throw error }
+            response.use {
+                if (it.status == 200) {
+                    it.saveFull(expected, maxBytes, target, reserve, progress)
+                    return@background null
+                }
+                endpoint = it.address
+                size = it.totalFor(probe)
+                checkSize(size, maxBytes, expected)
+                it.readExact(1)
+                it.etag?.let { tag -> AudioObject(endpoint, size, tag) }
+            }
+        }
+        // A 200 response to the probe was already consumed as one complete file.
+        if (size == 0L) return
+        val lanes = minOf(AUDIO_LANES.toLong(), size / MIN_DOWNLOAD_PART).toInt()
+        if (audio == null || lanes < 2) {
+            background { open(endpoint).use { it.saveFull(size, maxBytes, target, reserve, progress) } }
+        } else {
+            saveParallel(audio, lanes, target, reserve, progress)
+        }
+    }
+
+    private suspend fun NativeAudioHttp.Transfer.saveParallel(
+        audio: AudioObject,
+        lanes: Int,
+        target: File,
+        reserve: (Long) -> Unit,
+        progress: (Int?) -> Unit,
+    ) = coroutineScope {
+        withContext(Dispatchers.IO) {
+            RandomAccessFile(target, "rw").use { file ->
+                file.setLength(0)
+                reserve(audio.size)
+                file.setLength(audio.size)
+            }
+        }
+        val reporter = ByteProgress(audio.size, progress)
+        val piece = audio.size / lanes
+        (0 until lanes).map { lane ->
+            async {
+                val first = piece * lane
+                val last = if (lane == lanes - 1) audio.size - 1 else first + piece - 1
+                val range = AudioRange(first, last)
+                background {
+                    openRange(audio, range).use { part ->
+                        part.copyTo(target, first, range.length, range.length, null, reporter::advance)
                     }
                 }
             }
-        }
-        if (written <= 0 || knownSize >= 0 && written != knownSize) throw IOException("下载文件不完整")
+        }.awaitAll()
+        if (reporter.writtenBytes != audio.size) throw IOException("下载分段未写满")
     }
 
-    private fun validateRedirect(url: HttpUrl, source: Source) {
-        val host = url.host
-        fun domain(suffix: String) = host == suffix || host.endsWith(".$suffix")
-        val allowed = when (source) {
-            Source.QQ -> domain("qqmusic.qq.com") || domain("music.tc.qq.com")
-            Source.Netease -> domain("music.126.net") || domain("music.163.com")
-            Source.Apple -> false
+    private suspend fun AudioBody.saveFull(
+        expected: Long?, maxBytes: Long, target: File, reserve: (Long) -> Unit, progress: (Int?) -> Unit,
+    ) {
+        if (status != 200) throw IOException("音源未返回完整文件（HTTP $status）")
+        checkSize(length, maxBytes, expected)
+        val exact = expected ?: length.takeIf { it >= 0 }
+        val reporter = exact?.takeIf { it > 0 }?.let { ByteProgress(it, progress) }
+        if (reporter == null) progress(null)
+        copyTo(target, 0, maxBytes, exact, reserve) { reporter?.advance(it) }
+    }
+
+    private suspend fun AudioBody.copyTo(
+        target: File, offset: Long, maxBytes: Long, expected: Long?, reserve: ((Long) -> Unit)?, onBytes: (Int) -> Unit,
+    ) = read { input, owner ->
+        RandomAccessFile(target, "rw").use { file ->
+            if (reserve != null) {
+                file.setLength(0)
+                if (expected != null && expected > 0) reserve(expected)
+            }
+            file.seek(offset)
+            val buffer = ByteArray(64 * 1024)
+            val limit = expected ?: maxBytes
+            var written = 0L
+            while (written < limit) {
+                owner.ensureActive()
+                val count = input.readAudio(buffer, 0, minOf(limit - written, buffer.size.toLong()).toInt(), address.stage)
+                if (count < 0) break
+                written += count
+                if (expected == null) reserve?.invoke(written)
+                file.write(buffer, 0, count)
+                onBytes(count)
+            }
+            if (written <= 0 || expected != null && written != expected) {
+                throw AudioReadFailure(address.stage, EOFException("下载文件不完整"))
+            }
+            owner.ensureActive()
+            if (written == limit && input.readAudio(buffer, 0, 1, address.stage) != -1) {
+                throw IOException("下载文件超出预期长度或上限")
+            }
         }
-        if (!url.isHttps || url.port != 443 || url.username.isNotEmpty() || url.password.isNotEmpty() || !allowed) {
-            throw IOException("下载服务返回未受信任的音源地址")
+    }
+
+    private fun checkSize(length: Long, maxBytes: Long, expected: Long?) {
+        if (length > maxBytes || expected != null && expected > maxBytes) throw IOException("下载文件过大")
+        if (expected != null && length >= 0 && length != expected) throw IOException("下载文件长度不一致")
+    }
+
+    private class ByteProgress(private val size: Long, private val report: (Int?) -> Unit) {
+        private var written = 0L
+        private var previous = -1
+
+        @Synchronized fun advance(count: Int) {
+            written += count
+            val percent = (written * 100 / size).toInt().coerceAtMost(99)
+            if (percent == previous) return
+            previous = percent
+            report(percent)
         }
+        val writtenBytes get() = synchronized(this) { written }
     }
 
     private fun verifyAudio(file: File, expectedDurationMs: Long, strict: Boolean, quality: String): AudioFileInfo {
@@ -280,5 +310,5 @@ internal class AudioFileTransfer(private val context: Context, private val api: 
             ascii(0, "FORM") || sync == 0x7ffe || sync == 0xfe7f
     }
 
-    private class ExpiredCdnException(code: Int) : IOException("签名音源已过期（HTTP $code）")
+    private companion object { const val MIN_DOWNLOAD_PART = 256L * 1024 }
 }
