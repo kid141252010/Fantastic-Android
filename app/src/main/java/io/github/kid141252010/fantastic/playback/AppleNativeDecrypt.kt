@@ -1016,6 +1016,38 @@ private fun decodeBase64(text: String): ByteArray? = try {
     }
 }
 
+internal fun appleWidevineKeyId(uri: String): ByteArray {
+    val payload = widevinePayload(uri)
+    if (payload.size == 16) return payload
+    val data = if (payload.isPssh()) {
+        PsshAtomUtil.parseSchemeSpecificData(payload, AppleNativeWidevine.WIDEVINE_UUID)
+            ?: throw IOException(AppleNativeWidevine.WIDEVINE_REJECTED)
+    } else payload
+    var cursor = 0
+    while (cursor < data.size) {
+        var tag = 0
+        var shift = 0
+        while (cursor < data.size) {
+            val value = data[cursor++].toInt() and 0xff
+            tag = tag or ((value and 0x7f) shl shift)
+            if (value and 0x80 == 0) break
+            shift += 7
+        }
+        var length = 0
+        shift = 0
+        while (cursor < data.size) {
+            val value = data[cursor++].toInt() and 0xff
+            length = length or ((value and 0x7f) shl shift)
+            if (value and 0x80 == 0) break
+            shift += 7
+        }
+        if (length < 0 || cursor + length > data.size) break
+        if (tag == 18 && length == 16) return data.copyOfRange(cursor, cursor + length)
+        cursor += length
+    }
+    throw IOException(AppleNativeWidevine.WIDEVINE_REJECTED)
+}
+
 private fun ByteArray.containsSequence(sequence: ByteArray): Boolean {
     for (start in 0..size - sequence.size) {
         var index = 0
