@@ -4,6 +4,7 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.media.MediaDrm
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
@@ -120,67 +121,110 @@ internal class AppleNativeDecrypt(
         profile: ApplePlaybackProfile,
         explicit: Boolean = requestedQuality != null,
     ): AppleNativeTrack {
-        val base = appleServer(server)
-        val song = api.client.appleGet(base.endpoint("parse", "song", adamId), PLAYLIST_ERROR) { it.string() }
-        val masterUrl = appleData(song, PLAYLIST_ERROR).requiredString("masterUrl", PLAYLIST_ERROR)
-        val master = masterUrl.toHttpUrlOrNull() ?: throw IOException("Apple 播放列表地址无效")
+        val base = applePreparation("resolve") { appleServer(server) }
+        val master = applePreparation("resolve") {
+            val song = api.client.appleGet(base.endpoint("parse", "song", adamId), PLAYLIST_ERROR) { it.string() }
+            val masterUrl = appleData(song, PLAYLIST_ERROR).requiredString("masterUrl", PLAYLIST_ERROR)
+            masterUrl.toHttpUrlOrNull() ?: throw IOException("Apple 播放列表地址无效")
+        }
         val widevine = !master.encodedPath.endsWith(".m3u8", ignoreCase = true)
-        val variants = if (widevine) {
-            if (!MediaDrm.isCryptoSchemeSupported(AppleNativeWidevine.WIDEVINE_UUID)) {
-                throw IOException("该设备没有 Widevine，不能播放这首仅 AAC-LC 的歌曲")
+        val temariAvailable = Temari.isAvailable()
+        val alacAvailable = AlacDecoder.isAvailable()
+        Log.i("FantasticPlayback", "apple-resolve id=${adamId.appleLogToken()} requestedQuality=${requestedQuality?.appleLogToken() ?: "auto"} " +
+            "network=${profile.network.appleLogToken()} profile=${profile.quality.appleLogToken()} spatial=${profile.spatial.appleLogToken()} explicit=$explicit " +
+            "widevine=$widevine temari=$temariAvailable alac=$alacAvailable")
+        val wanted = requestedQuality?.takeIf { explicit }
+        if (widevine) {
+            return applePreparation("widevine_prepare") {
+                if (!MediaDrm.isCryptoSchemeSupported(AppleNativeWidevine.WIDEVINE_UUID)) {
+                    throw ApplePreparationException("widevine_capability", "widevine_unavailable", "该设备没有 Widevine，不能播放这首仅 AAC-LC 的歌曲")
+                }
+                if (wanted != null && wanted != "aac" && wanted != "audio-stereo-256") {
+                    throw ApplePreparationException("widevine_quality", "aac_only", "该曲目仅提供 AAC-LC，没有所选音质")
+                }
+                val text = api.client.appleGet(base.endpoint("mv", "webplayback", adamId), PLAYLIST_ERROR) { it.string() }
+                val rawUrl = appleData(text, PLAYLIST_ERROR).requiredString("m3u8", PLAYLIST_ERROR)
+                val url = httpsUrl(rawUrl.toHttpUrlOrNull()).newBuilder().fragment("adamId=$adamId").build()
+                val variant = AppleNativeVariant(url, "audio-stereo-256", "mp4a.40.2", 256_000, 2, 0, 0)
+                logCandidate(adamId, variant, null)
+                prepareVariant(base, adamId, variant, Int.MAX_VALUE, widevine = true)
             }
-            val text = api.client.appleGet(base.endpoint("mv", "webplayback", adamId), PLAYLIST_ERROR) { it.string() }
-            val rawUrl = appleData(text, PLAYLIST_ERROR).requiredString("m3u8", PLAYLIST_ERROR)
-            val url = httpsUrl(rawUrl.toHttpUrlOrNull()).newBuilder().fragment("adamId=$adamId").build()
-            listOf(AppleNativeVariant(url, "audio-stereo-256", "mp4a.40.2", 256_000, 2, 0, 0))
-        } else {
+        }
+
+        if (!temariAvailable) {
+            throw ApplePreparationException("fairplay_capability", "temari_unavailable", "Apple FairPlay 解密组件不可用")
+        }
+        val variants = applePreparation("master_playlist") {
             val (url, text) = fetchCdnPlaylist(master, "主播放列表")
             parseMaster(text, url)
         }
-
-        // If an ALAC variant fails local capability checks, continue down the same ladder.
-        val wanted = requestedQuality?.takeIf { explicit }
         val candidates = if (wanted != null) explicitCandidates(variants, wanted) else profileCandidates(variants, profile)
-        var unsupportedAtmos = false
-        for ((variant, maxRate) in candidates) {
+        for ((index, candidate) in candidates.withIndex()) {
+            val (variant, maxRate) = candidate
             val codec = variant.audioCodec()
-            if (codec == AudioCodec.OTHER) continue
-            if (codec == AudioCodec.ALAC && !AlacDecoder.isAvailable()) continue
-            if (codec == AudioCodec.EAC3 && !supportsEac3(variant)) {
-                unsupportedAtmos = true
-                continue
+            val unavailable = when {
+                codec == AudioCodec.OTHER -> ApplePreparationException("codec_capability", "unknown_codec", "Apple 音频编码不受支持")
+                codec == AudioCodec.ALAC && !alacAvailable -> ApplePreparationException("alac_capability", "alac_unavailable", "Apple ALAC 解码组件不可用")
+                codec == AudioCodec.EAC3 && !supportsEac3(variant) -> ApplePreparationException("eac3_capability", "eac3_unavailable", "该设备不能解码杜比全景声")
+                else -> null
             }
-            val (mediaUrl, text) = fetchCdnPlaylist(variant.url, "媒体播放列表")
-            val media = parseMedia(text, mediaUrl, widevine)
+            logCandidate(adamId, variant, unavailable?.reason)
+            try {
+                if (unavailable != null) throw unavailable
+                return prepareVariant(base, adamId, variant, maxRate, widevine = false)
+            } catch (failure: ApplePreparationException) {
+                val next = candidates.getOrNull(index + 1)?.first
+                if (explicit || next == null || codec != AudioCodec.ALAC && unavailable == null) throw failure
+                Log.i("FantasticPlayback", "apple-fallback id=${adamId.appleLogToken()} from=${variant.groupId.appleLogToken()} " +
+                    "to=${next.groupId.appleLogToken()} stage=${failure.stage} reason=${failure.reason}")
+            }
+        }
+        throw ApplePreparationException("quality_selection", "no_candidate", "该曲目没有所选音质")
+    }
+
+    private suspend fun prepareVariant(
+        base: HttpUrl,
+        adamId: String,
+        variant: AppleNativeVariant,
+        maxRate: Int,
+        widevine: Boolean,
+    ): AppleNativeTrack {
+        val (mediaUrl, text) = applePreparation("media_playlist") { fetchCdnPlaylist(variant.url, "媒体播放列表") }
+        val media = applePreparation("media_playlist") { parseMedia(text, mediaUrl, widevine) }
+        val rawInitBytes = applePreparation("init_segment") {
             val initSegment = media.init ?: throw IOException("Apple 播放列表缺少初始化分片")
-            val rawInitBytes = fetchRange(initSegment)
-            val rawInit = AppleMp4(rawInitBytes)
-            val init = if (codec == AudioCodec.ALAC) rawInit.alacInit() else {
-                AppleNativeInit(rawInitBytes, null, 0, 0, 0)
-            }
-            if (codec == AudioCodec.ALAC) {
-                val rate = playableAlacRate(init)
-                if (rate <= 0 || rate > maxRate) continue
-            }
+            fetchRange(initSegment)
+        }
+        val alac = variant.audioCodec() == AudioCodec.ALAC
+        val init = if (alac) {
+            applePreparation("alac_cookie") { AppleMp4(rawInitBytes).alacInit() }
+        } else AppleNativeInit(rawInitBytes, null, 0, 0, 0)
+        val selected = if (alac) {
+            val rate = applePreparation("alac_capability") { playableAlacRate(init) }
+            if (rate > maxRate) throw ApplePreparationException("alac_rate", "rate_above_quality_limit", "Apple ALAC 采样率超出所选音质")
+            variant.copy(sampleRate = rate, bitDepth = init.alacBits, channels = init.alacChannels)
+        } else variant
+        return applePreparation(if (widevine) "widevine_manifest" else "init_container") {
             val rewrittenInitBytes = rawInitBytes.copyOf().also {
                 if (!widevine) AppleMp4(it).clearInitBoxes()
             }
-            var selected = variant
-            if (codec == AudioCodec.ALAC) {
-                selected = variant.copy(sampleRate = playableAlacRate(init), bitDepth = init.alacBits, channels = init.alacChannels)
-            }
+
             val mediaAdamId = ADAM_ID_IN_FILE.find(mediaUrl.pathSegments.lastOrNull().orEmpty())?.groupValues?.get(1)
                 ?: mediaUrl.fragment?.split('&')?.firstOrNull { it.startsWith("adamId=") }?.substringAfter('=')
                 ?: variant.url.fragment?.takeIf { it.startsWith("adamId=") }?.substringAfter('=')
                 ?: adamId
-            return AppleNativeTrack(
+            AppleNativeTrack(
                 mediaAdamId, selected, mediaUrl, media, rewrittenInitBytes, init.alacCookie,
                 init.alacFrameLength, init.alacChannels, init.alacBits,
                 widevineManifest = if (widevine) media3WidevineManifest(text) else null,
             ).also { it.templateServer = base }
         }
-        if (wanted != null && unsupportedAtmos) throw IOException("该设备不能解码杜比全景声")
-        throw IOException("该曲目没有所选音质")
+    }
+
+    private fun logCandidate(adamId: String, variant: AppleNativeVariant, skip: String?) {
+        Log.i("FantasticPlayback", "apple-candidate id=${adamId.appleLogToken()} group=${variant.groupId.appleLogToken()} " +
+            "codecs=${variant.codecs.appleLogToken()} category=${variant.audioCodec().name.lowercase()} " +
+            "action=${if (skip == null) "attempt" else "skip"} reason=${skip ?: "selected_order"}")
     }
 
     suspend fun fetchPlaylist(uri: HttpUrl, kind: String = "播放列表"): String = fetchCdnPlaylist(uri, kind).second
@@ -195,9 +239,9 @@ internal class AppleNativeDecrypt(
     }
 
     suspend fun fetchSegment(track: AppleNativeTrack, segment: AppleNativeSegment): AppleNativeFetchedSegment {
-        val bytes = fetchRange(segment)
-        val fragment = AppleMp4(bytes)
-        val samples = fragment.sampleRanges()
+        val bytes = applePreparation("segment_fetch") { fetchRange(segment) }
+        val fragment = applePreparation("segment_container") { AppleMp4(bytes) }
+        val samples = applePreparation("segment_container") { fragment.sampleRanges() }
         if (!track.widevine) {
             val context = currentCoroutineContext()
             val keyUri = segment.keyUri
@@ -208,14 +252,16 @@ internal class AppleNativeDecrypt(
                 } else {
                     TemplateKey(track.templateServer ?: appleServer(api.url("")), track.adamId, keyUri)
                 }
-                val template = acquireTemplate(key)
+                val template = applePreparation("fairplay_template") { acquireTemplate(key) }
                 synchronized(template) {
                     if (closed) throw IOException("Apple 解密模板已关闭")
                     for (range in samples) {
                         context.ensureActive()
                         val end = range.last + 1
                         val clear = Temari.decrypt(template.handle, bytes.copyOfRange(range.first, end))
-                        if (clear.size != end - range.first) throw IOException("Apple 分片解密失败")
+                        if (clear.size != end - range.first) {
+                            throw ApplePreparationException("fairplay_decrypt", "length_mismatch", "Apple 分片解密失败")
+                        }
                         clear.copyInto(bytes, range.first)
                     }
                 }
@@ -225,7 +271,7 @@ internal class AppleNativeDecrypt(
                     repairPacket(bytes, range.first, range.last + 1 - range.first, track.alacFrameLength, track.alacChannels, track.alacBits)
                 }
             }
-            fragment.clearFragmentBoxes()
+            applePreparation("segment_container") { fragment.clearFragmentBoxes() }
         }
         return AppleNativeFetchedSegment(bytes, samples, segment.durationMs)
     }
@@ -351,6 +397,29 @@ internal class AppleNativeDecrypt(
     }
 }
 
+internal fun String.appleLogToken(): String = takeIf { length in 1..80 && APPLE_LOG_TOKEN.matches(this) } ?: "-"
+
+private val APPLE_LOG_TOKEN = Regex("[A-Za-z0-9.,_-]+")
+
+internal class ApplePreparationException(
+    val stage: String,
+    val reason: String,
+    message: String,
+    cause: Exception? = null,
+) : IOException(message, cause)
+
+private inline fun <T> applePreparation(stage: String, operation: () -> T): T {
+    try {
+        return operation()
+    } catch (failure: ApplePreparationException) {
+        throw failure
+    } catch (failure: IOException) {
+        throw ApplePreparationException(stage, failure.javaClass.simpleName, failure.message ?: PLAYLIST_ERROR, failure)
+    } catch (failure: IllegalArgumentException) {
+        throw ApplePreparationException(stage, failure.javaClass.simpleName, failure.message ?: PLAYLIST_ERROR, failure)
+    }
+}
+
 private const val PLAYLIST_ERROR = "Apple 播放列表获取失败"
 private const val SEGMENT_ERROR = "Apple 分片获取失败"
 private const val TEMPLATE_ERROR = "Apple 解密模板获取失败"
@@ -464,8 +533,12 @@ private fun parseMaster(text: String, base: HttpUrl): List<AppleNativeVariant> {
         val groupId = stream["GROUP-ID"] ?: stream["GROUP_ID"] ?: stream["AUDIO"].orEmpty()
         val group = groups[stream["AUDIO"] ?: groupId]
         fun field(name: String): String? = stream[name] ?: group?.get(name)
+        val declaredCodecs = field("CODECS").orEmpty()
+        val codecs = if (groupId.contains("alac", ignoreCase = true) && !declaredCodecs.contains("alac", ignoreCase = true)) {
+            "alac"
+        } else declaredCodecs
         AppleNativeVariant(
-            httpsUrl(base.resolve(url)), groupId, field("CODECS").orEmpty(),
+            httpsUrl(base.resolve(url)), groupId, codecs,
             field("AVERAGE-BANDWIDTH")?.toLongOrNull() ?: field("BANDWIDTH")?.toLongOrNull() ?: 0,
             field("CHANNELS")?.substringBefore('/')?.toIntOrNull() ?: 0,
             field("SAMPLE-RATE")?.toIntOrNull() ?: 0,
@@ -556,7 +629,7 @@ private enum class AudioCodec { AAC, HE, ALAC, EAC3, OTHER }
 private enum class QualityKind { AAC, HE, ALAC, ATMOS, OTHER }
 
 private fun AppleNativeVariant.audioCodec(): AudioCodec = when {
-    codecs.contains("alac", true) -> AudioCodec.ALAC
+    codecs.contains("alac", true) || groupId.contains("alac", true) -> AudioCodec.ALAC
     codecs.contains("ec-3", true) || codecs.contains("ec3", true) || codecs.contains("eac3", true) -> AudioCodec.EAC3
     codecs.contains("mp4a.40.5", true) || codecs.contains("mp4a.40.29", true) -> AudioCodec.HE
     codecs.contains("mp4a", true) -> AudioCodec.AAC
@@ -575,10 +648,19 @@ private fun AppleNativeVariant.qualityKind(): QualityKind {
     }
 }
 
-private fun inferredRate(groupId: String): Int = ALAC_GROUP_RATE.find(groupId)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+private fun AppleNativeVariant.alacSelectionRate(): Int = sampleRate.takeIf { it > 0 }
+    ?: ALAC_GROUP_RATE.find(groupId)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
 private fun explicitCandidates(variants: List<AppleNativeVariant>, wanted: String): List<Pair<AppleNativeVariant, Int>> {
-    val exact = variants.filter { it.groupId == wanted || it.quality == wanted }
+    if (wanted == "lossless" || wanted == "hires") {
+        val maxRate = if (wanted == "lossless") 48_000 else 192_000
+        return variants.filter { it.qualityKind() == QualityKind.ALAC && it.alacSelectionRate() <= maxRate }
+            .sortedByDescending { it.alacSelectionRate() * 100L + it.bitDepth }
+            .map { it to maxRate }
+    }
+    val exact = variants.filter {
+        it.groupId == wanted || it.quality == wanted && (wanted != "alac" || it.audioCodec() == AudioCodec.ALAC)
+    }
     val matching = exact.ifEmpty { variants.filter { it.matchesQuality(wanted) } }
     return matching.sortedByDescending {
         if (it.sampleRate > 0) it.sampleRate * 100L + it.bitDepth else it.bandwidth
@@ -587,7 +669,7 @@ private fun explicitCandidates(variants: List<AppleNativeVariant>, wanted: Strin
 
 private fun AppleNativeVariant.matchesQuality(wanted: String): Boolean {
     val group = groupId.lowercase()
-    val alac = "alac" in group
+    val alac = audioCodec() == AudioCodec.ALAC
     val atmos = "atmos" in group
     val he = "he-" in group
     val binaural = "binaural" in group
@@ -623,11 +705,10 @@ private fun profileCandidates(variants: List<AppleNativeVariant>, profile: Apple
         listOf(QualityKind.ATMOS to Int.MAX_VALUE) + ladder
     } else ladder
     val classified = variants.groupBy { it.qualityKind() }
-    fun rate(variant: AppleNativeVariant): Int = variant.sampleRate.takeIf { it > 0 } ?: inferredRate(variant.groupId)
     return steps.flatMap { (kind, maxRate) ->
         classified[kind].orEmpty()
-            .filter { kind != QualityKind.ALAC || rate(it) <= maxRate }
-            .sortedByDescending { if (kind == QualityKind.ALAC) rate(it) * 100L + it.bitDepth else it.bandwidth }
+            .filter { kind != QualityKind.ALAC || it.alacSelectionRate() <= maxRate }
+            .sortedByDescending { if (kind == QualityKind.ALAC) it.alacSelectionRate() * 100L + it.bitDepth else it.bandwidth }
             .map { it to maxRate }
     }
 }
@@ -648,19 +729,26 @@ private fun supportsEac3(variant: AppleNativeVariant): Boolean = try {
 }
 
 private fun playableAlacRate(init: AppleNativeInit): Int {
-    val cookie = init.alacCookie ?: return 0
-    val mask = when (init.alacChannels) {
-        1 -> AudioFormat.CHANNEL_OUT_MONO
-        2 -> AudioFormat.CHANNEL_OUT_STEREO
-        6 -> AudioFormat.CHANNEL_OUT_5POINT1
-        else -> return 0
-    }
+    val cookie = init.alacCookie ?: throw ApplePreparationException("alac_cookie", "cookie_missing", "Apple ALAC 配置缺失或无效")
     val handle = AlacDecoder.open(cookie.copyOfRange(4, cookie.size))
-    if (handle == 0L) return 0
-    return try {
+    if (handle == 0L) throw ApplePreparationException("alac_cookie", "decoder_open", "Apple ALAC 解码器初始化失败")
+    try {
+        val mask = when (AlacDecoder.channels(handle)) {
+            1 -> AudioFormat.CHANNEL_OUT_MONO
+            2 -> AudioFormat.CHANNEL_OUT_STEREO
+            6 -> AudioFormat.CHANNEL_OUT_5POINT1
+            else -> throw ApplePreparationException("alac_channels", "channel_mask", "Apple ALAC 声道数不可播放")
+        }
         val rate = AlacDecoder.sampleRate(handle)
-        val encoding = if (init.alacBits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_FLOAT
-        if (AudioTrack.getMinBufferSize(rate, mask, encoding) > 0) rate else 0
+        if (rate <= 0) throw ApplePreparationException("alac_rate", "invalid_rate", "Apple ALAC 采样率无效")
+        val encoding = when (AlacDecoder.bits(handle)) {
+            16 -> AudioFormat.ENCODING_PCM_16BIT
+            20, 24, 32 -> AudioFormat.ENCODING_PCM_FLOAT
+            else -> throw ApplePreparationException("alac_bit_depth", "unsupported_bits", "Apple ALAC PCM 位深不受支持")
+        }
+        val minBuffer = AudioTrack.getMinBufferSize(rate, mask, encoding)
+        if (minBuffer <= 0) throw ApplePreparationException("alac_buffer", "buffer_$minBuffer", "Apple ALAC 音频格式不可播放：$minBuffer")
+        return rate
     } finally {
         AlacDecoder.close(handle)
     }

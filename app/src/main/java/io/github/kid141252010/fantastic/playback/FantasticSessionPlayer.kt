@@ -342,6 +342,7 @@ internal class FantasticSessionPlayer(
         if (lastStart == signature) return
         lastStart = signature
         Log.i(TAG, "Playing ${stream.song.track.mediaId} occurrence=${stream.song.uid} quality=$quality mime=${format.sampleMimeType} " +
+            "codecs=${format.codecs?.appleLogToken() ?: "-"} " +
             when { stream.cached != null -> "cache=${stream.cached.fileId}"; stream.offline != null -> "download"; else -> "online" })
         val key = stream.key ?: return
         if (stream.offline != null) return
@@ -735,6 +736,7 @@ internal class FantasticSessionPlayer(
             val wasApple = appleActive
             appleActive = selected.hosted
             if (appleActive) {
+                Log.i(TAG, "apple-route id=${song.track.id.appleLogToken()} path=hosted occurrence=${song.uid}")
                 if (!wasApple) { native.pause(); native.stop(); native.clearMediaItems() }
                 apple.setRepeatMode(engineRepeatMode())
                 apple.playQueue(run.map { it.song }, before.size, at, playing, song.quality,

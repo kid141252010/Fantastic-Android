@@ -45,6 +45,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.Closeable
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -140,6 +142,11 @@ internal class ApplePlaybackEngine(
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 onMain {
+                    currentNative?.let { track ->
+                        val mode = if (track.widevine) "widevine-mse" else "mse"
+                        Log.w("FantasticPlayback", "apple-error id=${track.adamId.appleLogToken()} " +
+                            "group=${track.variant.groupId.appleLogToken()} mode=$mode stage=media3 reason=${error.errorCodeName}")
+                    }
                     activeCacheSource = null
                     _state.value = _state.value.copy(
                         buffering = false,
@@ -322,14 +329,16 @@ internal class ApplePlaybackEngine(
     }
 
     private fun beginPrepare(serial: Long, song: QueuedSong, startPositionMs: Long) {
+        val requestServer = server
+        val requestProfile = profile
+        val requestedQuality = userRequestedQuality
         prepareJob = scope.launch(Dispatchers.IO) {
             try {
                 val track = decryptor.resolve(
-                    server = server,
+                    server = requestServer,
                     adamId = song.track.id,
-                    requestedQuality = userRequestedQuality,
-                    profile = profile,
-                    explicit = userRequestedQuality != null,
+                    requestedQuality = requestedQuality,
+                    profile = requestProfile,
                 )
                 if (serial != requestSerial || closed.get()) return@launch
                 onMain {
@@ -345,7 +354,14 @@ internal class ApplePlaybackEngine(
                 throw cancelled
             } catch (error: Throwable) {
                 if (serial == requestSerial && !closed.get()) {
-                    onMain { if (serial == requestSerial) publishError(error.message ?: "Apple 播放失败") }
+                    onMain {
+                        if (serial == requestSerial && !closed.get()) {
+                            val failure = error as? ApplePreparationException
+                            Log.w("FantasticPlayback", "apple-error id=${song.track.id.appleLogToken()} " +
+                                "stage=${failure?.stage ?: "prepare"} reason=${failure?.reason ?: error.javaClass.simpleName}")
+                            publishError(error.message ?: "Apple 播放失败")
+                        }
+                    }
                 }
             }
         }
@@ -410,9 +426,8 @@ internal class ApplePlaybackEngine(
         val quality = codecGroup(group)
         val duration = track.playlist.totalDurationMs.takeIf { it > 0 } ?: song.track.durationMs
         val label = qualityLabel(track)
-        val codec = if ("alac" in group.lowercase() && "alac" !in track.variant.codecs.lowercase()) "alac" else track.variant.codecs
         val details = reportedAudioDetails(
-            codec = codec,
+            codec = track.variant.codecs,
             sampleRate = track.variant.sampleRate,
             bitDepth = track.variant.bitDepth,
             channels = track.variant.channels.toString(),
@@ -431,7 +446,8 @@ internal class ApplePlaybackEngine(
     }
 
     private fun updateFromPlayer() {
-        if (closed.get() || alacOutput != null || currentNative == null) return
+        val track = currentNative ?: return
+        if (closed.get() || alacOutput != null) return
         val state = _state.value
         val playing = player.isPlaying && player.playWhenReady
         val buffering = player.playbackState == Player.STATE_BUFFERING
@@ -445,7 +461,7 @@ internal class ApplePlaybackEngine(
             durationMs = player.duration.takeIf { it > 0 } ?: state.durationMs,
             bufferedPositionMs = player.bufferedPosition,
         )
-        if (ended) activeCacheSource = null else if (playing) publishCache("mse")
+        if (ended) activeCacheSource = null else if (playing) publishCache(if (track.widevine) "widevine-mse" else "mse")
         if (ended) stopPoller() else schedulePoll()
     }
 
@@ -514,7 +530,14 @@ internal class ApplePlaybackEngine(
         )
         if (activeCacheSource != source) {
             activeCacheSource = source
-            Log.i("FantasticPlayback", "native-apple id=${song.track.id} group=${source.group} codecs=${source.codecs} mode=$mode")
+            val format = if (mode == "alac") null else player.currentTracks.groups.firstNotNullOfOrNull { group ->
+                if (group.type != C.TRACK_TYPE_AUDIO || !group.isSelected) null
+                else (0 until group.length).firstOrNull(group::isTrackSelected)?.let(group::getTrackFormat)
+            }
+            val actualCodecs = if (mode == "alac") source.codecs else format?.codecs
+            Log.i("FantasticPlayback", "native-apple id=${song.track.id.appleLogToken()} group=${source.group.appleLogToken()} " +
+                "codecs=${actualCodecs?.appleLogToken() ?: "-"} mode=$mode declaredCodecs=${source.codecs.appleLogToken()} " +
+                "mime=${format?.sampleMimeType?.substringAfter('/')?.appleLogToken() ?: "-"}")
         }
     }
 
@@ -613,11 +636,14 @@ private class AlacOutput(
     }
 
     private suspend fun run() {
-        val cookie = track.alacCookie ?: throw IOException("Apple ALAC 配置缺失")
-        val decoder = AlacDecoder.open(cookie.copyOfRange(4, cookie.size))
-        if (decoder == 0L) throw IOException("Apple ALAC 解码器初始化失败")
+        var decoder = 0L
         var output: AudioTrack? = null
+        var stage = "alac_cookie"
         try {
+            val cookie = track.alacCookie ?: throw IOException("Apple ALAC 配置缺失")
+            decoder = AlacDecoder.open(cookie.copyOfRange(4, cookie.size))
+            if (decoder == 0L) throw IOException("Apple ALAC 解码器初始化失败")
+            stage = "audio_output"
             val sampleRate = AlacDecoder.sampleRate(decoder).takeIf { it > 0 } ?: track.variant.sampleRate
             val channels = AlacDecoder.channels(decoder).takeIf { it > 0 } ?: track.alacChannels
             val bits = AlacDecoder.bits(decoder).takeIf { it > 0 } ?: track.alacBits
@@ -629,7 +655,7 @@ private class AlacOutput(
                 else -> throw IOException("Apple ALAC 声道数不可播放")
             }
             val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
-            if (minBuffer == AudioTrack.ERROR_BAD_VALUE) throw IOException("Apple ALAC 音频格式不可播放")
+            if (minBuffer <= 0) throw IOException("Apple ALAC 音频格式不可播放：$minBuffer")
             val trackOutput = AudioTrack.Builder()
                 .setAudioAttributes(
                     PlatformAudioAttributes.Builder()
@@ -648,8 +674,10 @@ private class AlacOutput(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             output = trackOutput
-            trackOutput.play()
-            playing.set(true)
+            Log.i("FantasticPlayback", "apple-alac-output id=${track.adamId.appleLogToken()} bits=$bits " +
+                "sampleRate=$sampleRate channels=$channels encoding=$encoding")
+            val bytesPerFrame = channels * if (bits == 16) 2 else 4
+            stage = "fragment"
             var segmentIndex = track.playlist.segments.indexForPosition(startPositionMs)
             var segmentOffsetMs = track.playlist.segments.take(segmentIndex).sumOf { it.durationMs }
             val startSegment = segmentIndex
@@ -657,6 +685,7 @@ private class AlacOutput(
                 async { decryptor.fetchSegment(track, track.playlist.segments[segmentIndex]) }
             }
             while (!closed && segmentIndex < track.playlist.segments.size) {
+                stage = "fragment"
                 val fetched = pending.await()
                 val nextIndex = segmentIndex + 1
                 pending = if (nextIndex < track.playlist.segments.size) {
@@ -667,6 +696,7 @@ private class AlacOutput(
                 } else 0L
                 for (range in fetched.sampleRanges) {
                     if (closed) break
+                    stage = "audio_output"
                     while (paused && !closed) {
                         if (trackOutput.playState == AudioTrack.PLAYSTATE_PLAYING) trackOutput.pause()
                         playing.set(false)
@@ -675,18 +705,21 @@ private class AlacOutput(
                     }
                     if (closed) break
                     if (trackOutput.playState != AudioTrack.PLAYSTATE_PLAYING) trackOutput.play()
-                    playing.set(true)
+                    stage = "alac_decode"
                     val packet = fetched.bytes.copyOfRange(range.first, range.last + 1)
                     val repaired = decryptor.repairAlacPacket(packet, track.alacFrameLength, channels, bits)
                     val pcm = AlacDecoder.decode(decoder, repaired)
                     if (pcm.isEmpty()) throw IOException("Apple ALAC 分片解码失败")
-                    val bytesPerFrame = channels * if (bits == 16) 2 else 4
                     val offset = if (skipFrames > 0L) {
                         val discard = (skipFrames * bytesPerFrame).coerceAtMost(pcm.size.toLong()).toInt()
                         skipFrames -= discard / bytesPerFrame
                         discard
                     } else 0
-                    if (offset < pcm.size) writeFully(trackOutput, pcm, offset, pcm.size - offset)
+                    if (offset < pcm.size) {
+                        stage = "audio_output"
+                        writeFully(trackOutput, pcm, offset, pcm.size - offset, encoding)
+                        if (!playing.get()) playing.set(true)
+                    }
                     publishPosition(trackOutput, sampleRate)
                 }
                 segmentOffsetMs += fetched.durationMs
@@ -696,7 +729,13 @@ private class AlacOutput(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            if (!closed) onError(error)
+            if (!closed) {
+                val failure = error as? ApplePreparationException
+                Log.w("FantasticPlayback", "apple-error id=${track.adamId.appleLogToken()} " +
+                    "group=${track.variant.groupId.appleLogToken()} mode=alac stage=${failure?.stage ?: stage} " +
+                    "reason=${failure?.reason ?: error.javaClass.simpleName}")
+                onError(error)
+            }
         } finally {
             playing.set(false)
             output?.let { trackOutput ->
@@ -704,7 +743,7 @@ private class AlacOutput(
                 runCatching { trackOutput.flush() }
                 runCatching { trackOutput.release() }
             }
-            AlacDecoder.close(decoder)
+            if (decoder != 0L) AlacDecoder.close(decoder)
         }
     }
 
@@ -719,11 +758,19 @@ private class AlacOutput(
         )
     }
 
-    private fun writeFully(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int) {
+    private fun writeFully(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int, encoding: Int) {
+        if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
+            val buffer = ByteBuffer.wrap(pcm, offset, length).order(ByteOrder.LITTLE_ENDIAN)
+            while (buffer.hasRemaining()) {
+                val count = output.write(buffer, buffer.remaining(), AudioTrack.WRITE_BLOCKING)
+                if (count <= 0) throw IOException("Apple ALAC 音频输出失败：$count")
+            }
+            return
+        }
         var written = 0
         while (written < length) {
             val count = output.write(pcm, offset + written, length - written, AudioTrack.WRITE_BLOCKING)
-            if (count <= 0) throw IOException("Apple ALAC 音频输出失败")
+            if (count <= 0) throw IOException("Apple ALAC 音频输出失败：$count")
             written += count
         }
     }
