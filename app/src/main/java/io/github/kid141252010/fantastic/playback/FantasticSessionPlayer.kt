@@ -43,6 +43,7 @@ internal data class CurrentAudio(
     val actualQuality: String?,
     val label: String?,
     val details: String?,
+    val audioQualityNotice: String? = null,
 )
 
 /** A single ordered session queue; each engine receives only its contiguous playable run. */
@@ -65,12 +66,13 @@ internal class FantasticSessionPlayer(
         val offline: OfflineAudio?,
         val cached: PlaybackCacheEntry?,
         val requestId: String? = null,
+        val audioQualityNotice: String? = null,
     ) {
         val hosted get() = song.track.source == Source.Apple && offline == null && cached == null
 
         fun matches(other: Stream) = song == other.song && server == other.server && key == other.key &&
             (hosted && other.hosted || requestedQuality == other.requestedQuality && quality == other.quality) &&
-            offline == other.offline && cached?.fileId == other.cached?.fileId
+            offline == other.offline && cached?.fileId == other.cached?.fileId && audioQualityNotice == other.audioQualityNotice
     }
 
     private data class PlaybackStart(val uid: Int, val request: String?, val quality: String, val codec: String?, val group: String?)
@@ -304,7 +306,8 @@ internal class FantasticSessionPlayer(
                 val matches = state.mediaId == song.track.mediaId && run.getOrNull(state.queueIndex)?.song?.uid == song.uid
                 if (!matches || state.error != null || state.qualityLabel == null && state.audioDetails == null) null else {
                     CurrentAudio(song.track.mediaId, indexOfCurrent(), song.uid, song.track.source,
-                        song.quality ?: apple.activeCacheSource?.profile?.quality, state.quality, state.qualityLabel, state.audioDetails)
+                        song.quality ?: apple.activeCacheSource?.profile?.quality, state.quality, state.qualityLabel, state.audioDetails,
+                        audioQualityNotice = state.audioQualityNotice)
                 }
             }
             else -> currentNativeStream()?.let { stream ->
@@ -319,7 +322,7 @@ internal class FantasticSessionPlayer(
                         else -> stream.quality
                     }
                     CurrentAudio(song.track.mediaId, indexOfCurrent(), song.uid, song.track.source,
-                        stream.requestedQuality, actual, label, details)
+                        stream.requestedQuality, actual, label, details, audioQualityNotice = stream.audioQualityNotice)
                 }
             }
         }
@@ -683,11 +686,24 @@ internal class FantasticSessionPlayer(
         val network = applePlaybackNetwork(appContext)
         val profile = applePlaybackProfile(appContext, prefs, previousNetwork)
         val requested = song.quality ?: profile.quality
+        val lossless = profile.requestsLossless(song.quality)
         val cached = cache.find(key, requested, profile)?.takeIf { entry ->
+            val qualityMatches = when {
+                !lossless || entry.actualQuality == "alac" -> true
+                song.quality != null -> false
+                network != null -> entry.actualQuality == "atmos"
+                else -> true
+            }
+            if (!qualityMatches) return@takeIf false
             val spatial = entry.appleMode in HOSTED_SPATIAL
             if (network != null) prefs.appleTransition == "off" && !spatial else !spatial || canDecodeSpatial(entry)
         }
-        return Stream(song, server, key, requested, cached?.actualQuality ?: requested, null, cached)
+        val actual = cached?.actualQuality
+        val notice = if (network == null && song.quality == null && lossless && actual != null && actual != "alac" && actual != "atmos") {
+            val codec = if (actual == "aac-he" || actual.startsWith("he-")) "HE-AAC" else "AAC"
+            "无网络，正在播放 $codec 缓存"
+        } else null
+        return Stream(song, server, key, requested, actual ?: requested, null, cached, audioQualityNotice = notice)
     }
 
     private fun canDecodeSpatial(entry: PlaybackCacheEntry): Boolean = spatialDecoders.getOrPut(entry.mime to entry.sampleRate) {
@@ -796,7 +812,7 @@ internal class FantasticSessionPlayer(
         val request = stream.song.uid to stream.requestedQuality
         if (request == cacheRecovery) return false
         cacheRecovery = request
-        val online = stream.copy(quality = stream.requestedQuality, cached = null, requestId = null)
+        val online = stream.copy(quality = stream.requestedQuality, cached = null, requestId = null, audioQualityNotice = null)
         if (online.hosted) start(stream.song, position(), wantsPlay(), online, recovery = true)
         else replaceNativeStream(online)
         publish()

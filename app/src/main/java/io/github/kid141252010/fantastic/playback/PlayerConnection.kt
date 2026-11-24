@@ -52,6 +52,7 @@ data class PlayerState(
     val upNext: List<QueueEntry> = emptyList(),
     /** Reject a gesture if the engine changed the queue while the finger was down. */
     val queueRevision: Long = 0L,
+    val audioQualityNotice: String? = null,
 )
 
 /** UI-side controller for the single service-owned Media3 session. */
@@ -263,6 +264,7 @@ class PlayerConnection(private val context: Context) {
             canRepeat = player.isCommandAvailable(Player.COMMAND_SET_REPEAT_MODE),
             upNext = entries.filter { it.index > selected },
             queueRevision = queueRevision,
+            audioQualityNotice = if (hasCurrentAudio) sessionExtras.getString(PlaybackService.AUDIO_QUALITY_NOTICE) else null,
         )
     }
 

@@ -53,6 +53,7 @@ internal data class AppleNativeTrack(
     val alacChannels: Int,
     val alacBits: Int,
     val widevineManifest: ByteArray? = null,
+    val audioQualityNotice: String? = null,
 ) {
     val widevine: Boolean get() = widevineManifest != null
 
@@ -134,20 +135,26 @@ internal class AppleNativeDecrypt(
             "network=${profile.network.appleLogToken()} profile=${profile.quality.appleLogToken()} spatial=${profile.spatial.appleLogToken()} explicit=$explicit " +
             "widevine=$widevine temari=$temariAvailable alac=$alacAvailable")
         val wanted = requestedQuality?.takeIf { explicit }
+        val requestsLossless = profile.requestsLossless(wanted)
+        val automaticLossless = !explicit && requestsLossless
         if (widevine) {
             return applePreparation("widevine_prepare") {
-                if (!MediaDrm.isCryptoSchemeSupported(AppleNativeWidevine.WIDEVINE_UUID)) {
-                    throw ApplePreparationException("widevine_capability", "widevine_unavailable", "该设备没有 Widevine，不能播放这首仅 AAC-LC 的歌曲")
-                }
                 if (wanted != null && wanted != "aac" && wanted != "audio-stereo-256") {
                     throw ApplePreparationException("widevine_quality", "aac_only", "该曲目仅提供 AAC-LC，没有所选音质")
+                }
+                if (!MediaDrm.isCryptoSchemeSupported(AppleNativeWidevine.WIDEVINE_UUID)) {
+                    throw ApplePreparationException("widevine_capability", "widevine_unavailable", "该设备没有 Widevine，不能播放这首仅 AAC-LC 的歌曲")
                 }
                 val text = api.client.appleGet(base.endpoint("mv", "webplayback", adamId), PLAYLIST_ERROR) { it.string() }
                 val rawUrl = appleData(text, PLAYLIST_ERROR).requiredString("m3u8", PLAYLIST_ERROR)
                 val url = httpsUrl(rawUrl.toHttpUrlOrNull()).newBuilder().fragment("adamId=$adamId").build()
                 val variant = AppleNativeVariant(url, "audio-stereo-256", "mp4a.40.2", 256_000, 2, 0, 0)
                 logCandidate(adamId, variant, null)
-                prepareVariant(base, adamId, variant, Int.MAX_VALUE, widevine = true)
+                if (automaticLossless) {
+                    prepareLosslessFallback(base, adamId, variant, Int.MAX_VALUE, true, "widevine_quality", "aac_only")
+                } else {
+                    prepareVariant(base, adamId, variant, Int.MAX_VALUE, widevine = true)
+                }
             }
         }
 
@@ -159,6 +166,7 @@ internal class AppleNativeDecrypt(
             parseMaster(text, url)
         }
         val candidates = if (wanted != null) explicitCandidates(variants, wanted) else profileCandidates(variants, profile)
+        var firstAlacFailure: ApplePreparationException? = null
         for ((index, candidate) in candidates.withIndex()) {
             val (variant, maxRate) = candidate
             val codec = variant.audioCodec()
@@ -171,15 +179,40 @@ internal class AppleNativeDecrypt(
             logCandidate(adamId, variant, unavailable?.reason)
             try {
                 if (unavailable != null) throw unavailable
+                if (automaticLossless && (codec == AudioCodec.AAC || codec == AudioCodec.HE)) {
+                    val reason = firstAlacFailure?.reason ?: missingAlacReason(variants)
+                    val stage = firstAlacFailure?.stage ?: qualitySelectionStage(reason)
+                    return prepareLosslessFallback(base, adamId, variant, maxRate, false, stage, reason)
+                }
                 return prepareVariant(base, adamId, variant, maxRate, widevine = false)
             } catch (failure: ApplePreparationException) {
+                if (codec == AudioCodec.ALAC && firstAlacFailure == null) firstAlacFailure = failure
                 val next = candidates.getOrNull(index + 1)?.first
                 if (explicit || next == null || codec != AudioCodec.ALAC && unavailable == null) throw failure
                 Log.i("FantasticPlayback", "apple-fallback id=${adamId.appleLogToken()} from=${variant.groupId.appleLogToken()} " +
-                    "to=${next.groupId.appleLogToken()} stage=${failure.stage} reason=${failure.reason}")
+                    "to=${next.groupId.appleLogToken()} stage=${failure.stage.appleLogToken()} reason=${failure.reason.appleLogToken()}")
             }
         }
-        throw ApplePreparationException("quality_selection", "no_candidate", "该曲目没有所选音质")
+        val reason = if (requestsLossless) missingAlacReason(variants) else "no_candidate"
+        val stage = qualitySelectionStage(reason)
+        throw ApplePreparationException(stage, reason, applePlaybackFailureText(stage, reason))
+    }
+
+    private suspend fun prepareLosslessFallback(
+        base: HttpUrl,
+        adamId: String,
+        variant: AppleNativeVariant,
+        maxRate: Int,
+        widevine: Boolean,
+        stage: String,
+        reason: String,
+    ): AppleNativeTrack {
+        val codec = if (variant.qualityKind() == QualityKind.HE) "HE-AAC" else "AAC"
+        val notice = "已回退 $codec（${applePlaybackFailureText(stage, reason)}）"
+        return prepareVariant(base, adamId, variant, maxRate, widevine, audioQualityNotice = notice).also {
+            Log.i("FantasticPlayback", "apple-lossless-fallback id=${adamId.appleLogToken()} group=${variant.groupId.appleLogToken()} " +
+                "stage=${stage.appleLogToken()} reason=${reason.appleLogToken()}")
+        }
     }
 
     private suspend fun prepareVariant(
@@ -188,6 +221,7 @@ internal class AppleNativeDecrypt(
         variant: AppleNativeVariant,
         maxRate: Int,
         widevine: Boolean,
+        audioQualityNotice: String? = null,
     ): AppleNativeTrack {
         val (mediaUrl, text) = applePreparation("media_playlist") { fetchCdnPlaylist(variant.url, "媒体播放列表") }
         val media = applePreparation("media_playlist") { parseMedia(text, mediaUrl, widevine) }
@@ -217,6 +251,7 @@ internal class AppleNativeDecrypt(
                 mediaAdamId, selected, mediaUrl, media, rewrittenInitBytes, init.alacCookie,
                 init.alacFrameLength, init.alacChannels, init.alacBits,
                 widevineManifest = if (widevine) media3WidevineManifest(text) else null,
+                audioQualityNotice = audioQualityNotice,
             ).also { it.templateServer = base }
         }
     }
@@ -283,10 +318,6 @@ internal class AppleNativeDecrypt(
         val fragment = AppleMp4(it)
         fragment.validateSamples(sampleRanges)
         fragment.clearFragmentBoxes()
-    }
-
-    fun repairAlacPacket(packet: ByteArray, frameLength: Int, channels: Int, bits: Int): ByteArray = packet.also {
-        repairPacket(it, 0, it.size, frameLength, channels, bits)
     }
 
     fun extractAlacCookie(init: ByteArray): AppleNativeInit = AppleMp4(init).alacInit()
@@ -407,6 +438,31 @@ internal class ApplePreparationException(
     message: String,
     cause: Exception? = null,
 ) : IOException(message, cause)
+
+internal fun applePlaybackFailureText(stage: String, reason: String): String = when (stage) {
+    "widevine_quality" -> "本次服务器只提供 AAC-LC 播放入口"
+    "quality_selection" -> if (reason == "no_alac_variant") "当前主清单没有 ALAC 音轨" else "该曲目没有所选音质"
+    "alac_capability" -> if (reason == "alac_unavailable") "设备缺少 ALAC 解码组件" else "Apple 播放失败（alac_capability）"
+    "master_playlist" -> "无法读取 Apple 主播放列表"
+    "media_playlist" -> "无法读取 Apple 媒体播放列表"
+    "init_segment" -> "无法读取 Apple 初始化分片"
+    "alac_cookie" -> "ALAC 初始化配置或解码器不可用"
+    "alac_bit_depth" -> "ALAC 位深不受支持"
+    "alac_channels" -> "ALAC 声道不受支持"
+    "alac_rate" -> if (reason == "rate_above_quality_limit") "ALAC 采样率超出所选音质" else "ALAC 采样率无效"
+    "alac_buffer" -> "设备不支持此 ALAC 输出格式"
+    "fairplay_capability" -> "Apple 解密组件不可用"
+    "fairplay_template" -> "Apple 授权会话准备失败"
+    "fairplay_decrypt" -> "Apple 音频解密失败"
+    "segment_fetch" -> "Apple 音频分片读取失败"
+    "segment_container", "init_container" -> "Apple 音频封装不可用"
+    "fragment" -> "Apple 音频分片处理失败"
+    "alac_decode" -> "ALAC 分片解码失败"
+    "audio_output" -> "设备无法输出 ALAC 音频"
+    "widevine_capability" -> "设备无法播放 Widevine AAC-LC"
+    "media3" -> "Apple 播放失败（${reason.appleLogToken()}）"
+    else -> "Apple 播放失败（${stage.appleLogToken()}）"
+}
 
 private inline fun <T> applePreparation(stage: String, operation: () -> T): T {
     try {
@@ -650,6 +706,12 @@ private fun AppleNativeVariant.qualityKind(): QualityKind {
 
 private fun AppleNativeVariant.alacSelectionRate(): Int = sampleRate.takeIf { it > 0 }
     ?: ALAC_GROUP_RATE.find(groupId)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+private fun missingAlacReason(variants: List<AppleNativeVariant>): String =
+    if (variants.any { it.qualityKind() == QualityKind.ALAC }) "rate_above_quality_limit" else "no_alac_variant"
+
+private fun qualitySelectionStage(reason: String): String =
+    if (reason == "rate_above_quality_limit") "alac_rate" else "quality_selection"
 
 private fun explicitCandidates(variants: List<AppleNativeVariant>, wanted: String): List<Pair<AppleNativeVariant, Int>> {
     if (wanted == "lossless" || wanted == "hires") {

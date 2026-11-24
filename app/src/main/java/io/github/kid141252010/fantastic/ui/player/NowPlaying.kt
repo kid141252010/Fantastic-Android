@@ -233,7 +233,9 @@ internal fun NowPlayingContent(
             panel = panel,
             onDismiss = { panel = null },
             trackPanel = { palette ->
-                state.error?.let { error -> androidx.compose.material3.Text(error, Modifier.padding(16.dp), color = palette.label) }
+                (state.error ?: state.audioQualityNotice)?.let { message ->
+                    androidx.compose.material3.Text(message, Modifier.padding(16.dp), color = palette.label)
+                }
                 hit?.let { song ->
                     io.github.kid141252010.fantastic.ui.MediaActionContent(song, library, listOfNotNull(menuTrack), nowPlaying = true,
                         hasLyrics = lyricsStatus == LyricsController.Status.Ready,

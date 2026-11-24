@@ -78,6 +78,7 @@ class PlaybackService : MediaSessionService() {
                     putInt(AUDIO_OCCURRENCE, audio.occurrence)
                     putString(AUDIO_LABEL, audio.label)
                     putString(AUDIO_DETAILS, audio.details)
+                    putString(AUDIO_QUALITY_NOTICE, audio.audioQualityNotice)
                 }
             })
         }
@@ -148,6 +149,7 @@ class PlaybackService : MediaSessionService() {
         internal const val AUDIO_DETAILS = "fantastic.audioDetails"
         internal const val AUDIO_OCCURRENCE = "fantastic.audioOccurrence"
         internal const val AUDIO_LABEL = "fantastic.audioLabel"
+        internal const val AUDIO_QUALITY_NOTICE = "fantastic.audioQualityNotice"
         private val REMOTE_COMMANDS: Player.Commands = Player.Commands.Builder().addAll(
             Player.COMMAND_PLAY_PAUSE,
             Player.COMMAND_PREPARE,

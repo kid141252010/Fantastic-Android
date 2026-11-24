@@ -1,5 +1,6 @@
 package io.github.kid141252010.fantastic.ui
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -68,6 +69,7 @@ import io.github.kid141252010.fantastic.ui.search.SearchScreen
 import io.github.kid141252010.fantastic.ui.settings.SettingsScreen
 import io.github.kid141252010.fantastic.ui.theme.TabAccent
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import kotlin.math.exp
@@ -115,6 +117,11 @@ fun AppShell(app: FantasticApp) {
     val glassSheetState = remember { mutableStateOf(false) }
     val glassSheetVisibility = remember { { visible: Boolean -> glassSheetState.value = visible } }
     val player by playerConnection.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val message = if (player.currentTrack?.source == Source.Apple) player.error ?: player.audioQualityNotice else null
+    LaunchedEffect(player.mediaId, message) {
+        if (message != null) Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+    }
     remember { app.lyrics }
     val haze = remember { HazeState() }
     val hasTrack = player.mediaId != null
