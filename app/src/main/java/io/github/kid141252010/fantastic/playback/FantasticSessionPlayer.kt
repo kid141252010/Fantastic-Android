@@ -177,7 +177,7 @@ internal class FantasticSessionPlayer(
         scope.launch {
             apple.state.collect { state ->
                 if (!appleActive || switching || released) return@collect
-                val song = run.getOrNull(state.queueIndex)?.song?.takeIf { it.track.mediaId == state.mediaId }
+                val song = appleSong(state)
                 if (song != null) {
                     val previous = current?.uid
                     val looped = apple.completedLoops != lastAppleLoops && previous == song.uid
@@ -231,13 +231,13 @@ internal class FantasticSessionPlayer(
 
     private fun enginePlaying() = if (appleActive) appleState.isPlaying else native.isPlaying
     private fun wantsPlay() = if (appleActive) appleState.playWhenReady else native.playWhenReady
+    private fun appleSong(state: PlayerState): QueuedSong? =
+        run.getOrNull(state.queueIndex)?.song?.takeIf { it.uid == apple.currentUid && it.track.mediaId == state.mediaId }
+
     private fun position(): Long {
         val song = current ?: return 0L
         val value = if (appleActive) {
-            val state = appleState
-            if (state.mediaId == song.track.mediaId && run.getOrNull(state.queueIndex)?.song?.uid == song.uid) {
-                apple.position()
-            } else 0L
+            if (appleSong(appleState)?.uid == song.uid) apple.position() else 0L
         } else {
             currentNativeStream()?.let { native.currentPosition } ?: 0L
         }
@@ -312,7 +312,7 @@ internal class FantasticSessionPlayer(
             song == null || stopped -> null
             appleActive -> {
                 val state = appleState
-                val matches = state.mediaId == song.track.mediaId && run.getOrNull(state.queueIndex)?.song?.uid == song.uid
+                val matches = appleSong(state)?.uid == song.uid
                 if (!matches || state.error != null || state.qualityLabel == null && state.audioDetails == null) null else {
                     CurrentAudio(song.track.mediaId, indexOfCurrent(), song.uid, song.track.source,
                         song.quality ?: apple.activeCacheSource?.profile?.quality, state.quality, state.qualityLabel, state.audioDetails)
@@ -404,6 +404,8 @@ internal class FantasticSessionPlayer(
     override fun getState(): State {
         val song = current
         val hosted = appleState
+        val hostedMatches = appleActive && song != null && appleSong(hosted)?.uid == song.uid
+        val nativeMatches = !appleActive && currentNativeStream() != null
         val nativeError = if (appleActive) null else native.playerError
         val error = if (appleActive) hosted.error?.let { PlaybackException(it, null, PlaybackException.ERROR_CODE_UNSPECIFIED) }
             else nativeError
@@ -422,10 +424,13 @@ internal class FantasticSessionPlayer(
                     Bundle(base.mediaMetadata.extras).apply { putString(KEY_PLAYBACK_MESSAGE, hosted.error) },
                 ).build()).build()
             } else base
-            val window = if (selected && !appleActive && !native.currentTimeline.isEmpty)
+            val window = if (selected && nativeMatches && !native.currentTimeline.isEmpty)
                 native.currentTimeline.getWindow(native.currentMediaItemIndex, Timeline.Window()) else null
-            val duration = (if (!selected) 0L else if (appleActive) hosted.durationMs else native.duration)
-                .takeIf { it > 0 } ?: entry.track.durationMs
+            val duration = when {
+                selected && hostedMatches -> hosted.durationMs
+                selected && nativeMatches -> native.duration
+                else -> 0L
+            }.takeIf { it > 0 } ?: entry.track.durationMs
             MediaItemData.Builder(entry.uid)
                 .setMediaItem(item)
                 .setMediaMetadata(item.mediaMetadata)
@@ -435,7 +440,12 @@ internal class FantasticSessionPlayer(
                 .setDurationUs(duration.toUsOrUnset())
                 .build()
         }
-        val buffered = if (appleActive) hosted.bufferedPositionMs else native.bufferedPosition
+        val contentPosition = position()
+        val buffered = when {
+            hostedMatches -> hosted.bufferedPositionMs
+            nativeMatches -> native.bufferedPosition
+            else -> 0L
+        }
         val builder = State.Builder()
             .setPlaylist(items)
             .setPlaylistMetadata(playlistMetadata)
@@ -450,9 +460,9 @@ internal class FantasticSessionPlayer(
             .setIsLoading(playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_READY && !appleActive && native.isLoading)
             .setAudioAttributes(native.audioAttributes)
             .setVolume(native.volume)
-            .setContentPositionMs(position())
+            .setContentPositionMs(contentPosition)
             .setContentBufferedPositionMs(PositionSupplier.getConstant(buffered.coerceAtLeast(0L)))
-            .setTotalBufferedDurationMs(PositionSupplier.getConstant((buffered - position()).coerceAtLeast(0L)))
+            .setTotalBufferedDurationMs(PositionSupplier.getConstant((buffered - contentPosition).coerceAtLeast(0L)))
         error?.let(builder::setPlayerError)
         discontinuity?.let { (reason, at) -> builder.setPositionDiscontinuity(reason, at) }
         discontinuity = null

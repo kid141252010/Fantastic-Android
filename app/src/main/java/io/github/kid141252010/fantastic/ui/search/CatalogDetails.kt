@@ -271,9 +271,9 @@ private fun DetailBody(
     val playable = remember(loaded) {
         loaded.song?.let(::listOf) ?: playableSection?.entries?.mapNotNull { it.track }.orEmpty()
     }
-    var collectionPlayBusy by remember(loaded) { mutableStateOf<String?>(null) }
-    var collectionPlayError by remember(loaded) { mutableStateOf<String?>(null) }
-    var collectionPlayRequest by remember(loaded) { mutableStateOf(0) }
+    var collectionPlayBusy by remember { mutableStateOf<String?>(null) }
+    var collectionPlayError by remember { mutableStateOf<String?>(null) }
+    var collectionPlayRequest by remember { mutableStateOf(0) }
     fun loadCollection(section: DetailSection, action: (List<Track>) -> Unit) {
         val request = collectionPlayRequest + 1
         collectionPlayRequest = request
@@ -298,7 +298,9 @@ private fun DetailBody(
         app.player.play(clickedTrack)
         val clickedIndex = section.entries.take(entryIndex).count { it.track != null }
         loadCollection(section) { songs ->
-            if (clickedIndex !in songs.indices) throw DetailUnavailable("服务器未返回所选歌曲。")
+            if (songs.getOrNull(clickedIndex)?.mediaId != clickedTrack.mediaId) {
+                throw DetailUnavailable("服务器未返回所选歌曲。")
+            }
             playOrdered(songs, clickedIndex, null, shuffle)
         }
     }
