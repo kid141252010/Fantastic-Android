@@ -12,10 +12,10 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -28,7 +28,6 @@ import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.NeteaseAudio
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.runBlocking
 
 /** 后台播放服务：持有 ExoPlayer 和 MediaSession，通知栏、耳机按键、蓝牙控制都走这里。 */
 class PlaybackService : MediaSessionService() {
@@ -37,25 +36,18 @@ class PlaybackService : MediaSessionService() {
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
-        val http = DefaultHttpDataSource.Factory()
-            .setUserAgent("Fantastic-Android")
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(20_000)
         val app = application as FantasticApp
         val cache = app.playbackCache
-        val requests = NeteasePlaybackRequests()
-        val data = ResolvingDataSource.Factory(http) { spec ->
-            val request = spec.key?.let(requests::get)?.takeIf { it.uri == spec.uri } ?: return@Factory spec
-            val audio = runBlocking { app.netease.resolvePlay(request.id, request.quality, server = request.server) }
-            request.audio.compareAndSet(null, audio)
-            spec.withUri(Uri.parse(audio.url))
-        }
-        val audioSources = DefaultDataSource.Factory(this, data)
+        val requests = NativeAudioRequests()
+        val audioSources = DefaultDataSource.Factory(this) { NativeAudioDataSource(app.audioHttp, app.netease, requests) }
+        val mediaSources = DefaultMediaSourceFactory(DataSource.Factory {
+            CachedAudioDataSource(cache, audioSources.createDataSource())
+        }).setLoadErrorHandlingPolicy(object : DefaultLoadErrorHandlingPolicy() {
+            override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorInfo): Long =
+                if (loadErrorInfo.exception is AudioChanged) C.TIME_UNSET else super.getRetryDelayMsFor(loadErrorInfo)
+        })
         val native = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(DataSource.Factory {
-                CachedAudioDataSource(cache, audioSources.createDataSource())
-            }))
+            .setMediaSourceFactory(mediaSources)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -66,7 +58,7 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
-        val apple = ApplePlaybackEngine(this, app.prefs)
+        val apple = ApplePlaybackEngine(this, app.prefs, app.api)
         val player = FantasticSessionPlayer(this, native, apple, app.prefs, app.downloads::audio, cache, requests)
         val open = PendingIntent.getActivity(
             this, 0,
@@ -90,6 +82,7 @@ class PlaybackService : MediaSessionService() {
             })
         }
         player.restore()
+        apple.prewarm(app.prefs.baseUrl)
     }
 
     /**
@@ -183,8 +176,8 @@ class PlaybackService : MediaSessionService() {
 }
 
 /** A resolver can finish after the corresponding media item is removed. It updates only its own request. */
-internal class NeteasePlaybackRequests {
-    class Request(val uri: Uri, val id: String, val quality: String, val server: String) {
+internal class NativeAudioRequests {
+    class Request(val uri: Uri, val song: NativeSong) {
         val audio = AtomicReference<NeteaseAudio?>()
     }
 

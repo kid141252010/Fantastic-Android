@@ -54,7 +54,7 @@ internal class FantasticSessionPlayer(
     private val prefs: Prefs,
     private val localAudio: (Track, String?) -> OfflineAudio?,
     private val cache: PlaybackCache,
-    private val requests: NeteasePlaybackRequests,
+    private val requests: NativeAudioRequests,
 ) : SimpleBasePlayer(context.mainLooper) {
     private data class Stream(
         val song: QueuedSong,
@@ -106,6 +106,7 @@ internal class FantasticSessionPlayer(
     private var discontinuity: Pair<Int, Long>? = null
     private var automaticOccurrence: Int? = null
     private var cacheRecovery: Pair<Int, String>? = null
+    private var audioRecovery: Pair<Int, String>? = null
 
     private val analyticsListener = object : AnalyticsListener {
         override fun onDownstreamFormatChanged(eventTime: AnalyticsListener.EventTime, mediaLoadData: MediaLoadData) {
@@ -117,6 +118,7 @@ internal class FantasticSessionPlayer(
             if (request != playing.localConfiguration?.customCacheKey || eventItem.occurrence() != playing.occurrence()) return
             actualNativeRequest = request
             actualNativeFormat = mediaLoadData.trackFormat
+            audioRecovery = null
             val selected = currentNativeStream() ?: return
             observeNativePlayback(selected)
             publishCurrentAudio()
@@ -137,9 +139,14 @@ internal class FantasticSessionPlayer(
                     it.song.uid == native.currentMediaItem.occurrence()
             }
             if (selected != null) engineSelected(selected.song, selected.requestId)
-            if (native.playerError != null) {
+            val error = native.playerError
+            if (error != null) {
                 clearNativeFormat()
-                if (events.contains(Player.EVENT_PLAYER_ERROR) && (retryCachedStream() || retryNativeQuality())) return
+                if (events.contains(Player.EVENT_PLAYER_ERROR)) {
+                    val changed = generateSequence<Throwable>(error) { it.cause?.takeUnless { cause -> cause === it } }
+                        .any { it is AudioChanged }
+                    if (retryCachedStream() || (if (changed) retryChangedAudio() else retryNativeQuality())) return
+                }
             }
             val auto = automaticOccurrence
             automaticOccurrence = null
@@ -231,6 +238,7 @@ internal class FantasticSessionPlayer(
         run.firstOrNull { it.song.uid == old.uid }?.requestId?.let { requests.get(it)?.audio?.set(null) }
         current = song
         cacheRecovery = null
+        audioRecovery = null
         clearNativeFormat(keepRequest = nativeRequest)
         checkpoint()
     }
@@ -695,9 +703,11 @@ internal class FantasticSessionPlayer(
         val cached = stream.cached
         val local = cached?.let { playbackCacheUri(it.fileId) } ?: stream.offline?.file?.let(Uri::fromFile)
         val item = stream.song.nativeItem(stream.server, stream.quality, local, stream.requestId)
-        if (local == null && stream.song.track.source == Source.Netease) {
+        val track = stream.song.track
+        if (local == null && track.source != Source.Apple) {
             val uri = checkNotNull(item.localConfiguration).uri
-            requests.add(checkNotNull(stream.requestId), NeteasePlaybackRequests.Request(uri, stream.song.track.id, stream.quality, stream.server))
+            val song = NativeSong(track.source, track.id, stream.quality, stream.server)
+            requests.add(checkNotNull(stream.requestId), NativeAudioRequests.Request(uri, song))
         }
         return item
     }
@@ -719,6 +729,7 @@ internal class FantasticSessionPlayer(
             clearNativeFormat()
             clearPublishedAudio()
             if (!recovery) cacheRecovery = null
+            audioRecovery = null
             automaticOccurrence = null
             discontinuity = null
             val wasApple = appleActive
@@ -786,6 +797,18 @@ internal class FantasticSessionPlayer(
         val online = stream.copy(quality = stream.requestedQuality, cached = null, requestId = null)
         if (online.hosted) start(stream.song, position(), wantsPlay(), online, recovery = true)
         else replaceNativeStream(online)
+        publish()
+        return true
+    }
+
+    private fun retryChangedAudio(): Boolean {
+        val stream = currentNativeStream() ?: return false
+        if (stream.song.track.source == Source.Apple || stream.offline != null || stream.cached != null) return false
+        val key = stream.song.uid to stream.quality
+        if (audioRecovery == key) return false
+        audioRecovery = key
+        // A new media item/period discards the old extractor, not just its HTTP connection.
+        replaceNativeStream(stream)
         publish()
         return true
     }

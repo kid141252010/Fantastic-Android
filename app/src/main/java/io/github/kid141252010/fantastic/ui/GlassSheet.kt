@@ -1,11 +1,11 @@
 package io.github.kid141252010.fantastic.ui
 
+import android.view.WindowManager.LayoutParams.MATCH_PARENT
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -72,13 +71,11 @@ private val LightActionSheetColors = ActionSheetColors(Color.White, Color.Black,
 @Composable
 internal fun actionSheetColors() = if (isSystemInDarkTheme()) DarkActionSheetColors else LightActionSheetColors
 
-/** APK action_sheet.xml: edge-to-edge bottom surface; share lyrics uses its centered 10dp card. */
+/** Action sheet with a bottom-aligned surface on phones and a centered surface on tablets. */
 @Composable
 internal fun GlassSheet(
     title: String,
     onDismissRequest: () -> Unit,
-    centered: Boolean = false,
-    scrollable: Boolean = true,
     showHeader: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -89,43 +86,61 @@ internal fun GlassSheet(
     }
     val palette = actionSheetColors()
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
-    val card = centered || tablet
-    Dialog(onDismissRequest, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = true,
+            decorFitsSystemWindows = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
         val window = (LocalView.current.parent as DialogWindowProvider).window
         SideEffect {
-            window.setDimAmount(if (centered) .4f else .6f)
-            window.setWindowAnimations(if (centered) R.style.FantasticLyricShareAnimation else R.style.FantasticActionSheetAnimation)
+            // Keep Compose 1.7.6 on the platform measure path and give it the full dialog window.
+            val attributes = window.attributes
+            if (attributes.width != MATCH_PARENT || attributes.height != MATCH_PARENT) {
+                window.setLayout(MATCH_PARENT, MATCH_PARENT)
+            }
+            window.setDimAmount(.6f)
+            window.setWindowAnimations(R.style.FantasticActionSheetAnimation)
         }
-        val safeInsets = WindowInsets.safeDrawing.union(WindowInsets.ime)
+        val safeInsets = WindowInsets.safeDrawing
         // Keep the bottom surface behind the navigation bar and pad its contents inside it.
-        val outerInsets = if (card) safeInsets else safeInsets
+        val outerInsets = if (tablet) safeInsets else safeInsets
             .only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
             .union(WindowInsets.displayCutout).union(WindowInsets.ime)
-        BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(outerInsets)) {
-            Box(Modifier.fillMaxSize().clickable(remember { MutableInteractionSource() }, indication = null,
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.matchParentSize().clickable(remember { MutableInteractionSource() }, indication = null,
                 onClick = onDismissRequest))
-            val shape = if (card) RoundedCornerShape(10.dp) else RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
-            Surface(
-                modifier = Modifier.align(if (card) Alignment.Center else Alignment.BottomCenter)
-                    .widthIn(max = if (tablet) if (centered) 520.dp else 400.dp else maxWidth)
-                    .fillMaxWidth().heightIn(max = if (centered && tablet) minOf(maxHeight, 600.dp) else maxHeight)
-                    .clickable(remember { MutableInteractionSource() }, indication = null) {}
-                    .semantics { paneTitle = title },
-                shape = shape, color = palette.surface,
+            Box(
+                Modifier.fillMaxSize().windowInsetsPadding(outerInsets),
+                contentAlignment = if (tablet) Alignment.Center else Alignment.BottomCenter,
             ) {
-                Column(Modifier.fillMaxWidth().then(if (card) Modifier else Modifier.navigationBarsPadding())) {
-                    if (showHeader) {
-                        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Text(title, Modifier.weight(1f).semantics { heading() }, color = palette.label,
-                                fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            CircularIconButton(onClick = onDismissRequest) { Icon(Icons.Rounded.Close, "关闭$title", tint = palette.secondary) }
+                val shape = if (tablet) RoundedCornerShape(10.dp) else RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
+                val width = if (tablet) Modifier.widthIn(max = 400.dp) else Modifier
+                Surface(
+                    modifier = width.fillMaxWidth()
+                        .clickable(remember { MutableInteractionSource() }, indication = null) {}
+                        .semantics { paneTitle = title },
+                    shape = shape, color = palette.surface,
+                ) {
+                    val bottomPadding = if (tablet) Modifier else Modifier.windowInsetsPadding(safeInsets.only(WindowInsetsSides.Bottom))
+                    Column(Modifier.fillMaxWidth().then(bottomPadding)) {
+                        if (showHeader) {
+                            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text(title, Modifier.weight(1f).semantics { heading() }, color = palette.label,
+                                    fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                CircularIconButton(onClick = onDismissRequest) { Icon(Icons.Rounded.Close, "关闭$title", tint = palette.secondary) }
+                            }
+                            HorizontalDivider(thickness = .5.dp, color = palette.divider)
                         }
-                        HorizontalDivider(thickness = .5.dp, color = palette.divider)
-                    }
-                    ProvideTextStyle(TextStyle(color = palette.label, fontSize = 17.sp)) {
-                        Column(Modifier.weight(1f, fill = false).fillMaxWidth()
-                            .then(if (scrollable) Modifier.verticalScroll(rememberScrollState()) else Modifier), content = content)
+                        ProvideTextStyle(TextStyle(color = palette.label, fontSize = 17.sp)) {
+                            Column(
+                                Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
+                                content = content,
+                            )
+                        }
                     }
                 }
             }

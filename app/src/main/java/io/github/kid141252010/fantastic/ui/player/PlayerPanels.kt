@@ -4,7 +4,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -26,14 +25,11 @@ import io.github.kid141252010.fantastic.playback.PlayerState
 import io.github.kid141252010.fantastic.ui.ActionSheetColors
 import io.github.kid141252010.fantastic.ui.actionSheetColors
 
-/** action_sheet.xml and fragment_share_lyrics_action_sheet.xml use their own surfaces, not app glass. */
+/** Player action sheets use their own surface, independent of the playback backdrop. */
 @Composable
 internal fun PlayerPanels(
     panel: PlayerPanel?,
     onDismiss: () -> Unit,
-    artwork: String?,
-    shareSelection: Set<Int>,
-    onShareSelection: (Set<Int>) -> Unit,
     trackPanel: @Composable (ActionSheetColors) -> Unit,
     entityPanel: @Composable (ActionSheetColors) -> Unit,
     qualityState: PlayerState,
@@ -49,16 +45,12 @@ internal fun PlayerPanels(
         PlayerPanel.Track -> "歌曲操作"
         PlayerPanel.Entities -> "查看艺人和专辑"
         PlayerPanel.Quality -> "当前码流规格"
-        is PlayerPanel.Share -> "分享歌词"
     }
-    io.github.kid141252010.fantastic.ui.GlassSheet(name, onDismiss,
-        centered = showing is PlayerPanel.Share, scrollable = showing !is PlayerPanel.Share, showHeader = false) {
+    io.github.kid141252010.fantastic.ui.GlassSheet(name, onDismiss, showHeader = false) {
         when (showing) {
             PlayerPanel.Track -> trackPanel(palette)
             PlayerPanel.Entities -> entityPanel(palette)
             PlayerPanel.Quality -> Unit
-            is PlayerPanel.Share -> LyricShareSheet(showing, artwork, palette, shareSelection, onShareSelection, onDismiss,
-                Modifier.fillMaxSize())
         }
     }
 }

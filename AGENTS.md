@@ -15,9 +15,9 @@ Fantastic Android is a Kotlin and Jetpack Compose client for a user-configured F
 
 - `FantasticApp` is the process-wide manual dependency container. It creates shared `Prefs` and `FantasticApi` instances and lazily provides API clients, `PlayerConnection`, and `LyricsController`; reuse them instead of adding a DI framework.
 - `MainActivity` hosts `FantasticTheme` and `AppShell`. Compose state and overlays drive navigation. `SearchScreen` debounces queries and uses the source catalog clients to populate results.
-- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ Music, NetEase Cloud Music, and local audio use Media3. Online Apple Music uses Fantastic’s web player through `ApplePlaybackEngine`, with shared session state exposed through `PlayerConnection`.
+- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ Music, NetEase Cloud Music, and local audio use Media3. Online Apple songs are FairPlay/Widevine-decrypted in process and then handed to Media3 or ALAC AudioTrack. Apple media pages and lyrics keep their WebViews.
 - `MusicLibrary` serializes mutations on an IO coroutine scope, persists snapshots with `AtomicFile`, and exposes immutable state through `StateFlow`.
-- The parser loads local ES modules through `WebViewAssetLoader` at `https://appassets.androidplatform.net/assets/lyrics/`, not `file://`. Preserve the `ready`/`status` bridge, `parseFantasticLyrics` contract, and attach-after-background-load lifecycle. The WebView parses; it does not render the playback surface.
+- `LyricParser` parses Apple TTML and provider lyrics in native Kotlin on `Dispatchers.Default`. `NativeLyricsView` and `LyricInkView` render the playback surface. Apple media pages and lyrics keep their WebViews.
 
 ## Key Directories
 
@@ -27,7 +27,7 @@ Paths below are relative to `app/src/main/java/io/github/kid141252010/fantastic/
 - `playback/`: service-owned player, Media3 session, and UI-facing connection/state.
 - `lyrics/`: lyric loading/parsing lifecycle, synchronization, RecyclerView layout, Canvas renderer, and motion curves.
 - `ui/`: Compose shell, search, player, settings, and theme.
-- `app/src/main/assets/lyrics/` contains the locally maintained parser modules and provider adapters.
+- `app/src/main/assets/lyrics/README.md` documents the lyric parser and playback surface.
 
 ## Development Commands
 
@@ -49,8 +49,9 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 
 ## 提交与 APK 交付
 
-- 每轮修改完成后，在当前分支只提交本次任务的改动。逐块核对提交内容，保留工作区中其他已暂存和未暂存的改动。
-- 当前分支名称与改动范围不符时，先询问用户使用哪个分支，再提交。
+- 开始新任务前，按类型新建分支。新功能用 `feat/<主题>`，缺陷修复用 `fix/<主题>`，文档用 `docs/<主题>`，日常维护用 `chore/<主题>`。
+- 任务完成后，逐块核对并只提交本次改动，保留其他已暂存和未暂存的改动。主动将任务分支推送到 `origin`，无需等待用户提醒或另行确认。
+- 推送成功后，询问用户是否将该任务分支合入 `main`。用户明确同意后再合入。
 - 提交后用上文指定的 JDK、Gradle 和 SDK 重新编译并打包。先执行 `gradle :app:compileDebugKotlin --offline --rerun-tasks --console=plain`，再执行 `gradle :app:assembleDebug --offline --console=plain`。交付本次 APK 路径和构建结果，由用户安装并验收界面、设备和播放行为。
 
 ## Code Conventions & Common Patterns
@@ -60,7 +61,7 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 - Use `LaunchedEffect` for keyed UI work and cancellable jobs for lyric loads. Rethrow `CancellationException` before handling other failures; run blocking HTTP work on `Dispatchers.IO`.
 - Close OkHttp responses with `use`; report HTTP and empty-body errors explicitly. DTOs use kotlinx.serialization and tolerate unknown response keys. Preserve existing error/status state and `FantasticLyrics` diagnostics instead of silently returning empty content.
 - Reuse `ui/Design.kt` dimensions, motion, and composition locals. Lyrics intentionally extend beyond player horizontal padding to avoid clipping scaled text.
-- Keep lyric-provider parsing in locally maintained `.mjs`/HTML modules; playback rendering and timing are native Kotlin. Candidate `source: "amll"` identifies provenance, not a rendering dependency.
+- Keep lyric-provider parsing in native Kotlin and preserve the `LyricSong` cache contract. Candidate `source: "amll"` identifies provenance.
 
 ## Important Files
 
@@ -68,7 +69,7 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 - `FantasticApp.kt`, `MainActivity.kt`, `ui/AppShell.kt`: dependency container and app entry points.
 - `data/Prefs.kt`, `data/FantasticApi.kt`, `data/AppleCatalogApi.kt`: settings and server/API access.
 - `playback/PlaybackService.kt`, `playback/PlayerConnection.kt`, `playback/FantasticSessionPlayer.kt`, `playback/ApplePlaybackEngine.kt`: Media3 session ownership and source-specific playback adapters.
-- `lyrics/LyricsController.kt`, `lyrics/LyricsWebView.kt`: lyric loading, parser bridge, and WebView lifecycle.
+- `lyrics/LyricsController.kt`, `lyrics/LyricParser.kt`: lyric loading, caching, and the native parser entry point.
 - `lyrics/NativeLyricsView.kt`, `lyrics/LyricInkView.kt`, `lyrics/LyricMotion.kt`: native lyric list, Canvas rendering, and animation curves.
 - Root `LICENSE` is Apache-2.0 and `app/build.gradle.kts` copies it into the APK assets during `preBuild`.
 - `app/build.gradle.kts`, root `build.gradle.kts`, `settings.gradle.kts`, and `gradle.properties`: Android and Kotlin build configuration.
@@ -80,7 +81,7 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 ## Runtime/Tooling Preferences
 
 - CI uses Temurin JDK 17 and Gradle 8.11.1. Kotlin is 2.1.0, AGP is 8.7.3, compile/target SDK is 35, minimum SDK is 26, and Java/Kotlin output targets 17.
-- No Bun, Node.js, or JavaScript package manager is required. The WebView loads `.mjs` ES modules from Android assets with JavaScript MIME.
+- Android builds and runtime require only the Android and Gradle toolchain.
 - Keep downloaded tools, temporary build setup, and diagnostic artifacts under ignored `.work/`. `app/debug.keystore` is a public debug key, not a production signing secret. `GITHUB_RUN_NUMBER` sets version code and `GITHUB_SHA` supplies the diagnostic build identity.
 
 ## Testing & QA
@@ -88,4 +89,4 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 - The repository currently has no automated test sources, fixtures, test-only dependencies, or coverage threshold. Do not add, modify, or run automated tests/assertions unless explicitly requested.
 - CI builds the debug APK and publishes a nightly release from `main`; it has no device-install job.
 - Build success does not verify the RecyclerView/Canvas lyric surface or network-backed playback. Device, server, and playback acceptance is performed manually; state explicitly which such checks were not run.
-- In Settings → 歌词诊断, tap the report to copy lyric status/build details; WebView load errors use the `FantasticLyrics` Logcat tag.
+- In Settings → 歌词诊断, tap the report to copy lyric status/build details. The `FantasticLyrics` Logcat tag records lyric requests, parsing, timings, and fallbacks.

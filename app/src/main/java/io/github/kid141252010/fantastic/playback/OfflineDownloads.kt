@@ -5,7 +5,6 @@ import android.content.Intent
 import android.util.AtomicFile
 import android.util.Log
 import androidx.core.content.ContextCompat
-import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
@@ -49,7 +48,7 @@ internal data class OfflineDownload(
 internal data class OfflineAudio(val file: File, val quality: String)
 
 /** Durable files are separate from the evictable streaming cache. One worker owns the active file. */
-internal class OfflineDownloads(private val context: Context, private val prefs: Prefs, api: FantasticApi) {
+internal class OfflineDownloads(private val context: Context, private val prefs: Prefs, private val transfer: AudioFileTransfer) {
     private val directory = File(context.noBackupFilesDir, "offline-audio")
     private val index = AtomicFile(File(directory, "downloads.json"))
     private val json = Json { ignoreUnknownKeys = true }
@@ -57,7 +56,6 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
     val entries = state.asStateFlow()
     private val updates = Channel<List<OfflineDownload>>(Channel.CONFLATED)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val transfer = AudioFileTransfer(context, api)
     private var ready = readyIndex(state.value)
     private var active: Job? = null
     private var workerRunning = false

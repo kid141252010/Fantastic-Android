@@ -1,22 +1,22 @@
 # 歌词渲染器
 
-`LyricsController` 加载歌词并控制同步。`lyrics.mjs` 整理各音源的候选数据，`ttml.mjs` 在 `WebViewAssetLoader` 中解析 TTML。`NativeLyricsView` 用 RecyclerView 布局，`LyricInkView` 用 Canvas 绘制，`LyricMotion.kt` 保存时序和曲线。AMLL 提供歌词数据，播放界面由 Android 原生渲染。
+`LyricsController` 加载歌词并控制同步。`LyricParser` 在 `Dispatchers.Default` 选择候选源、解析 TTML 或计时文本，并组装可序列化的 `LyricSong`。`NativeLyricsView` 用 RecyclerView 布局，`LyricInkView` 用 Canvas 绘制，`LyricMotion.kt` 保存时序和曲线。AMLL 提供歌词数据。
 
-解析模块由本项目维护，需保留 `parseFantasticLyrics`、`ready` 和 `status` 桥接协议。
+原生解析模块分为 TTML XML 读取、网易云计时文本和 QQ 注释对齐。切歌会取消在途解析。
 
 ## 歌词来源与缓存
 
 - 默认参数下并行请求 Apple 官方歌词与 AMLL TTML。AMLL 按 `appleMusicId` 匹配。若结果可用，则显示该结果并取消尚未完成的官方请求。若未收录、请求失败或内容无效，则读取已发起的官方请求。切歌取消两路请求。AMLL 地址取自当前 Fantastic `/assets/host.js` 的 `amllApi`。缺省时使用公共词库地址。[AMLL 接口](https://amll.dev/reference/http-api/native.html)
 - Apple 官方歌词默认使用 `language=zh-Hans-CN`、`script=zh-Latn`。自定义语言或字形以及修改设置后的同曲刷新走官方接口。暂停或缓冲时将同曲刷新合并到恢复播放。`language` 用于选择 TTML 译文，`script` 作为请求参数传给服务端。
-- QQ 的有效 AMLL 候选优先于待补注释的 QRC。走 QRC 时按返回的标志补取可用音译和译文，再由 `qrc-annotations.mjs` 对齐。网易云歌词使用返回的 YRC、LRC 及其注释。
-- 成功解析的整首歌词保存到 16 MiB 独立磁盘缓存。缓存区分音源、服务地址、曲目以及 Apple 店面、语言、字形和来源策略。「设置 → 歌词诊断」和 `FantasticLyrics` 记录缓存、来源、耗时及回退原因。单次解析超时为 15 秒。
+- QQ 的有效 AMLL 候选优先于待补注释的 QRC。走 QRC 时按返回的标志补取可用音译和译文，再由 `NativeQrcAnnotations` 对齐。网易云歌词使用返回的 YRC、LRC 及其注释。
+- 成功解析的整首歌词保存到 `lyrics-v1` 磁盘缓存，总容量 16 MiB，单文档上限 4 MiB。缓存区分音源、服务地址、曲目以及 Apple 店面、语言、字形和来源策略。命中旧缓存时直接读取 `LyricSong`。「设置 → 歌词诊断」和 `FantasticLyrics` 记录缓存、来源、耗时及回退原因。单次解析超时为 15 秒。
 
 ## 时间轴与排版
 
 - 播放器每 500ms 提供一次播放锚点，歌词用单调时钟外推。超过 30ms 的偏差触发重锚。普通回调维持显示时间单调，显式跳转允许回到更早的词。暂停冻结歌词时钟。同曲跳转沿原位移曲线更新列表，首次载入和切歌直接定位。
 - TTML 中有效的 `<p begin/end>` 作为独立段落时间保存。缺失或零长时沿用行时间。逐词扫亮和点按跳转继续使用原始时间包络。首组和逐句提前 500ms 准备，后续逐词组按上一时间组末行的位移时长准备。仅新增成员时提交新的强调集合。间奏按自己的准备点切入，组尾决定位移时长与错峰。[Apple TTML 时间规则](https://help.apple.com/itc/videoaudioassetguide/en.lproj/itcd7579a252.html#itcd1f730b22)
 - 背景声部随主行激活向下展开。展开时长为该行位移时长 `D`，从同一激活点延迟 `round(.85 × D)` 后淡入并放大。展开期间背景声部裁剪到实际行高。正文、遮罩和注释使用同一组透明度与缩放。退场在淡出和缩放结束后回收高度。
-- 逐词对唱根据 TTML 的 `ttm:agent` 声部及文字方向排版。启用时反向行使用可用宽度的 85%。按物理对齐侧归属词间空白，扫亮方向取实际文字方向。配对音译优先使用开始时间，必要时以结束时间区分。不能可靠配对时显示整句音译。中西文自动间距为 `.125em`，只影响绘制和折行。
+- 逐词对唱根据 TTML 的 `ttm:agent` 声部及文字方向排版。启用时反向行使用可用宽度的 85%。行首、行尾和角色节点边界的空白运行会去掉。可见词之间折叠为一个 ASCII 空格，并按物理对齐侧归属：左侧对齐追加到前一个词，右侧对唱放到后一个词。扫亮方向取实际文字方向。配对音译优先使用开始时间，必要时以结束时间区分。不能可靠配对时显示整句音译。中西文自动间距为 `.125em`，只影响绘制和折行。
 - 逐词主词与伴唱为 34/22sp。对应音译和译文为 20/14sp，逐词译文保持 18% 透明度。逐句译文保持白色 100%，静态译文使用 15sp 和次级标签色。译文与音译的横向缩放锚点跟随主词方向，各块以实际底边为纵向锚点。创作者文字保持 22sp 与约 45% 透明度。
 - 逐词扫亮和光晕在字形层使用 `DST_IN`，歌词视口应用上下渐隐后通过 `ADD` 叠到封面背景。物理行各自维护遮罩。CJK 的物理行末附加 500ms 线性扫尾，音译使用自身词宽和扫亮方向。
 

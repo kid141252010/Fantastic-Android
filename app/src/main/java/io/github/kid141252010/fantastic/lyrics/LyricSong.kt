@@ -2,8 +2,6 @@ package io.github.kid141252010.fantastic.lyrics
 
 import kotlinx.serialization.Serializable
 
-internal data class LyricShareLine(val text: String, val timestampMs: Long?)
-
 /** Milliseconds in the audio timeline. Candidate selection and TTML dialect parsing are separate from drawing. */
 @Serializable
 internal data class LyricSong(

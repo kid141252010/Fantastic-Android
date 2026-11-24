@@ -49,7 +49,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.kid141252010.fantastic.lyrics.LyricsController
-import io.github.kid141252010.fantastic.lyrics.LyricShareLine
 import io.github.kid141252010.fantastic.playback.PlayerState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -186,7 +185,6 @@ internal fun LyricsPlayerPane(
     pronunciationAvailable: Boolean,
     onTranslationChange: (Boolean) -> Unit,
     onPronunciationChange: (Boolean) -> Unit,
-    onShare: (List<LyricShareLine>, Int) -> Unit,
     onSheetDragBy: (Float) -> Boolean,
     onSheetScrollEnd: (Float, Float) -> Boolean,
     header: @Composable () -> Unit,
@@ -241,7 +239,6 @@ internal fun LyricsPlayerPane(
                                 view.isNestedScrollingEnabled = interactive
                             }
                             view.setControlsInset(controlInsetPx, controlsMaskVisibility)
-                            view.onShareLyrics = if (interactive) onShare else null
                             view.onUserScroll = onLyricsScroll
                             // Only timeout-hidden transport takes priority over lower-zone lyric touches.
                             // After user scrolling, the same tap may reveal transport without blocking the row.

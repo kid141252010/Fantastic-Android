@@ -4,8 +4,4 @@
         <item name="android:windowEnterAnimation">@anim/fantastic_action_sheet_enter</item>
         <item name="android:windowExitAnimation">@anim/fantastic_action_sheet_exit</item>
     </style>
-    <style name="FantasticLyricShareAnimation" parent="FantasticActionSheetAnimation">
-        <item name="android:windowEnterAnimation">@anim/fantastic_lyric_share_enter</item>
-        <item name="android:windowExitAnimation">@anim/fantastic_lyric_share_exit</item>
-    </style>
 </resources>

@@ -25,6 +25,7 @@ import android.text.TextPaint
 import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import io.github.kid141252010.fantastic.ui.theme.LocalAmFonts
 import io.github.kid141252010.fantastic.R
 import java.text.Bidi
@@ -255,6 +256,18 @@ internal class LyricInkView(context: Context) : View(context) {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             val inset = pressInsetFor(width)
             touchActivationAllowed = event.x >= inset && event.x < width - inset
+        }
+        if (event.actionMasked == MotionEvent.ACTION_UP &&
+            event.eventTime - event.downTime >= ViewConfiguration.getLongPressTimeout()
+        ) {
+            // Cancel the deferred click when the user held the row.
+            event.action = MotionEvent.ACTION_CANCEL
+            return try {
+                super.dispatchTouchEvent(event)
+            } finally {
+                event.action = MotionEvent.ACTION_UP
+                touchActivationAllowed = true
+            }
         }
         val handled = super.dispatchTouchEvent(event)
         if (!touchActivationAllowed) {

@@ -7,7 +7,12 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.put
+import okhttp3.HttpUrl
 import okhttp3.Request
 import java.io.IOException
 import java.net.URLEncoder
@@ -39,6 +44,56 @@ class QqApi(private val api: FantasticApi) {
 
     suspend fun suggest(query: String): JsonObject = getJson("/qq/suggest?${params(mapOf("q" to query))}")
     suspend fun song(id: String): JsonObject = getJson("/qq/song/${mid(id)}")
+
+    internal suspend fun songCredits(id: String): List<SongCreditSection> {
+        val songMid = mid(id)
+        val payload = buildJsonObject {
+            put("song_detail", buildJsonObject {
+                put("module", "music.pf_song_detail_svr")
+                put("method", "get_song_detail")
+                put("param", buildJsonObject {
+                    put("song_mid", songMid)
+                    put("song_type", 0)
+                })
+            })
+        }
+        val url = HttpUrl.Builder().scheme("https").host("u.y.qq.com")
+            .addPathSegments("cgi-bin/musicu.fcg")
+            .addQueryParameter("data", payload.toString())
+            .build()
+        val request = Request.Builder().url(url).header("Accept", "application/json").get().build()
+        val invalid = "Invalid QQ song credits response"
+        val root = try {
+            getJson(request)
+        } catch (error: InvalidJsonObject) {
+            throw IOException(invalid, error)
+        }
+        val detail = root["song_detail"] as? JsonObject ?: throw IOException(invalid)
+        val data = detail["data"] as? JsonObject ?: throw IOException(invalid)
+        val returnedMid = ((data["track_info"] as? JsonObject)?.get("mid") as? JsonPrimitive)
+            ?.takeIf { it.isString }?.content
+        if (!root.hasSuccessCode() || !detail.hasSuccessCode() || returnedMid != songMid) {
+            throw IOException(invalid)
+        }
+        val field = data["info"] ?: return emptyList()
+        val info = field as? JsonArray ?: throw IOException(invalid)
+        val entries = buildSet {
+            for (item in info) {
+                val row = item as? JsonObject ?: continue
+                val label = (row["title"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: continue
+                val role = songCreditRole(label) ?: continue
+                val people = row["content"] as? JsonArray ?: continue
+                val roles = listOf(role)
+                for (person in people) {
+                    val name = ((person as? JsonObject)?.get("value") as? JsonPrimitive)
+                        ?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                    add(SongCredit(name, roles))
+                }
+            }
+        }
+        return if (entries.isEmpty()) emptyList() else listOf(SongCreditSection(null, entries.toList()))
+    }
+
     suspend fun album(id: String): JsonObject = getJson("/qq/album/${mid(id)}")
     suspend fun artist(id: String): JsonObject = getJson("/qq/artist/${mid(id)}")
     suspend fun artistSongs(id: String, limit: Int = 50, offset: Int = 0): JsonObject =
@@ -53,14 +108,21 @@ class QqApi(private val api: FantasticApi) {
     fun playUrl(id: String, quality: String): String = api.qqPlayUrl(mid(id), quality)
     fun downloadUrl(id: String, quality: String): String = api.url("/qq/song/${mid(id)}/download?quality=${enc(quality)}")
 
-    private suspend fun getJson(path: String): JsonObject = withContext(Dispatchers.IO) {
-        api.client.newCall(Request.Builder().url(api.url(path)).build()).execute().use { response ->
+    private suspend fun getJson(path: String): JsonObject = getJson(Request.Builder().url(api.url(path)).build())
+
+    private suspend fun getJson(request: Request): JsonObject = withContext(Dispatchers.IO) {
+        api.client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val body = response.body?.string().orEmpty()
             if (body.isBlank()) throw IOException("HTTP ${response.code}：响应为空")
-            json.parseToJsonElement(body) as? JsonObject ?: throw IOException("Invalid QQ response")
+            json.parseToJsonElement(body) as? JsonObject ?: throw InvalidJsonObject()
         }
     }
+
+    private class InvalidJsonObject : IOException("Invalid QQ response")
+
+    private fun JsonObject.hasSuccessCode(): Boolean =
+        (this["code"] as? JsonPrimitive)?.let { !it.isString && it.intOrNull == 0 } == true
 
     private fun page(limit: Int, offset: Int) = params(mapOf("limit" to limit.coerceIn(1, 100).toString(), "offset" to offset.coerceIn(0, 10_000).toString()))
     private fun mid(value: String): String = value.takeIf { it.matches(Regex("[0-9A-Za-z]{1,32}")) } ?: throw IllegalArgumentException("Invalid QQ media id")
