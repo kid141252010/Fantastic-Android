@@ -1,6 +1,7 @@
 package io.github.kid141252010.fantastic.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -10,11 +11,16 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.intOrNull
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Request
+import okhttp3.Response
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /** Native client for Fantastic's server-side NetEase adapter. Account credentials stay on the server. */
 class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val prefs: Prefs) {
@@ -23,6 +29,7 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
         coerceInputValues = true
         explicitNulls = false
     }
+    private val playClient by lazy { api.client.newBuilder().followRedirects(false).followSslRedirects(false).build() }
 
     suspend fun capabilities(): NeteaseCapabilities = get("/ncm/capabilities", NeteaseCapabilities.serializer()).let { response ->
         response.copy(qualities = response.qualities.filter { it.quality in Prefs.NETEASE_QUALITY_IDS })
@@ -108,15 +115,40 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
 
     /** Resolve just before playback. The returned signed CDN URL is only held in this result. */
     suspend fun resolvePlay(id: String, quality: String = "standard", server: String = prefs.baseUrl): NeteaseAudio {
-        val checkedId = validId(id)
-        val checkedQuality = validQuality(quality)
-        val audio = get(
-            "/ncm/song/$checkedId/play?quality=$checkedQuality",
-            NeteaseAudio.serializer(),
-            server,
-        )
+        val base = SourceStatus.normalizeBaseUrl(server) ?: throw IOException("服务器地址无效")
+        val request = Request.Builder().url("$base/ncm/song/${validId(id)}/play?quality=${validQuality(quality)}").build()
+        val payload = readPlay(request)
+        val audio = try {
+            json.decodeFromString(NeteaseAudio.serializer(), payload)
+        } catch (error: SerializationException) {
+            throw IOException("网易云播放入口响应格式无效", error)
+        }
         validateCdnUrl(audio.url)
         return audio
+    }
+
+    private suspend fun readPlay(request: Request): String = suspendCancellableCoroutine { continuation ->
+        val call = playClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(NeteasePlayFailure(null, e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val payload = response.use {
+                        if (!it.isSuccessful) throw NeteasePlayFailure(it.code)
+                        val body = it.body?.source() ?: throw IOException("网易云播放入口响应为空")
+                        if (body.request(65_537L)) throw IOException("网易云播放入口响应过大")
+                        body.readUtf8()
+                    }
+                    if (continuation.isActive) continuation.resume(payload)
+                } catch (error: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+            }
+        })
     }
 
     /** Candidate text and optional original translation/pronunciation text; no account data is returned. */
@@ -215,6 +247,10 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
         const val MAX_ID = "9223372036854775807"
     }
 }
+
+internal class NeteasePlayFailure(val status: Int?, cause: IOException? = null) : IOException(
+    if (status == null) "网易云播放入口连接失败" else "网易云播放入口请求失败（HTTP $status）", cause,
+)
 
 @Serializable
 enum class NeteaseSearchKind(val wireValue: String) {

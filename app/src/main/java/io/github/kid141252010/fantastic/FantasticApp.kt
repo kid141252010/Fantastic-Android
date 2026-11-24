@@ -9,6 +9,7 @@ import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.QqApi
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.AudioFileTransfer
+import io.github.kid141252010.fantastic.playback.NativeAudioHttp
 import io.github.kid141252010.fantastic.playback.OfflineDownloads
 import io.github.kid141252010.fantastic.playback.PlaybackCache
 import io.github.kid141252010.fantastic.playback.PlayerConnection
@@ -22,8 +23,10 @@ class FantasticApp : Application() {
     lateinit var api: FantasticApi
         private set
     val player: PlayerConnection by lazy { PlayerConnection(this) }
-    internal val downloads by lazy { OfflineDownloads(this, prefs, api) }
-    internal val playbackCache by lazy { PlaybackCache(this, prefs, AudioFileTransfer(this, api)) }
+    internal val audioHttp by lazy { NativeAudioHttp(api.client) }
+    private val audioTransfer by lazy { AudioFileTransfer(this, audioHttp, netease) }
+    internal val downloads by lazy { OfflineDownloads(this, prefs, audioTransfer) }
+    internal val playbackCache by lazy { PlaybackCache(this, prefs, audioTransfer) }
     val apple by lazy { AppleCatalogApi(api, prefs, File(cacheDir, "apple-motion-artwork.json")) }
     internal val motionArtworkDataSource by lazy { createMotionArtworkDataSource(this) }
     val netease by lazy { NeteaseApi(api, prefs) }
