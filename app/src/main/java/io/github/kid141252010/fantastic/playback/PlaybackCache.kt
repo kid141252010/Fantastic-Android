@@ -333,8 +333,11 @@ internal class PlaybackCache(context: Context, private val prefs: Prefs, private
             true
         } catch (error: CancellationException) {
             throw error
-        } catch (error: IOException) {
+        } catch (error: Exception) {
             Log.w(TAG, "未缓存 ${entry.key.source}/${entry.key.trackId}：${error.message}")
+            false
+        } catch (error: OutOfMemoryError) {
+            Log.w(TAG, "未缓存 ${entry.key.source}/${entry.key.trackId}：内存不足")
             false
         } finally {
             withContext(NonCancellable + io) {

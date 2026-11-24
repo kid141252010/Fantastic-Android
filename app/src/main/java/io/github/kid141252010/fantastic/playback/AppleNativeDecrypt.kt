@@ -244,6 +244,8 @@ internal class AppleNativeDecrypt(
     }
 
     fun extractAlacCookie(init: ByteArray): AppleNativeInit = AppleMp4(init).alacInit()
+    fun sampleDurations(fragment: ByteArray): List<Long> = AppleMp4(fragment).sampleDurations()
+
 
     fun close() = synchronized(templates) {
         closed = true
@@ -781,6 +783,46 @@ private class AppleMp4(private val bytes: ByteArray) {
         validateSamples(samples)
         return samples
     }
+    fun sampleDurations(): List<Long> {
+        val durations = ArrayList<Long>()
+        var hasMoof = false
+        for (moof in roots) {
+            if (moof.type != MOOF) continue
+            hasMoof = true
+            for (traf in children(moof)) {
+                if (traf.type != TRAF) continue
+                val fields = children(traf)
+                val tfhd = fields.firstOrNull { it.type == TFHD } ?: invalid("缺少 tfhd")
+                val flags = read32(tfhd, tfhd.body) and 0xffffff
+                if (flags and 0x01 != 0) invalid("不支持 tfhd base-data-offset")
+                var cursor = tfhd.body + 8
+                if (flags and 0x02 != 0) cursor += 4
+                val defaultDuration = if (flags and 0x08 != 0) {
+                    val value = read32(tfhd, cursor).toLong() and 0xffffffffL
+                    cursor += 4
+                    value
+                } else 0L
+                for (trun in fields) {
+                    if (trun.type != TRUN) continue
+                    val runFlags = read32(trun, trun.body) and 0xffffff
+                    val count = read32(trun, trun.body + 4).toLong() and 0xffffffffL
+                    var sampleCursor = trun.body + 8
+                    if (runFlags and 0x01 != 0) sampleCursor += 4
+                    if (runFlags and 0x04 != 0) sampleCursor += 4
+                    val stride = Integer.bitCount(runFlags and 0x0f00) * 4
+                    if (sampleCursor.toLong() + count * stride > trun.end || count > bytes.size) invalid("trun 样本表越界")
+                    repeat(count.toInt()) {
+                        durations.add(if (runFlags and 0x100 != 0) bytes.u32(sampleCursor) else defaultDuration)
+                        sampleCursor += stride
+                    }
+                }
+            }
+        }
+        if (!hasMoof) invalid("缺少 moof")
+        if (durations.isEmpty()) invalid("没有样本")
+        return durations
+    }
+
 
     fun validateSamples(samples: List<IntRange>) {
         val mdats = roots.filter { it.type == MDAT }

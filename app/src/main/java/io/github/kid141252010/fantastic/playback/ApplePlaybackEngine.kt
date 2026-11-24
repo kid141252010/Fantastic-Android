@@ -47,6 +47,7 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 internal data class ApplePlaybackProfile(val network: String, val quality: String, val spatial: String)
 
@@ -579,12 +580,13 @@ private class AlacOutput(
     private val onError: (Throwable) -> Unit,
 ) : Closeable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val reportedPositionMs = AtomicLong(startPositionMs)
+    private val playing = AtomicBoolean(false)
     @Volatile private var paused = false
     @Volatile private var closed = false
-    @Volatile private var audioTrack: AudioTrack? = null
+    private var playbackFramesBase = 0L
+    private var lastPlaybackHead = 0L
     private var job: Job? = null
-    private var basePositionMs = startPositionMs
-    private var sampleRate = track.variant.sampleRate
 
     fun start() {
         job = scope.launch { run() }
@@ -592,31 +594,20 @@ private class AlacOutput(
 
     fun pause() {
         paused = true
-        audioTrack?.pause()
     }
 
     fun resume() {
         paused = false
-        audioTrack?.play()
     }
 
-    fun isPlaying(): Boolean = !paused && !closed && audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING
+    fun isPlaying(): Boolean = playing.get() && !paused && !closed
 
-    fun positionMs(): Long {
-        val rate = sampleRate.coerceAtLeast(1)
-        val frames = audioTrack?.playbackHeadPosition?.toLong()?.and(0xffffffffL) ?: 0L
-        return (basePositionMs + frames * 1_000L / rate).coerceAtMost(track.playlist.totalDurationMs)
-    }
+    fun positionMs(): Long = reportedPositionMs.get()
 
     override fun close() {
         closed = true
+        playing.set(false)
         job?.cancel()
-        audioTrack?.let { output ->
-            runCatching { output.pause() }
-            runCatching { output.flush() }
-            runCatching { output.release() }
-        }
-        audioTrack = null
         scope.cancel()
     }
 
@@ -624,8 +615,9 @@ private class AlacOutput(
         val cookie = track.alacCookie ?: throw IOException("Apple ALAC 配置缺失")
         val decoder = AlacDecoder.open(cookie.copyOfRange(4, cookie.size))
         if (decoder == 0L) throw IOException("Apple ALAC 解码器初始化失败")
+        var output: AudioTrack? = null
         try {
-            sampleRate = AlacDecoder.sampleRate(decoder).takeIf { it > 0 } ?: track.variant.sampleRate
+            val sampleRate = AlacDecoder.sampleRate(decoder).takeIf { it > 0 } ?: track.variant.sampleRate
             val channels = AlacDecoder.channels(decoder).takeIf { it > 0 } ?: track.alacChannels
             val bits = AlacDecoder.bits(decoder).takeIf { it > 0 } ?: track.alacBits
             val encoding = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_FLOAT
@@ -637,7 +629,7 @@ private class AlacOutput(
             }
             val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
             if (minBuffer == AudioTrack.ERROR_BAD_VALUE) throw IOException("Apple ALAC 音频格式不可播放")
-            val output = AudioTrack.Builder()
+            val trackOutput = AudioTrack.Builder()
                 .setAudioAttributes(
                     PlatformAudioAttributes.Builder()
                         .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
@@ -654,11 +646,12 @@ private class AlacOutput(
                 .setBufferSizeInBytes((minBuffer * 2).coerceAtLeast(32 * 1024))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
-            audioTrack = output
-            output.play()
+            output = trackOutput
+            trackOutput.play()
+            playing.set(true)
             var segmentIndex = track.playlist.segments.indexForPosition(startPositionMs)
             var segmentOffsetMs = track.playlist.segments.take(segmentIndex).sumOf { it.durationMs }
-            basePositionMs = segmentOffsetMs
+            val startSegment = segmentIndex
             var pending = coroutineScope {
                 async { decryptor.fetchSegment(track, track.playlist.segments[segmentIndex]) }
             }
@@ -668,28 +661,34 @@ private class AlacOutput(
                 pending = if (nextIndex < track.playlist.segments.size) {
                     coroutineScope { async { decryptor.fetchSegment(track, track.playlist.segments[nextIndex]) } }
                 } else pending
-                var skipFrames = if (segmentIndex == track.playlist.segments.indexForPosition(startPositionMs)) {
+                var skipFrames = if (segmentIndex == startSegment) {
                     ((startPositionMs - segmentOffsetMs) * sampleRate / 1_000L).coerceAtLeast(0L)
                 } else 0L
                 for (range in fetched.sampleRanges) {
                     if (closed) break
+                    while (paused && !closed) {
+                        if (trackOutput.playState == AudioTrack.PLAYSTATE_PLAYING) trackOutput.pause()
+                        playing.set(false)
+                        publishPosition(trackOutput, sampleRate)
+                        delay(20L)
+                    }
+                    if (closed) break
+                    if (trackOutput.playState != AudioTrack.PLAYSTATE_PLAYING) trackOutput.play()
+                    playing.set(true)
                     val packet = fetched.bytes.copyOfRange(range.first, range.last + 1)
                     val repaired = decryptor.repairAlacPacket(packet, track.alacFrameLength, channels, bits)
                     val pcm = AlacDecoder.decode(decoder, repaired)
                     if (pcm.isEmpty()) throw IOException("Apple ALAC 分片解码失败")
                     val bytesPerFrame = channels * if (bits == 16) 2 else 4
-                    if (skipFrames > 0L) {
+                    val offset = if (skipFrames > 0L) {
                         val discard = (skipFrames * bytesPerFrame).coerceAtMost(pcm.size.toLong()).toInt()
                         skipFrames -= discard / bytesPerFrame
-                        if (discard >= pcm.size) continue
-                        output.write(pcm, discard, pcm.size - discard)
-                    } else {
-                        while (paused && !closed) delay(20L)
-                        output.write(pcm, 0, pcm.size)
-                    }
+                        discard
+                    } else 0
+                    if (offset < pcm.size) writeFully(trackOutput, pcm, offset, pcm.size - offset)
+                    publishPosition(trackOutput, sampleRate)
                 }
                 segmentOffsetMs += fetched.durationMs
-                basePositionMs = startPositionMs.takeIf { segmentIndex == track.playlist.segments.indexForPosition(it) } ?: basePositionMs
                 segmentIndex = nextIndex
             }
             if (!closed) onFinished()
@@ -698,9 +697,33 @@ private class AlacOutput(
         } catch (error: Throwable) {
             if (!closed) onError(error)
         } finally {
+            playing.set(false)
+            output?.let { trackOutput ->
+                runCatching { trackOutput.pause() }
+                runCatching { trackOutput.flush() }
+                runCatching { trackOutput.release() }
+            }
             AlacDecoder.close(decoder)
-            audioTrack?.let { runCatching { it.release() } }
-            audioTrack = null
+        }
+    }
+
+    private fun publishPosition(output: AudioTrack, sampleRate: Int) {
+        val head = output.playbackHeadPosition.toLong() and 0xffffffffL
+        if (head < lastPlaybackHead) playbackFramesBase += 1L shl 32
+        lastPlaybackHead = head
+        val rate = sampleRate.coerceAtLeast(1)
+        reportedPositionMs.set(
+            (startPositionMs + (playbackFramesBase + head) * 1_000L / rate)
+                .coerceAtMost(track.playlist.totalDurationMs.coerceAtLeast(startPositionMs)),
+        )
+    }
+
+    private fun writeFully(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int) {
+        var written = 0
+        while (written < length) {
+            val count = output.write(pcm, offset + written, length - written, AudioTrack.WRITE_BLOCKING)
+            if (count <= 0) throw IOException("Apple ALAC 音频输出失败")
+            written += count
         }
     }
 
@@ -710,6 +733,6 @@ private class AlacOutput(
             if (positionMs < elapsed + segment.durationMs) return index
             elapsed += segment.durationMs
         }
-        return (lastIndex).coerceAtLeast(0)
+        return lastIndex.coerceAtLeast(0)
     }
 }
