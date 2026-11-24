@@ -250,7 +250,6 @@ internal class ApplePlaybackEngine(
         _state.value = state.copy(ended = false, seekGeneration = state.seekGeneration + 1)
     }
 
-    fun skipTo(index: Int): Boolean = false
 
     fun setPlaying(playing: Boolean) = onMain {
         if (!playing) {

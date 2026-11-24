@@ -65,12 +65,16 @@ class PlayerConnection(private val context: Context) {
     private var queueRevision = 0L
     private var queueSignature: List<Int> = emptyList()
     private var currentIndex = -1
+    private var lastMediaId: String? = null
+    private var lastOccurrence = -1
+    private var discontinuityRefreshPending = false
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) = refresh()
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
             seekGeneration++
+            discontinuityRefreshPending = true
             refresh()
         }
     }
@@ -118,8 +122,12 @@ class PlayerConnection(private val context: Context) {
         pending = null
         queueSignature = emptyList()
         currentIndex = -1
+        lastMediaId = null
+        lastOccurrence = -1
+        discontinuityRefreshPending = false
         _state.value = PlayerState()
         context.stopService(Intent(context, PlaybackService::class.java))
+
     }
 
     private fun whenReady(block: (MediaController) -> Unit) {
@@ -224,9 +232,15 @@ class PlayerConnection(private val context: Context) {
             currentIndex = selected
             queueRevision++
         }
+        val occurrence = item?.mediaMetadata?.extras?.getInt(KEY_OCCURRENCE, -1) ?: -1
+        if (item?.mediaId != lastMediaId || occurrence != lastOccurrence) {
+            if (!discontinuityRefreshPending) seekGeneration++
+            lastMediaId = item?.mediaId
+            lastOccurrence = occurrence
+        }
+        discontinuityRefreshPending = false
         val metadata = player.mediaMetadata
         val sessionExtras = player.sessionExtras
-        val occurrence = item?.mediaMetadata?.extras?.getInt(KEY_OCCURRENCE, -1) ?: -1
         val hasCurrentAudio = occurrence != -1 &&
             sessionExtras.getInt(PlaybackService.AUDIO_OCCURRENCE, -1) == occurrence &&
             sessionExtras.getString(PlaybackService.AUDIO_MEDIA_ID) == item?.mediaId &&
