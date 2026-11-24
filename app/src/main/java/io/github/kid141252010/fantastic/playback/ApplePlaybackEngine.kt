@@ -333,7 +333,7 @@ internal class ApplePlaybackEngine(
         _state.value = PlayerState()
     }
 
-    private fun beginPrepare(serial: Long, song: QueuedSong, startPositionMs: Long) {
+    private fun beginPrepare(serial: Long, song: QueuedSong) {
         val requestServer = server
         val requestProfile = profile
         val requestedQuality = userRequestedQuality
@@ -465,7 +465,7 @@ internal class ApplePlaybackEngine(
             durationMs = player.duration.takeIf { it > 0 } ?: state.durationMs,
             bufferedPositionMs = player.bufferedPosition,
         )
-        if (ended) activeCacheSource = null else if (playing) publishCache(if (track.widevine) "widevine-mse" else "mse")
+        if (ended) activeCacheSource = null else if (playing) publishCache(if (currentNative?.widevine == true) "widevine-mse" else "mse")
         if (ended) stopPoller() else schedulePoll()
     }
 

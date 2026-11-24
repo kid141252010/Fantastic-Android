@@ -35,6 +35,7 @@ data class LibraryEntry(
     val favoriteAt: Long = 0,
     val folderId: String = "",
     val metadata: JsonObject? = null,
+    val albumTracks: List<Track> = emptyList(),
 ) {
     val key: LibraryKey get() = LibraryKey(hit.source, hit.kind, hit.id)
     val isFavorite: Boolean get() = favoriteAt > 0
@@ -104,26 +105,27 @@ class MusicLibrary(context: Context) {
     }
 
     /** Add or refresh a catalog record without changing its favorite state or original add time. */
-    fun add(hit: CatalogHit) {
-        val clean = normalizeHit(hit) ?: return
-        commands.trySend { state ->
-            val key = LibraryKey(clean.source, clean.kind, clean.id)
-            val old = state.items.firstOrNull { it.key == key }
-            if (old == null && state.items.size >= MAX_ITEMS) return@trySend state
-            val entry = LibraryEntry(clean, old?.addedAt ?: now(), old?.favoriteAt ?: 0, old?.folderId.orEmpty(), old?.metadata)
-            state.copy(items = state.items.filterNot { it.key == key } + entry)
-        }
-    }
+    fun add(hit: CatalogHit, albumTracks: List<Track> = emptyList()) = save(hit, albumTracks, toggleFavorite = false)
 
     /** Favorite is an offline library action: favoriting also adds the item to the library. */
-    fun toggleFavorite(hit: CatalogHit) {
+    fun toggleFavorite(hit: CatalogHit, albumTracks: List<Track> = emptyList()) = save(hit, albumTracks, toggleFavorite = true)
+
+    private fun save(hit: CatalogHit, albumTracks: List<Track>, toggleFavorite: Boolean) {
         val clean = normalizeHit(hit) ?: return
         commands.trySend { state ->
             val key = LibraryKey(clean.source, clean.kind, clean.id)
-            val old = state.items.firstOrNull { it.key == key }
+            val index = state.items.indexOfFirst { it.key == key }
+            val old = state.items.getOrNull(index)
             if (old == null && state.items.size >= MAX_ITEMS) return@trySend state
-            val entry = LibraryEntry(clean, old?.addedAt ?: now(), if (old?.isFavorite == true) 0 else now(), old?.folderId.orEmpty(), old?.metadata)
-            state.copy(items = state.items.filterNot { it.key == key } + entry)
+            val tracks = if (clean.kind == "album" && albumTracks.isNotEmpty()) {
+                albumTracks.asSequence().filter { it.source == clean.source && it.albumId == clean.id }
+                    .distinctBy { it.id }.take(MAX_ITEMS).mapNotNull { normalizeHit(SearchCatalog.trackHit(it))?.track }.toList()
+            } else old?.albumTracks.orEmpty()
+            val favoriteAt = if (toggleFavorite) {
+                if (old?.isFavorite == true) 0 else now()
+            } else old?.favoriteAt ?: 0
+            val entry = LibraryEntry(clean, old?.addedAt ?: now(), favoriteAt, old?.folderId.orEmpty(), old?.metadata, tracks)
+            state.copy(items = if (index < 0) state.items + entry else state.items.toMutableList().apply { this[index] = entry })
         }
     }
 
@@ -384,9 +386,12 @@ class MusicLibrary(context: Context) {
 
     private fun parseEntry(raw: JsonObject, fallbackTime: Long): LibraryEntry? {
         val hit = parseHit(raw) ?: return null
+        val albumTracks = if (hit.kind == "album") raw.array("albumTracks").asSequence().take(MAX_ITEMS)
+            .mapNotNull { it.objectOrNull()?.let(::parseHit)?.track }
+            .filter { it.source == hit.source && it.albumId == hit.id }.distinctBy { it.id }.toList() else emptyList()
         return LibraryEntry(hit, raw.long("addedAt")?.validTime() ?: fallbackTime,
             raw.long("favorite")?.validTime() ?: raw.long("favoriteAt")?.validTime() ?: 0,
-            safeFolderRef(raw.string("folderId").orEmpty()), cleanMetadata(raw))
+            safeFolderRef(raw.string("folderId").orEmpty()), cleanMetadata(raw), albumTracks)
     }
 
     private fun parsePlaylist(raw: JsonObject, now: Long, availableTracks: Int): LibraryPlaylist? {
@@ -433,7 +438,10 @@ class MusicLibrary(context: Context) {
         val boundedAttributes = attributes?.takeIf { it.toString().length <= MAX_ATTRIBUTES_CHARS }
         val track = (extension?.get("track") ?: raw["track"])?.objectOrNull()?.let { parseTrack(it, source, id, title, subtitle, art) }
             ?: if (kind == "song") fallbackTrack(source, id, title, subtitle, raw.string("album").clean(300), art,
-                (extension?.long("durationMs") ?: raw.long("duration"))?.takeIf { it in 1..MAX_DURATION_MS } ?: 0) else null
+                (extension?.long("durationMs") ?: raw.long("duration"))?.takeIf { it in 1..MAX_DURATION_MS } ?: 0).copy(
+                    albumId = (extension?.string("albumId") ?: raw.string("albumId")).clean(128)
+                        .takeIf { validCatalogId(source, "album", it) }.orEmpty(),
+                ) else null
         return CatalogHit(source, kind, id, title, subtitle, art, track, explicit,
             extension?.boolean("detailOnly") ?: raw.boolean("detailOnly") ?: true, boundedAttributes)
     }
@@ -442,11 +450,18 @@ class MusicLibrary(context: Context) {
         val source = raw.string("source")?.let { value -> Source.entries.firstOrNull { it.mediaPrefix == value || it.name == value } } ?: expectedSource
         val id = raw.string("id")?.clean(128)?.takeIf { it.matches(ID_REGEX) } ?: expectedId
         if (source != expectedSource || id != expectedId) return null
-        return Track(id, source, raw.string("title").clean(300).ifBlank { title }, raw.string("artist").clean(300).ifBlank { subtitle },
-            raw.string("album").clean(300), cleanArtwork(raw.string("artworkTemplate")) ?: artwork,
-            raw.long("durationMs")?.takeIf { it in 0..MAX_DURATION_MS } ?: 0,
-            raw.string("artistId").clean(128).takeIf { validCatalogId(source, "artist", it) }.orEmpty(),
-            raw.string("albumId").clean(128).takeIf { validCatalogId(source, "album", it) }.orEmpty())
+        return Track(
+            id = id, source = source, title = raw.string("title").clean(300).ifBlank { title },
+            artist = raw.string("artist").clean(300).ifBlank { subtitle }, album = raw.string("album").clean(300),
+            artworkTemplate = cleanArtwork(raw.string("artworkTemplate")) ?: artwork,
+            durationMs = raw.long("durationMs")?.takeIf { it in 0..MAX_DURATION_MS } ?: 0,
+            artistId = raw.string("artistId").clean(128).takeIf { validCatalogId(source, "artist", it) }.orEmpty(),
+            albumId = raw.string("albumId").clean(128).takeIf { validCatalogId(source, "album", it) }.orEmpty(),
+            artistArtworkTemplate = cleanArtwork(raw.string("artistArtworkTemplate")),
+            albumArtist = raw.string("albumArtist").clean(300),
+            discNumber = raw.int("discNumber")?.coerceAtLeast(0) ?: 0,
+            trackNumber = raw.int("trackNumber")?.coerceAtLeast(0) ?: 0,
+        )
     }
 
     private fun normalizeHit(hit: CatalogHit): CatalogHit? {
@@ -454,10 +469,15 @@ class MusicLibrary(context: Context) {
         val title = hit.title.clean(300).ifBlank { hit.id }
         val subtitle = hit.subtitle.clean(300)
         val track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }?.let {
-            Track(it.id, it.source, it.title.clean(300).ifBlank { title }, it.artist.clean(300), it.album.clean(300),
-                cleanArtwork(it.artworkTemplate), it.durationMs.coerceIn(0, MAX_DURATION_MS),
-                it.artistId.clean(128).takeIf { id -> validCatalogId(it.source, "artist", id) }.orEmpty(),
-                it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty())
+            Track(
+                id = it.id, source = it.source, title = it.title.clean(300).ifBlank { title }, artist = it.artist.clean(300),
+                album = it.album.clean(300), artworkTemplate = cleanArtwork(it.artworkTemplate),
+                durationMs = it.durationMs.coerceIn(0, MAX_DURATION_MS),
+                artistId = it.artistId.clean(128).takeIf { id -> validCatalogId(it.source, "artist", id) }.orEmpty(),
+                albumId = it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty(),
+                artistArtworkTemplate = cleanArtwork(it.artistArtworkTemplate), albumArtist = it.albumArtist.clean(300),
+                discNumber = it.discNumber.coerceAtLeast(0), trackNumber = it.trackNumber.coerceAtLeast(0),
+            )
         }
         val attrs = hit.attributes?.takeIf { it.toString().length <= MAX_ATTRIBUTES_CHARS }
         return CatalogHit(hit.source, hit.kind, hit.id, title, subtitle, cleanArtwork(hit.artwork), track,
@@ -492,7 +512,15 @@ class MusicLibrary(context: Context) {
         put("version", FORMAT_VERSION)
         put("exportedAt", java.time.Instant.now().toString())
         put("items", buildJsonArray {
-            state.items.forEach { entry -> add(encodeHit(entry.hit, entry.addedAt, entry.favoriteAt, entry.folderId, metadata = entry.metadata)) }
+            state.items.forEach { entry ->
+                val hit = encodeHit(entry.hit, entry.addedAt, entry.favoriteAt, entry.folderId, metadata = entry.metadata)
+                add(if (entry.albumTracks.isEmpty()) hit else buildJsonObject {
+                    hit.forEach { (key, value) -> put(key, value) }
+                    put("albumTracks", buildJsonArray {
+                        entry.albumTracks.forEach { add(encodeHit(SearchCatalog.trackHit(it))) }
+                    })
+                })
+            }
         })
         put("playlists", buildJsonArray {
             state.playlists.forEach { playlist ->
@@ -525,8 +553,9 @@ class MusicLibrary(context: Context) {
             put("track", buildJsonObject {
                 put("id", track.id); put("source", track.source.mediaPrefix); put("title", track.title)
                 put("artist", track.artist); put("album", track.album); put("artworkTemplate", track.artworkTemplate ?: "")
-                put("durationMs", track.durationMs)
-                put("artistId", track.artistId); put("albumId", track.albumId)
+                put("durationMs", track.durationMs); put("artistId", track.artistId); put("albumId", track.albumId)
+                put("artistArtworkTemplate", track.artistArtworkTemplate ?: ""); put("albumArtist", track.albumArtist)
+                put("discNumber", track.discNumber); put("trackNumber", track.trackNumber)
             })
         }
         hit.attributes?.let { put("attributes", it) }

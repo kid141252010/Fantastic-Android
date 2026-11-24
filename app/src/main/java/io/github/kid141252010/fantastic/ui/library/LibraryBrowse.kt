@@ -41,6 +41,7 @@ import io.github.kid141252010.fantastic.data.LibraryEntry
 import io.github.kid141252010.fantastic.data.LibraryKey
 import io.github.kid141252010.fantastic.data.LibraryPlaylist
 import io.github.kid141252010.fantastic.data.MusicLibrarySnapshot
+import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
@@ -60,26 +61,44 @@ internal enum class LibraryCategory(val title: String, val kind: String?, val ic
 /** Album entries include saved songs with a known album ID. The projection never alters the snapshot. */
 internal fun libraryAlbums(entries: List<LibraryEntry>): List<LibraryEntry> {
     val albums = LinkedHashMap<LibraryKey, LibraryEntry>()
-    for (entry in entries) {
-        if (entry.hit.kind == "album") albums[entry.key] = entry
-    }
+    for (entry in entries) if (entry.hit.kind == "album") albums[entry.key] = entry
+    val authoritativeArtists = HashSet<LibraryKey>()
     for (entry in entries) {
         if (entry.hit.kind != "song") continue
         val track = entry.hit.track ?: continue
-        if (track.albumId.isBlank() || track.album.isBlank()) continue
+        if (track.albumId.isBlank() || track.albumId == "0" || track.album.isBlank()) continue
         val key = LibraryKey(track.source, "album", track.albumId)
         val album = albums[key]
-        if (album == null) {
-            albums[key] = LibraryEntry(
-                CatalogHit(track.source, "album", track.albumId, track.album, track.artist,
-                    track.artwork(480) ?: entry.hit.artwork),
-                addedAt = entry.addedAt,
-            )
-        } else if (entry.addedAt > album.addedAt) {
-            albums[key] = album.copy(addedAt = entry.addedAt)
+        val artwork = album?.hit?.artwork ?: track.artwork(500) ?: entry.hit.artwork
+        val artist = if (track.albumArtist.isNotBlank() && authoritativeArtists.add(key)) track.albumArtist
+            else album?.hit?.subtitle?.ifBlank { track.artist } ?: track.artist
+        albums[key] = if (album == null) {
+            LibraryEntry(CatalogHit(track.source, "album", track.albumId, track.album, artist, artwork), entry.addedAt)
+        } else {
+            album.copy(hit = album.hit.copy(subtitle = artist, artwork = artwork), addedAt = maxOf(album.addedAt, entry.addedAt))
         }
     }
     return albums.values.toList()
+}
+
+internal fun libraryAlbumTracks(album: LibraryEntry, entries: List<LibraryEntry>): List<Track> {
+    val saved = entries.asSequence().filter { it.hit.kind == "song" }.mapNotNull { it.hit.track }
+        .filter { it.source == album.hit.source && it.albumId == album.hit.id }.toList()
+    if (saved.isEmpty()) return emptyList()
+    val sourceOrder = HashMap<String, Int>(album.albumTracks.size)
+    album.albumTracks.forEachIndexed { index, track -> sourceOrder[track.id] = index }
+    val tracks = saved.map { track ->
+        val reference = sourceOrder[track.id]?.let(album.albumTracks::get)
+        if (reference == null) track else track.copy(
+            albumArtist = track.albumArtist.ifBlank { reference.albumArtist },
+            discNumber = track.discNumber.takeIf { it > 0 } ?: reference.discNumber,
+            trackNumber = track.trackNumber.takeIf { it > 0 } ?: reference.trackNumber,
+        )
+    }
+    if (tracks.none { it.discNumber > 0 || it.trackNumber > 0 }) return tracks
+    return tracks.sortedWith(compareBy<Track> { it.discNumber <= 0 }.thenBy { it.discNumber }
+        .thenBy { it.trackNumber <= 0 }.thenBy { it.trackNumber }
+        .thenBy { sourceOrder[it.id] ?: Int.MAX_VALUE })
 }
 
 internal val LibraryEntry.stableKey: String get() = "${hit.source.name}:${hit.kind}:${hit.id}"

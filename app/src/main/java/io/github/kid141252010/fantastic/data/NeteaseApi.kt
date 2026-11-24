@@ -277,7 +277,7 @@ data class NeteaseQualityCapability(
 )
 
 @Serializable
-data class NeteaseArtistCredit(val name: String = "", val mid: String = "")
+data class NeteaseArtistCredit(val name: String = "", val mid: String = "", val avatar: String = "")
 
 @Serializable
 data class NeteaseSong(

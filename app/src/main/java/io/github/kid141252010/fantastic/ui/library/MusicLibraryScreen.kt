@@ -117,6 +117,11 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
     val homeBarState = rememberTopAppBarState()
     var folderId by rememberSaveable { mutableStateOf("") }
     var playlistId by rememberSaveable { mutableStateOf("") }
+    var libraryAlbum by rememberSaveable { mutableStateOf<String?>(null) }
+    fun openLibraryHit(hit: CatalogHit) {
+        if (hit.kind == "album") libraryAlbum = "${hit.source.name}:${hit.kind}:${hit.id}"
+        else onOpen(hit)
+    }
     var dialog by remember { mutableStateOf("") }
     var nameInput by remember { mutableStateOf("") }
     var importText by remember { mutableStateOf<String?>(null) }
@@ -129,6 +134,18 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
     if (currentCategory == LibraryCategory.Downloads) {
         DownloadedMusicScreen(app, onBack = { category = null })
         return
+    }
+    val albums = remember(snapshot.items) { libraryAlbums(snapshot.items) }
+    val albumEntry = libraryAlbum?.let { key -> albums.firstOrNull { it.stableKey == key } }
+    if (albumEntry != null) {
+        val savedTracks = remember(albumEntry, snapshot.items) { libraryAlbumTracks(albumEntry, snapshot.items) }
+        pageState.SaveableStateProvider(albumEntry.stableKey) {
+            LibraryAlbumScreen(app, albumEntry, savedTracks, onBack = { libraryAlbum = null }, onOpenSong = onOpen)
+        }
+        return
+    }
+    LaunchedEffect(libraryAlbum, snapshot.loading) {
+        if (!snapshot.loading) libraryAlbum = null
     }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri: Uri? ->
@@ -228,9 +245,6 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
             }
         }
     } else null
-    val albums = remember(snapshot.items, currentCategory, isHome) {
-        if (isHome || currentCategory == LibraryCategory.Albums) libraryAlbums(snapshot.items) else emptyList()
-    }
     val locale = LocalConfiguration.current.locales[0]
     val collator = remember(locale) { Collator.getInstance(locale) }
     val visibleItems = remember(snapshot.items, albums, currentCategory, folderId, favoriteSongs, favoritesOnly, newestFirst, collator) {
@@ -324,12 +338,12 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
             val body = Modifier.fillMaxSize().padding(top = innerPadding.calculateTopPadding())
             when {
                 isHome -> LibraryHome(
-                    snapshot, albums, body, onCategory = { category = it }, onCatalog = onOpen,
+                    snapshot, albums, body, onCategory = { category = it }, onCatalog = ::openLibraryHit,
                     onCatalogOptions = { menuEntry = it },
                     onPlaylist = { playlistId = it.id }, notice = notice,
                 )
                 currentCategory == LibraryCategory.Albums -> LibraryAlbumsGrid(
-                    visibleItems, favoritesOnly, snapshot.loading, body, onOpen,
+                    visibleItems, favoritesOnly, snapshot.loading, body, ::openLibraryHit,
                     onCatalogOptions = { menuEntry = it }, notice = notice,
                 )
                 else -> {
@@ -395,7 +409,7 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
                                     playing = entry.hit.kind == "song" && player.mediaId == "${entry.hit.source.mediaPrefix}:${entry.hit.id}",
                                     onClick = {
                                         if (entry.hit.kind == "song") playLibraryHit(app, entry, visibleItems)
-                                        else onOpen(entry.hit)
+                                        else openLibraryHit(entry.hit)
                                     },
                                     onOptions = { menuEntry = entry },
                                 )
@@ -499,11 +513,15 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
         }
         menuEntry != null -> {
             val entry = menuEntry!!
-            val songs = if (entry.hit.kind == "song") listOf(asTrack(entry.hit)) else emptyList()
+            val songs = when (entry.hit.kind) {
+                "song" -> listOf(asTrack(entry.hit))
+                "album" -> remember(entry, snapshot.items) { libraryAlbumTracks(entry, snapshot.items) }
+                else -> emptyList()
+            }
             GlassSheet(entry.hit.title, onDismissRequest = ::dismissSheet, showHeader = false) {
                 MediaActionContent(entry.hit, app.library, songs,
-                    onPlay = songs.firstOrNull()?.let { track -> { app.player.play(track); dismissSheet() } },
-                    onView = { dismissSheet(); onOpen(entry.hit) }, onDismiss = ::dismissSheet)
+                    onPlay = if (songs.isNotEmpty()) ({ app.player.playQueue(songs, 0); dismissSheet() }) else null,
+                    onView = { dismissSheet(); openLibraryHit(entry.hit) }, onDismiss = ::dismissSheet)
             }
         }
     }

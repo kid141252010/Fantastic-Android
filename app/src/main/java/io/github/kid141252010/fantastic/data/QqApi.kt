@@ -45,6 +45,8 @@ class QqApi(private val api: FantasticApi) {
     suspend fun suggest(query: String): JsonObject = getJson("/qq/suggest?${params(mapOf("q" to query))}")
     suspend fun song(id: String): JsonObject = getJson("/qq/song/${mid(id)}")
 
+    internal suspend fun songTrack(id: String): Track = json.decodeFromJsonElement<QqSong>(song(id)).toTrack()
+
     internal suspend fun songCredits(id: String): List<SongCreditSection> {
         val songMid = mid(id)
         val payload = buildJsonObject {
@@ -95,6 +97,10 @@ class QqApi(private val api: FantasticApi) {
     }
 
     suspend fun album(id: String): JsonObject = getJson("/qq/album/${mid(id)}")
+
+    internal suspend fun albumArtists(id: String): String =
+        json.decodeFromJsonElement<NeteaseAlbum>(album(id).getValue("album")).artists.joinToString(" / ") { it.name }
+
     suspend fun artist(id: String): JsonObject = getJson("/qq/artist/${mid(id)}")
     suspend fun artistSongs(id: String, limit: Int = 50, offset: Int = 0): JsonObject =
         getJson("/qq/artist/${mid(id)}/songs?${page(limit, offset)}")

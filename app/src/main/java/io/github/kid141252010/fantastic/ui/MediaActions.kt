@@ -49,6 +49,7 @@ import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.librarySongHit
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.playback.validSongId
@@ -72,6 +73,7 @@ internal fun MediaActionContent(
     translation: Boolean = false,
     onTranslation: (() -> Unit)? = null,
     resolveTracks: (suspend () -> List<Track>)? = null,
+    saveParentAlbum: (suspend () -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -81,19 +83,23 @@ internal fun MediaActionContent(
     var resolving by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     val playable = tracks.isNotEmpty() || resolveTracks != null
-    fun withSongs(action: (List<Track>) -> Unit) {
+    fun runAction(action: suspend () -> Unit) {
         if (resolving) return
         resolving = true
         actionError = null
         scope.launch {
             try {
-                val songs = resolveTracks?.invoke() ?: tracks
-                if (songs.isEmpty()) actionError = "没有可用的歌曲"
-                else { action(songs); onDismiss() }
+                action()
+                onDismiss()
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { actionError = error.message ?: "无法载入歌曲" }
             finally { resolving = false }
         }
+    }
+    fun withSongs(action: (List<Track>) -> Unit) = runAction {
+        val songs = resolveTracks?.invoke() ?: tracks
+        if (songs.isEmpty()) error("没有可用的歌曲")
+        action(songs)
     }
     val snapshot by library.snapshot.collectAsStateWithLifecycle()
     val saved = snapshot.items.firstOrNull { it.key.source == hit.source && it.key.kind == hit.kind && it.key.id == hit.id }
@@ -129,8 +135,18 @@ internal fun MediaActionContent(
     if (media) {
         if (saved != null && hit.kind != "song") SheetAction("置顶${catalogKindLabel(hit.kind)}", Icons.Outlined.PushPin,
             detail = "Fantastic 未提供目录置顶")
-        if (saved == null) SheetAction("添加到资料库", Icons.Outlined.LibraryAdd, detail = "仅保存到本机，不同步 Apple 账号",
-            onClick = { library.add(hit); onDismiss() })
+        if (saved == null || (hit.kind == "album" && resolveTracks != null)) SheetAction(
+            if (saved == null) "添加到资料库" else "更新资料库专辑", Icons.Outlined.LibraryAdd,
+            detail = "仅保存到本机，不同步 Apple 账号", onClick = if (resolving) null else ({
+                when {
+                    hit.kind == "album" && resolveTracks != null -> runAction { library.add(hit, resolveTracks.invoke()) }
+                    hit.kind == "song" -> runAction {
+                        library.add(app.librarySongHit(hit))
+                        saveParentAlbum?.invoke()
+                    }
+                    else -> { library.add(hit); onDismiss() }
+                }
+            }))
         if (saved != null) {
             SheetAction("从资料库中删除", Icons.Outlined.Delete, detail = "仅移除本机项目", destructive = true,
                 onClick = { library.remove(hit); onDismiss() })
@@ -193,7 +209,17 @@ internal fun MediaActionContent(
         SheetDivider()
         SheetAction(if (saved?.isFavorite == true) "取消喜爱" else "喜爱",
             if (saved?.isFavorite == true) Icons.Outlined.Star else Icons.Outlined.StarBorder,
-            detail = "仅保存到本机资料库", onClick = { library.toggleFavorite(hit); onDismiss() })
+            detail = "仅保存到本机资料库", onClick = if (resolving) null else ({
+                when {
+                    hit.kind == "album" && resolveTracks != null && saved?.isFavorite != true ->
+                        runAction { library.toggleFavorite(hit, resolveTracks.invoke()) }
+                    hit.kind == "song" && saved?.isFavorite != true -> runAction {
+                        library.toggleFavorite(app.librarySongHit(hit))
+                        saveParentAlbum?.invoke()
+                    }
+                    else -> { library.toggleFavorite(hit); onDismiss() }
+                }
+            }))
         if (saved?.isFavorite != true) SheetAction("减少推荐", Icons.Outlined.ThumbDownOffAlt,
             detail = "Fantastic 未提供推荐偏好反馈")
     }

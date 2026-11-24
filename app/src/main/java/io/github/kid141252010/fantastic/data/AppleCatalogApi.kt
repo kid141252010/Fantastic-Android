@@ -534,7 +534,6 @@ class AppleCatalogApi(
         }) { "Invalid Apple resource ID" }
         return value
     }
-
     private fun entityParams(type: Entity): Map<String, String> = when (type) {
         Entity.Song -> SONG_PARAMS
         Entity.Album -> ALBUM_PARAMS
@@ -562,18 +561,18 @@ class AppleCatalogApi(
         private val TRACK_PARAMS = mapOf(
             "include[songs]" to "artists", "include[music-videos]" to "artists",
             "fields[artists]" to "name,artwork,url",
-            "fields[songs]" to "name,artistName,curatorName,composerName,artwork,playParams,contentRating,albumName,url,durationInMillis,audioTraits,extendedAssetUrls",
+            "fields[songs]" to "name,artistName,curatorName,composerName,artwork,playParams,contentRating,albumName,albumArtistName,discNumber,trackNumber,url,durationInMillis,audioTraits,extendedAssetUrls",
             "fields[albums]" to "name,artwork,playParams,url",
         )
         private val SONG_PARAMS = mapOf(
             "include" to "albums,artists,credits,music-videos", "include[artists]" to "albums",
             "fields[artists]" to "name,url,artwork", "extend" to "extendedAssetUrls",
         )
-        private val ALBUM_PARAMS = mapOf(
+        private val ALBUM_PARAMS = TRACK_PARAMS + mapOf(
             "platform" to "web", "extend" to "offers,editorialArtwork,editorialVideo,extendedAssetUrls",
             "art[url]" to "f", "include" to "record-labels,artists", "meta[albums:tracks]" to "popularity",
             "include[songs]" to "artists,composers,albums", "include[music-videos]" to "artists",
-            "include[playlists]" to "curator", "fields[artists]" to "name,url",
+            "include[playlists]" to "curator", "fields[artists]" to "name,url,artwork",
             "fields[record-labels]" to "name,url", "fields[curators]" to "name",
             "views" to "appears-on,more-by-artist,related-videos,other-versions,you-might-also-like,audio-extras,video-extras",
         )
@@ -658,6 +657,10 @@ data class AppleCatalogResource(
         artwork?.text("url")?.replace("{c}", "bb"), durationMs,
         artistId = relationships["artists"]?.data?.firstOrNull()?.id.orEmpty(),
         albumId = relationships["albums"]?.data?.firstOrNull()?.id.orEmpty(),
+        artistArtworkTemplate = relationships["artists"]?.data?.firstOrNull()?.artwork?.text("url")?.replace("{c}", "bb"),
+        albumArtist = attributes.text("albumArtistName").orEmpty().ifBlank { relationships["albums"]?.data?.firstOrNull()?.artist.orEmpty() },
+        discNumber = attributes.text("discNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+        trackNumber = attributes.text("trackNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
     ) else null
 
     fun artworkUrl(width: Int, height: Int = width, crop: String = "bb", format: String = "jpg"): String? =

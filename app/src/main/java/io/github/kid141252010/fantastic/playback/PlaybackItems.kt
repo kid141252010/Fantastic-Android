@@ -15,6 +15,10 @@ internal const val KEY_DURATION_MS = "fantastic.durationMs"
 internal const val KEY_ARTIST_ID = "fantastic.artistId"
 internal const val KEY_ALBUM_ID = "fantastic.albumId"
 internal const val KEY_ARTWORK_TEMPLATE = "fantastic.artworkTemplate"
+internal const val KEY_ARTIST_ARTWORK_TEMPLATE = "fantastic.artistArtworkTemplate"
+internal const val KEY_ALBUM_ARTIST = "fantastic.albumArtist"
+internal const val KEY_DISC_NUMBER = "fantastic.discNumber"
+internal const val KEY_TRACK_NUMBER = "fantastic.trackNumber"
 internal const val KEY_QUALITY = "fantastic.quality"
 internal const val KEY_PLAYBACK_MESSAGE = "fantastic.playbackMessage"
 internal const val KEY_SHUFFLE_START = "fantastic.shuffleStart"
@@ -33,6 +37,10 @@ internal fun Track.toQueueItem(quality: String? = null, shuffleStart: Boolean? =
             putString(KEY_ARTIST_ID, artistId)
             putString(KEY_ALBUM_ID, albumId)
             putString(KEY_ARTWORK_TEMPLATE, artworkTemplate.orEmpty())
+            putString(KEY_ARTIST_ARTWORK_TEMPLATE, artistArtworkTemplate.orEmpty())
+            putString(KEY_ALBUM_ARTIST, albumArtist)
+            putInt(KEY_DISC_NUMBER, discNumber)
+            putInt(KEY_TRACK_NUMBER, trackNumber)
             if (quality != null) putString(KEY_QUALITY, quality)
             if (shuffleStart != null) putBoolean(KEY_SHUFFLE_START, shuffleStart)
             if (occurrence != null) putInt(KEY_OCCURRENCE, occurrence)
@@ -45,10 +53,21 @@ internal fun MediaItem.toTrack(): Track? {
     if (!source.validSongId(id)) return null
     val artwork = extras?.getString(KEY_ARTWORK_TEMPLATE)?.takeIf { it.isNotBlank() }
         ?: mediaMetadata.artworkUri?.toString()
-    return Track(id, source, mediaMetadata.title?.toString().orEmpty(), mediaMetadata.artist?.toString().orEmpty(),
-        mediaMetadata.albumTitle?.toString().orEmpty(), artwork,
-        extras?.getLong(KEY_DURATION_MS, 0)?.coerceAtLeast(0) ?: 0,
-        extras?.getString(KEY_ARTIST_ID).orEmpty(), extras?.getString(KEY_ALBUM_ID).orEmpty())
+    return Track(
+        id = id,
+        source = source,
+        title = mediaMetadata.title?.toString().orEmpty(),
+        artist = mediaMetadata.artist?.toString().orEmpty(),
+        album = mediaMetadata.albumTitle?.toString().orEmpty(),
+        artworkTemplate = artwork,
+        durationMs = extras?.getLong(KEY_DURATION_MS, 0)?.coerceAtLeast(0) ?: 0,
+        artistId = extras?.getString(KEY_ARTIST_ID).orEmpty(),
+        albumId = extras?.getString(KEY_ALBUM_ID).orEmpty(),
+        artistArtworkTemplate = extras?.getString(KEY_ARTIST_ARTWORK_TEMPLATE)?.takeIf { it.isNotBlank() },
+        albumArtist = extras?.getString(KEY_ALBUM_ARTIST).orEmpty(),
+        discNumber = extras?.getInt(KEY_DISC_NUMBER, 0) ?: 0,
+        trackNumber = extras?.getInt(KEY_TRACK_NUMBER, 0) ?: 0,
+    )
 }
 
 private val qqSongId = Regex("[0-9A-Za-z]{1,32}")
