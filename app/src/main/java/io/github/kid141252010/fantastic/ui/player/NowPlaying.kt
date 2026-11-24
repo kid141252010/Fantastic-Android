@@ -25,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -35,15 +36,21 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.AppleCatalogApi
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.librarySongHit
+import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
+import io.github.kid141252010.fantastic.playback.mediaId
+import io.github.kid141252010.fantastic.playback.toTrack
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 
 /** Original fragment fade for cover, lyrics and queue pane switches. */
 private val PlayerFragmentMotion = tween<Float>(500, easing = CubicBezierEasing(.25f, .1f, .25f, 1f))
@@ -64,6 +71,8 @@ internal fun NowPlayingContent(
     lyrics: LyricsController,
     library: MusicLibrary,
     apple: AppleCatalogApi,
+    qq: io.github.kid141252010.fantastic.data.QqApi,
+    netease: io.github.kid141252010.fantastic.data.NeteaseApi,
     fullVisible: Boolean,
     contentFade: Modifier,
     sheetDragModifier: Modifier,
@@ -87,30 +96,62 @@ internal fun NowPlayingContent(
     val libraryState by library.snapshot.collectAsStateWithLifecycle()
     val rawTrack = state.currentTrack
     var menuTrack by remember(rawTrack) { mutableStateOf(rawTrack) }
-    val trackMenuOpen = panel == PlayerPanel.Track
-    LaunchedEffect(trackMenuOpen, rawTrack, apple) {
-        if (!trackMenuOpen || rawTrack?.source != Source.Apple) return@LaunchedEffect
+    val context = LocalContext.current
+    val app = context.applicationContext as FantasticApp
+    val trackMenuOpen = panel == PlayerPanel.Track || panel == PlayerPanel.Entities
+    LaunchedEffect(trackMenuOpen, rawTrack, apple, qq, netease) {
+        if (!trackMenuOpen || rawTrack == null) return@LaunchedEffect
         val current = menuTrack ?: return@LaunchedEffect
-        val missingArtist = current.artistId.isMissingCatalogId()
-        val missingAlbum = current.albumId.isMissingCatalogId()
-        if (!missingArtist && !missingAlbum) return@LaunchedEffect
+        if (!current.artistId.isMissingCatalogId() && !current.albumId.isMissingCatalogId() &&
+            !current.artistArtworkTemplate.isNullOrBlank()) return@LaunchedEffect
 
-        try {
-            val details = apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id).toTrack()
-            if (details?.source != Source.Apple || details.id != rawTrack.id) return@LaunchedEffect
-            ensureActive()
-            menuTrack = current.copy(
-                artist = current.artist.ifBlank { details.artist },
-                album = current.album.ifBlank { details.album },
-                artworkTemplate = current.artworkTemplate?.takeIf { it.isNotBlank() } ?: details.artworkTemplate,
-                durationMs = if (current.durationMs > 0) current.durationMs else details.durationMs,
-                artistId = if (missingArtist) details.artistId else current.artistId,
-                albumId = if (missingAlbum) details.albumId else current.albumId,
-            )
+        suspend fun <T> lookup(action: suspend () -> T): T? = try {
+            action()
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Exception) {
-            Log.w("FantasticCatalog", "Apple song relationship lookup failed for ${rawTrack.id}", error)
+            Log.w("FantasticCatalog", "${rawTrack.source} entity lookup failed for ${rawTrack.id}", error)
+            null
+        }
+
+        val details = lookup {
+            when (rawTrack.source) {
+                Source.Apple -> apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id).toTrack()
+                Source.QQ -> qq.songTrack(rawTrack.id)
+                Source.Netease -> netease.song(rawTrack.id).song.toTrack()
+            }
+        }?.takeIf { it.source == rawTrack.source && it.id == rawTrack.id }
+        val artistId = current.artistId.takeUnless { it.isMissingCatalogId() }
+            ?: details?.artistId.orEmpty()
+        val artwork = current.artistArtworkTemplate?.takeIf { it.isNotBlank() }
+            ?: details?.takeIf { it.artistId == artistId }?.artistArtworkTemplate?.takeIf { it.isNotBlank() }
+        val updated = current.copy(
+            artist = current.artist.ifBlank { details?.artist.orEmpty() },
+            album = current.album.ifBlank { details?.album.orEmpty() },
+            artworkTemplate = current.artworkTemplate?.takeIf { it.isNotBlank() } ?: details?.artworkTemplate,
+            durationMs = current.durationMs.takeIf { it > 0 } ?: details?.durationMs ?: 0,
+            artistId = artistId,
+            albumId = current.albumId.takeUnless { it.isMissingCatalogId() } ?: details?.albumId.orEmpty(),
+            artistArtworkTemplate = artwork,
+            albumArtist = current.albumArtist.ifBlank { details?.albumArtist.orEmpty() },
+            discNumber = current.discNumber.takeIf { it > 0 } ?: details?.discNumber ?: 0,
+            trackNumber = current.trackNumber.takeIf { it > 0 } ?: details?.trackNumber ?: 0,
+        )
+        ensureActive()
+        if (player.state.value.mediaId != rawTrack.mediaId) return@LaunchedEffect
+        menuTrack = updated
+        if (artwork == null && !artistId.isMissingCatalogId()) {
+            val avatar = lookup {
+                when (rawTrack.source) {
+                    Source.Apple -> apple.entity(AppleCatalogApi.Entity.Artist, artistId).artworkUrl(500)
+                    Source.QQ -> null
+                    Source.Netease -> netease.artist(artistId).artist.takeIf { it.mid == artistId }?.avatar
+                }
+            }?.takeIf { it.isNotBlank() }
+            ensureActive()
+            if (avatar != null && player.state.value.mediaId == rawTrack.mediaId) {
+                menuTrack = updated.copy(artistArtworkTemplate = avatar)
+            }
         }
     }
     val hit = remember(menuTrack) {
@@ -120,15 +161,20 @@ internal fun NowPlayingContent(
         it.key.source == song.source && it.key.kind == song.kind && it.key.id == song.id
     } }
     val favorite = libraryEntry?.isFavorite == true
-    val toggleFavorite: (() -> Unit)? = hit?.let { { library.toggleFavorite(it) } }
-    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val toggleFavorite: (() -> Unit)? = hit?.let { song ->
+        {
+            if (libraryEntry?.isFavorite == true) library.toggleFavorite(libraryEntry.hit)
+            else scope.launch { library.toggleFavorite(app.librarySongHit(song)) }
+        }
+    }
     val entities = remember(menuTrack) {
         buildList {
             menuTrack?.let { song ->
                 if (!song.artistId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "artist", song.artistId, song.artist, artwork = null, detailOnly = true))
+                    song.source, "artist", song.artistId, song.artist, artwork = song.artistArtwork(500), detailOnly = true))
                 if (!song.albumId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "album", song.albumId, song.album, artwork = song.artwork(500), detailOnly = true))
+                    song.source, "album", song.albumId, song.album, song.albumArtist, artwork = song.artwork(500), detailOnly = true))
             }
         }
     }

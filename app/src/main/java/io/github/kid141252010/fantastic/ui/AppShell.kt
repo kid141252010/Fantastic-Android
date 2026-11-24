@@ -165,6 +165,8 @@ fun AppShell(app: FantasticApp) {
                     lyrics = app.lyrics,
                     library = app.library,
                     apple = app.apple,
+                    qq = app.qq,
+                    netease = app.netease,
                     pane = playerPane,
                     onPaneChange = { playerPane = it },
                     translation = lyricTranslation,

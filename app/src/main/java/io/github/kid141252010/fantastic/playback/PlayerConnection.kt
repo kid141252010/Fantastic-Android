@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.core.content.ContextCompat
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -52,6 +53,8 @@ data class PlayerState(
     val upNext: List<QueueEntry> = emptyList(),
     /** Reject a gesture if the engine changed the queue while the finger was down. */
     val queueRevision: Long = 0L,
+    internal val trackOccurrence: Int = -1,
+    internal val repeatGeneration: Int = 0,
 )
 
 /** UI-side controller for the single service-owned Media3 session. */
@@ -68,9 +71,14 @@ class PlayerConnection(private val context: Context) {
     private var lastMediaId: String? = null
     private var lastOccurrence = -1
     private var discontinuityRefreshPending = false
+    private var repeatGeneration = 0
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) = refresh()
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) repeatGeneration++
+        }
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
             seekGeneration++
@@ -277,6 +285,8 @@ class PlayerConnection(private val context: Context) {
             canRepeat = player.isCommandAvailable(Player.COMMAND_SET_REPEAT_MODE),
             upNext = entries.filter { it.index > selected },
             queueRevision = queueRevision,
+            trackOccurrence = occurrence,
+            repeatGeneration = repeatGeneration,
         )
     }
 

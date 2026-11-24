@@ -67,7 +67,7 @@ import io.github.kid141252010.fantastic.data.AppleCatalogPage
 import io.github.kid141252010.fantastic.data.AppleCatalogResource
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.NeteaseAlbumList
-import io.github.kid141252010.fantastic.data.NeteaseAlbumPage
+import io.github.kid141252010.fantastic.data.NeteaseAlbum
 import io.github.kid141252010.fantastic.data.NeteaseAlbumSummary
 import io.github.kid141252010.fantastic.data.NeteaseArtistCredit
 import io.github.kid141252010.fantastic.data.NeteaseArtistPage
@@ -77,6 +77,7 @@ import io.github.kid141252010.fantastic.data.NeteaseSong
 import io.github.kid141252010.fantastic.data.NeteaseSongInfo
 import io.github.kid141252010.fantastic.data.NeteaseSongPage
 import io.github.kid141252010.fantastic.data.Prefs
+import io.github.kid141252010.fantastic.data.QqSong
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.toTrack
@@ -367,6 +368,7 @@ private fun DetailBody(
                 Modifier.padding(Dimens.Page), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
         loaded.sections.forEach { section ->
+            val multipleDiscs = target.kind == "album" && section.entries.any { (it.track?.discNumber ?: 0) > 1 }
             val firstSong = section.entries.indexOfFirst { it.track != null }
             item("${section.key}:heading") {
                 Md3MediaSectionHeader(section.title) {
@@ -381,14 +383,16 @@ private fun DetailBody(
             }) { index, entry ->
                 val track = entry.track
                 if (track != null) {
-                    val number = (index + 1).takeIf { target.kind == "album" }
+                    val number = track.trackNumber.takeIf { target.kind == "album" && it > 0 }?.let {
+                        if (multipleDiscs && track.discNumber > 0) "${track.discNumber}-$it" else it.toString()
+                    }
                     Md3MediaRow(
                         title = track.title,
                         subtitle = if (number == null) track.artist else "",
                         playing = player.mediaId == track.mediaId,
                         onClick = { playCollection(section, index, false) },
                         leading = {
-                            if (number != null) Text(number.toString(), Modifier.padding(horizontal = 4.dp),
+                            if (number != null) Text(number, Modifier.padding(horizontal = 4.dp),
                                 style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             else Md3MediaArtwork(entry.artwork ?: track.artwork(120), Modifier.size(48.dp), shape = MaterialTheme.shapes.small)
                         },
@@ -463,7 +467,9 @@ private fun DetailBody(
     moreEntry?.let { entry ->
         val hit = CatalogHit(entry.target.source, entry.target.kind, entry.target.id, entry.title, entry.subtitle, entry.artwork, entry.track)
         val queue = if (entry.target == target) playable else listOfNotNull(entry.track)
-        val resolverSection = playableSection?.takeIf { entry.target == target && loaded.song == null }
+        val resolverSection = (if (target.kind == "album") loaded.sections.firstOrNull {
+            it.key == "tracks" || it.key == "relationship:tracks"
+        } else playableSection)?.takeIf { entry.target == target && loaded.song == null }
         val sectionForSong = moreSection
         val indexForSong = moreIndex
         val quality = entry.track?.takeIf { it.source == Source.Netease }
@@ -482,6 +488,12 @@ private fun DetailBody(
                 onView = if (entry.target != target) ({ closeMore(); navigate(entry.target) }) else null,
                 onQuality = quality?.let { song -> { closeMore(); onQualityOpen(song) } },
                 resolveTracks = resolverSection?.let { section -> { repository.completeTracks(section) } },
+                saveParentAlbum = sectionForSong?.takeIf { target.kind == "album" && entry.track?.albumId == target.id }?.let { section ->
+                    {
+                        val album = CatalogHit(target.source, "album", target.id, loaded.title, loaded.subtitle, loaded.artwork)
+                        app.library.add(album, repository.completeTracks(section))
+                    }
+                },
                 onDismiss = closeMore)
         }
     }
@@ -781,6 +793,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
             artist = song.artist.ifBlank { album.artist },
             artworkTemplate = song.artworkTemplate ?: album.artwork?.detailString("url")?.replace("{c}", "bb"),
             albumId = album.id,
+            albumArtist = song.albumArtist.ifBlank { album.artist },
         ) }
         return DetailEntry(DetailTarget(Source.Apple, normalizedKind(resource.type), resource.id),
             resource.name, resource.artist, resource.artworkUrl(160) ?: track?.artwork(160), track)
@@ -788,9 +801,12 @@ private class DetailRepository(private val app: FantasticApp, private val target
 
     private suspend fun adapter(): DetailPage = when (target.kind) {
         "song" -> {
-            val info = song()
+            val qqSong = if (target.source == Source.QQ) qq("song") else null
+            val info = if (qqSong == null) app.netease.song(target.id)
+                else NeteaseSongInfo(json.decodeFromJsonElement<NeteaseSong>(qqSong), qqSong["meta"])
             val song = info.song
             val metadata = info.meta as? JsonObject
+            val track = if (qqSong == null) song.toTrack() else json.decodeFromJsonElement<QqSong>(qqSong).toTrack()
             DetailPage(song.name, song.artists.joinToString(" / ") { it.name }, artwork(song.cover),
                 detailPlainText(metadata?.get("intro")), buildList {
                     if (song.album.isNotBlank()) add("专辑" to song.album)
@@ -799,23 +815,31 @@ private class DetailRepository(private val app: FantasticApp, private val target
                     listOf("publishDate" to "发行日期", "genre" to "流派", "language" to "语言", "company" to "唱片公司").forEach { (key, label) ->
                         metadata?.detailString(key)?.takeIf { it.isNotBlank() }?.let { add(label to it) }
                     }
-                }, song.toTrack().copy(source = target.source), buildList {
+                }, track, buildList {
                     artistRelations(song.artists)?.let { add(it) }
                     if (song.albumMid.isNotBlank()) add(DetailSection("album", "所属专辑", listOf(
                         DetailEntry(DetailTarget(target.source, "album", song.albumMid), song.album.ifBlank { "专辑" }, artwork = artwork(song.cover)))))
                 }, if (song.mv.isNotBlank()) "此歌曲有音乐视频；当前音频队列不支持视频播放。" else null)
         }
         "album" -> {
-            val result = album()
-            val album = result.album
-            DetailPage(album.name, album.artists.joinToString(" / ") { it.name }, artwork(album.cover), detailPlainText(JsonPrimitive(album.description)),
+            val qqAlbum = if (target.source == Source.QQ) qq("album") else null
+            val neteaseAlbum = if (qqAlbum == null) app.netease.album(target.id) else null
+            val album = neteaseAlbum?.album ?: json.decodeFromJsonElement<NeteaseAlbum>(qqAlbum!!.getValue("album"))
+            val albumArtist = album.artists.joinToString(" / ") { it.name }
+            val tracks = neteaseAlbum?.songs?.map { it.toTrack() }
+                ?: (qqAlbum?.get("songs") as? JsonArray).orEmpty().map { json.decodeFromJsonElement<QqSong>(it).toTrack() }
+            DetailPage(album.name, albumArtist, artwork(album.cover), detailPlainText(JsonPrimitive(album.description)),
                 buildList {
                     add("曲目数" to album.size.toString())
                     detailDate(album.publishTime)?.let { add("发行日期" to it) }
                     if (album.language.isNotBlank()) add("语言" to album.language)
                     if (album.subType.isNotBlank()) add("类型" to album.subType)
                 }, sections = buildList {
-                    add(DetailSection("tracks", "曲目", songEntries(result.songs)))
+                    add(DetailSection("tracks", "曲目", tracks.filter { it.id.isNotBlank() }.map { song ->
+                        songEntry(song.copy(albumId = target.id, album = song.album.ifBlank { album.name },
+                            albumArtist = albumArtist.ifBlank { song.albumArtist },
+                            artworkTemplate = song.artworkTemplate?.takeIf { it.isNotBlank() } ?: album.cover.ifBlank { null }))
+                    }))
                     artistRelations(album.artists)?.let { add(it) }
                 })
         }
@@ -854,9 +878,14 @@ private class DetailRepository(private val app: FantasticApp, private val target
     }
 
     private fun songEntries(songs: List<NeteaseSong>): List<DetailEntry> = songs.filter { it.id.isNotBlank() }.map { song ->
-        val track = song.toTrack().copy(source = target.source)
-        DetailEntry(DetailTarget(target.source, "song", song.id), song.name, track.artist, track.artwork(160), track)
+        val track = if (target.source == Source.QQ) QqSong(song.id, song.name,
+            song.artists.map { io.github.kid141252010.fantastic.data.QqArtist(it.name, it.mid, it.avatar) },
+            song.album, song.albumMid, song.durationMs, song.cover).toTrack() else song.toTrack()
+        songEntry(track)
     }
+
+    private fun songEntry(track: Track) = DetailEntry(DetailTarget(track.source, "song", track.id),
+        track.title, track.artist, track.artwork(160), track)
 
     private fun albumEntries(albums: List<NeteaseAlbumSummary>): List<DetailEntry> = albums.filter { it.mid.isNotBlank() }.map {
         DetailEntry(DetailTarget(target.source, "album", it.mid), it.name,
@@ -865,17 +894,11 @@ private class DetailRepository(private val app: FantasticApp, private val target
 
     private fun artistRelations(artists: List<NeteaseArtistCredit>): DetailSection? {
         val entries = artists.filter { it.mid.isNotBlank() }.distinctBy { it.mid }.map {
-            DetailEntry(DetailTarget(target.source, "artist", it.mid), it.name)
+            DetailEntry(DetailTarget(target.source, "artist", it.mid), it.name, artwork = artwork(it.avatar))
         }
         return entries.takeIf { it.isNotEmpty() }?.let { DetailSection("artists", "艺人", it) }
     }
 
-    private suspend fun song(): NeteaseSongInfo = if (target.source == Source.Netease) app.netease.song(target.id) else {
-        val body = qq("song")
-        NeteaseSongInfo(json.decodeFromJsonElement<NeteaseSong>(body), body["meta"])
-    }
-    private suspend fun album(): NeteaseAlbumPage = if (target.source == Source.Netease) app.netease.album(target.id)
-        else json.decodeFromJsonElement(qq("album"))
     private suspend fun artist(): NeteaseArtistPage = if (target.source == Source.Netease) app.netease.artist(target.id)
         else json.decodeFromJsonElement(qq("artist"))
     private suspend fun artistSongs(offset: Int, limit: Int): NeteaseSongPage = if (target.source == Source.Netease)

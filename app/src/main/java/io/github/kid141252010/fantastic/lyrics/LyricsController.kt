@@ -17,6 +17,7 @@ import io.github.kid141252010.fantastic.data.QqLyricsDocument
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.playback.PlaybackCacheKey
 import io.github.kid141252010.fantastic.playback.PlayerConnection
+import io.github.kid141252010.fantastic.playback.PlayerState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
@@ -115,7 +116,7 @@ class LyricsController(
             var lastPlaying = false
             var lastGeneration = -1
             player.state.collect { state ->
-                reconcileLoad(state.mediaId, state.isPlaying)
+                reconcileLoad(state)
                 if (first || state.isPlaying != lastPlaying || state.seekGeneration != lastGeneration) {
                     first = false
                     lastPlaying = state.isPlaying
@@ -131,14 +132,21 @@ class LyricsController(
         val id = state.mediaId ?: return
         if (!id.startsWith("apple:") || id.length == "apple:".length) return
         pendingAppleRefreshId = id
-        reconcileLoad(id, state.isPlaying)
+        reconcileLoad(state)
     }
 
-    private fun reconcileLoad(mediaId: String?, isPlaying: Boolean) {
+    private var loadedOccurrence = -1
+    private var loadedRepeatGeneration = 0
+
+    private fun reconcileLoad(state: PlayerState) {
+        val mediaId = state.mediaId
         if (pendingAppleRefreshId != mediaId) pendingAppleRefreshId = null
         val refresh = pendingAppleRefreshId != null
-        if (loadedMediaId == mediaId && !(refresh && isPlaying)) return
+        if (loadedMediaId == mediaId && loadedOccurrence == state.trackOccurrence &&
+            loadedRepeatGeneration == state.repeatGeneration && !(refresh && state.isPlaying)) return
         loadedMediaId = mediaId
+        loadedOccurrence = state.trackOccurrence
+        loadedRepeatGeneration = state.repeatGeneration
         pendingAppleRefreshId = null
         load(mediaId, officialOnly = refresh)
     }
@@ -188,12 +196,13 @@ class LyricsController(
         _status.value = Status.Loading
         loadJob = scope.launch {
             val loadStartedAt = SystemClock.elapsedRealtime()
+            var cachePublished = false
             val cached = cacheKey?.let { cache.find(it) }
-            if (cached != null && player.state.value.mediaId == mediaId &&
-                cacheKey == lyricCacheKey(kind, id, options, preferAmll)) {
+            if (!isActive || player.state.value.mediaId != mediaId) return@launch
+            if (cached != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll)) {
                 publishSong(cached.song)
-                note(mediaId, "来源=${cached.source} 阶段=歌词缓存命中 ${cached.song.lines.size} 行")
-                return@launch
+                cachePublished = true
+                note(mediaId, "来源=${cached.source} 阶段=歌词缓存命中 ${cached.song.lines.size} 行，继续网络刷新")
             }
             var requestStartedAt = loadStartedAt
             var requestFinishedAt = requestStartedAt
@@ -253,30 +262,48 @@ class LyricsController(
                     source = "apple"
                 }
                 if (!isActive || player.state.value.mediaId != mediaId) return@launch
-                publishSong(song)
-                note(mediaId, "来源=$source 阶段=完成 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
-                    "解析耗时=${parseElapsedMs}ms 总耗时=${SystemClock.elapsedRealtime() - loadStartedAt}ms " +
-                    "${song?.lines?.size ?: 0} 行，${payload?.length ?: 0} 字符$fallback")
-                if (song != null && cacheKey != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll)) {
-                    val complete = CachedLyrics(source, song)
-                    scope.launch { cache.store(cacheKey, complete) }
+                if (song == null) {
+                    if (cachePublished) {
+                        _status.value = Status.Ready
+                        note(mediaId, "来源=$source 阶段=完成 最新请求无歌词，保留缓存")
+                    } else {
+                        publishSong(null)
+                        note(mediaId, "来源=$source 阶段=完成 最新请求无歌词")
+                    }
+                } else {
+                    if (song != currentSong) publishSong(song) else _status.value = Status.Ready
+                    note(mediaId, "来源=$source 阶段=完成 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
+                        "解析耗时=${parseElapsedMs}ms 总耗时=${SystemClock.elapsedRealtime() - loadStartedAt}ms " +
+                        "${song.lines.size} 行，${payload?.length ?: 0} 字符$fallback")
+                    if (cacheKey != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll)) {
+                        val complete = CachedLyrics(source, song)
+                        scope.launch { cache.store(cacheKey, complete) }
+                    }
                 }
             } catch (e: TimeoutCancellationException) {
                 if (!isActive || player.state.value.mediaId != mediaId) return@launch
-                val failedAt = SystemClock.elapsedRealtime()
-                fail(mediaId, "歌词解析超时", "来源=$source 阶段=解析 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
-                    "解析耗时=${failedAt - parseStartedAt}ms " +
-                    "总耗时=${failedAt - loadStartedAt}ms$fallback 歌词解析超时")
+                if (cachePublished) {
+                    _status.value = Status.Ready
+                    note(mediaId, "来源=$source 阶段=解析超时，保留缓存")
+                } else {
+                    val failedAt = SystemClock.elapsedRealtime()
+                    fail(mediaId, "歌词解析超时", "来源=$source 阶段=解析 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
+                        "解析耗时=${failedAt - parseStartedAt}ms 总耗时=${failedAt - loadStartedAt}ms$fallback 歌词解析超时")
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (!isActive || player.state.value.mediaId != mediaId) return@launch
-                val failedAt = SystemClock.elapsedRealtime()
-                val message = "歌词加载失败（${stage}阶段）：${e.message ?: e.javaClass.simpleName}"
-                val timing = if (stage == "请求") "请求耗时=${requestFinishedAt - requestStartedAt}ms"
-                    else "请求耗时=${requestFinishedAt - requestStartedAt}ms 解析耗时=${failedAt - parseStartedAt}ms"
-                fail(mediaId, message, "来源=$source 阶段=$stage $timing " +
-                    "总耗时=${failedAt - loadStartedAt}ms$fallback $message")
+                if (cachePublished) {
+                    _status.value = Status.Ready
+                    note(mediaId, "来源=$source 阶段=$stage 网络失败，保留缓存：${e.message ?: e.javaClass.simpleName}")
+                } else {
+                    val failedAt = SystemClock.elapsedRealtime()
+                    val message = "歌词加载失败（${stage}阶段）：${e.message ?: e.javaClass.simpleName}"
+                    val timing = if (stage == "请求") "请求耗时=${requestFinishedAt - requestStartedAt}ms"
+                        else "请求耗时=${requestFinishedAt - requestStartedAt}ms 解析耗时=${failedAt - parseStartedAt}ms"
+                    fail(mediaId, message, "来源=$source 阶段=$stage $timing 总耗时=${failedAt - loadStartedAt}ms$fallback $message")
+                }
             } finally {
                 amllRequest?.cancel()
                 officialRequest?.cancel()
