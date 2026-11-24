@@ -67,7 +67,7 @@ internal class AudioFileTransfer(private val context: Context, private val api: 
         require(request.maxBytes > 0) { "缓存上限无效" }
         withContext(Dispatchers.IO) { target.parentFile?.mkdirs() }
         val result = when (request.track.source) {
-            Source.Apple -> AppleOfflineExporter(context).export(request, target, reserve, progress)
+            Source.Apple -> AppleNativeExporter(api, context).export(request, target, reserve, progress)
             Source.Netease -> transferNetease(request, target, reserve, progress)
             Source.QQ -> transferDirect(request, target, reserve, progress)
         }
