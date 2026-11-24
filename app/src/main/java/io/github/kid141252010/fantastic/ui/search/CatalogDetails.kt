@@ -271,31 +271,36 @@ private fun DetailBody(
     val playable = remember(loaded) {
         loaded.song?.let(::listOf) ?: playableSection?.entries?.mapNotNull { it.track }.orEmpty()
     }
-    var collectionPlayBusy by remember(loaded) { mutableStateOf<String?>(null) }
-    var collectionPlayError by remember(loaded) { mutableStateOf<String?>(null) }
+    var collectionPlayBusy by remember { mutableStateOf<String?>(null) }
+    var collectionPlayError by remember { mutableStateOf<String?>(null) }
+    var collectionPlayRequest by remember { mutableStateOf(0) }
     fun loadCollection(section: DetailSection, action: (List<Track>) -> Unit) {
-        if (collectionPlayBusy != null) return
+        val request = collectionPlayRequest + 1
+        collectionPlayRequest = request
         collectionPlayBusy = section.key
         collectionPlayError = null
         scope.launch {
             try {
                 val tracks = repository.completeTracks(section)
                 if (tracks.isEmpty()) throw DetailUnavailable("服务器未返回歌曲。")
-                action(tracks)
+                if (request == collectionPlayRequest) action(tracks)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                collectionPlayError = "无法加载完整曲目列表：${detailError(e)}"
+                if (request == collectionPlayRequest) collectionPlayError = "无法加载完整曲目列表：${detailError(e)}"
             } finally {
-                collectionPlayBusy = null
+                if (request == collectionPlayRequest) collectionPlayBusy = null
             }
         }
     }
     val playCollection: (DetailSection, Int, Boolean) -> Unit = playCollection@{ section, entryIndex, shuffle ->
-        if (section.entries.getOrNull(entryIndex)?.track == null) return@playCollection
+        val clickedTrack = section.entries.getOrNull(entryIndex)?.track ?: return@playCollection
+        app.player.play(clickedTrack)
         val clickedIndex = section.entries.take(entryIndex).count { it.track != null }
         loadCollection(section) { songs ->
-            if (clickedIndex !in songs.indices) throw DetailUnavailable("服务器未返回所选歌曲。")
+            if (songs.getOrNull(clickedIndex)?.mediaId != clickedTrack.mediaId) {
+                throw DetailUnavailable("服务器未返回所选歌曲。")
+            }
             playOrdered(songs, clickedIndex, null, shuffle)
         }
     }

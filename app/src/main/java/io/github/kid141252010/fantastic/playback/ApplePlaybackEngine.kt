@@ -118,6 +118,7 @@ internal class ApplePlaybackEngine(
 
     private var songs = emptyList<QueuedSong>()
     private var occurrence = -1
+    internal val currentUid: Int? get() = songs.getOrNull(occurrence)?.uid
     private var currentNative: AppleNativeTrack? = null
     private var alacOutput: AlacOutput? = null
     private var server = ""
@@ -164,6 +165,7 @@ internal class ApplePlaybackEngine(
     fun position(): Long {
         val output = alacOutput
         if (output != null) return output.positionMs()
+        if (player.mediaItemCount == 0) return lastPositionMs
         return player.currentPosition.takeIf { it >= 0L } ?: lastPositionMs
     }
 
@@ -197,6 +199,7 @@ internal class ApplePlaybackEngine(
         activeCacheSource = null
         currentNative = null
         player.stop()
+        player.clearMediaItems()
         _state.value = previous.copy(
             connected = true,
             mediaId = "apple:${selected.track.id}",
@@ -219,7 +222,7 @@ internal class ApplePlaybackEngine(
             bufferedPositionMs = 0L,
             seekGeneration = previous.seekGeneration + 1,
         )
-        if (playWhenReady) beginPrepare(serial, selected, startPositionMs)
+        if (playWhenReady) beginPrepare(serial, selected)
     }
 
     fun replaceUpcoming(tail: List<QueuedSong>) = onMain {
@@ -250,14 +253,12 @@ internal class ApplePlaybackEngine(
             val serial = ++requestSerial
             prepareJob?.cancel()
             stopOutput()
-            beginPrepare(serial, songs.getOrNull(occurrence) ?: return@onMain, target)
-        } else {
+            beginPrepare(serial, songs.getOrNull(occurrence) ?: return@onMain)
+        } else if (player.mediaItemCount > 0) {
             player.seekTo(target)
         }
         _state.value = state.copy(ended = false, seekGeneration = state.seekGeneration + 1)
     }
-
-    fun skipTo(index: Int): Boolean = false
 
     fun setPlaying(playing: Boolean) = onMain {
         if (!playing) {
@@ -271,6 +272,7 @@ internal class ApplePlaybackEngine(
             _state.value = _state.value.copy(playWhenReady = true, ended = false)
             schedulePoll()
         } else {
+            if (_state.value.playWhenReady && _state.value.buffering) return@onMain
             playQueue(songs, occurrence, if (_state.value.ended) 0L else position(), true, userRequestedQuality, server, storefront)
         }
         if (song.track.id != _state.value.mediaId?.removePrefix("apple:")) {
@@ -301,8 +303,11 @@ internal class ApplePlaybackEngine(
         userRequestedQuality = group
         val serial = ++requestSerial
         prepareJob?.cancel()
+        lastPositionMs = position()
         stopOutput()
+        currentNative = null
         player.stop()
+        player.clearMediaItems()
         activeCacheSource = null
         _state.value = _state.value.copy(
             queue = songs.map { it.track },
@@ -314,7 +319,7 @@ internal class ApplePlaybackEngine(
             audioDetails = null,
             error = null,
         )
-        beginPrepare(serial, updated, lastPositionMs)
+        beginPrepare(serial, updated)
     }
 
     fun close() = onMain {
@@ -343,6 +348,7 @@ internal class ApplePlaybackEngine(
                 if (serial != requestSerial || closed.get()) return@launch
                 onMain {
                     if (serial != requestSerial || closed.get()) return@onMain
+                    val startPositionMs = lastPositionMs
                     currentNative = track
                     if (track.widevine || !track.variant.codecs.contains("alac", ignoreCase = true)) {
                         startMedia3(serial, song, track, startPositionMs)
@@ -397,9 +403,8 @@ internal class ApplePlaybackEngine(
             )
         }
         val source = sourceFactory.createMediaSource(itemBuilder.build())
-        player.setMediaSource(source)
+        player.setMediaSource(source, startPositionMs)
         player.prepare()
-        player.seekTo(startPositionMs)
         player.playWhenReady = true
         updateFormatState(song, track)
         schedulePoll()
@@ -446,8 +451,7 @@ internal class ApplePlaybackEngine(
     }
 
     private fun updateFromPlayer() {
-        val track = currentNative ?: return
-        if (closed.get() || alacOutput != null) return
+        if (closed.get() || alacOutput != null || currentNative == null || player.mediaItemCount == 0) return
         val state = _state.value
         val playing = player.isPlaying && player.playWhenReady
         val buffering = player.playbackState == Player.STATE_BUFFERING

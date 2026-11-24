@@ -65,13 +65,14 @@ class PlayerConnection(private val context: Context) {
     private var queueRevision = 0L
     private var queueSignature: List<Int> = emptyList()
     private var currentIndex = -1
+    private var lastMediaId: String? = null
+    private var lastOccurrence = -1
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) = refresh()
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
-            seekGeneration++
-            refresh()
+            refresh(discontinuity = true)
         }
     }
 
@@ -118,6 +119,8 @@ class PlayerConnection(private val context: Context) {
         pending = null
         queueSignature = emptyList()
         currentIndex = -1
+        lastMediaId = null
+        lastOccurrence = -1
         _state.value = PlayerState()
         context.stopService(Intent(context, PlaybackService::class.java))
     }
@@ -210,9 +213,11 @@ class PlayerConnection(private val context: Context) {
     }
 
 
-    private fun refresh() {
+    private fun refresh(discontinuity: Boolean = false) {
         val player = controller ?: return
         val item = player.currentMediaItem
+        val mediaId = item?.mediaId
+        val metadata = item?.mediaMetadata
         val entries = (0 until player.mediaItemCount).mapNotNull { index ->
             val queued = player.getMediaItemAt(index)
             queued.toTrack()?.let { QueueEntry(index, it, queued.mediaMetadata.extras?.getInt(KEY_OCCURRENCE, index) ?: index) }
@@ -224,19 +229,21 @@ class PlayerConnection(private val context: Context) {
             currentIndex = selected
             queueRevision++
         }
-        val metadata = player.mediaMetadata
+        val occurrence = metadata?.extras?.getInt(KEY_OCCURRENCE, -1) ?: -1
+        if (discontinuity || mediaId != lastMediaId || occurrence != lastOccurrence) seekGeneration++
+        lastMediaId = mediaId
+        lastOccurrence = occurrence
         val sessionExtras = player.sessionExtras
-        val occurrence = item?.mediaMetadata?.extras?.getInt(KEY_OCCURRENCE, -1) ?: -1
         val hasCurrentAudio = occurrence != -1 &&
             sessionExtras.getInt(PlaybackService.AUDIO_OCCURRENCE, -1) == occurrence &&
-            sessionExtras.getString(PlaybackService.AUDIO_MEDIA_ID) == item?.mediaId &&
+            sessionExtras.getString(PlaybackService.AUDIO_MEDIA_ID) == mediaId &&
             sessionExtras.getInt(PlaybackService.AUDIO_QUEUE_INDEX, -1) == selected
         _state.value = PlayerState(
             connected = true,
-            mediaId = item?.mediaId,
-            title = metadata.title?.toString().orEmpty(),
-            artist = metadata.artist?.toString().orEmpty(),
-            artworkUri = metadata.artworkUri?.toString(),
+            mediaId = mediaId,
+            title = metadata?.title?.toString().orEmpty(),
+            artist = metadata?.artist?.toString().orEmpty(),
+            artworkUri = metadata?.artworkUri?.toString(),
             isPlaying = player.isPlaying,
             playWhenReady = player.playWhenReady,
             ended = player.playbackState == Player.STATE_ENDED,
