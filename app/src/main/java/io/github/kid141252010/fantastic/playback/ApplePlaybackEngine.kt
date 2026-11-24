@@ -19,8 +19,9 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.drm.FrameworkMediaDrm
+import androidx.media3.exoplayer.hls.HlsDataSourceFactory
 import androidx.media3.exoplayer.hls.HlsMediaSource
-import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.ByteArrayDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.MediaSource
 import io.github.kid141252010.fantastic.data.FantasticApi
@@ -354,9 +355,9 @@ internal class ApplePlaybackEngine(
         val itemBuilder = MediaItem.Builder()
             .setMediaId("apple:${song.track.id}")
             .setUri(itemUri)
-        val sourceFactory = if (track.widevine) {
+        val widevineManifest = track.widevineManifest
+        val sourceFactory = if (widevineManifest != null) {
             val http = DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
                 .setConnectTimeoutMs(10_000)
                 .setReadTimeoutMs(30_000)
             val callback = AppleNativeWidevine(api, server, song.track.id).also {
@@ -365,7 +366,10 @@ internal class ApplePlaybackEngine(
             val drm = DefaultDrmSessionManager.Builder()
                 .setUuidAndExoMediaDrmProvider(AppleNativeWidevine.WIDEVINE_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
                 .build(callback)
-            HlsMediaSource.Factory(DefaultDataSource.Factory(appContext, http))
+            HlsMediaSource.Factory(HlsDataSourceFactory { dataType ->
+                if (dataType == C.DATA_TYPE_MANIFEST) ByteArrayDataSource(widevineManifest)
+                else http.createDataSource()
+            })
                 .setDrmSessionManagerProvider(DrmSessionManagerProvider { drm })
         } else {
             HlsMediaSource.Factory(AppleNativeDataSourceFactory(track, decryptor))

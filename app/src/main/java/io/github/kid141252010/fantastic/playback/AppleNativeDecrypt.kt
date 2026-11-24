@@ -51,8 +51,10 @@ internal data class AppleNativeTrack(
     val alacFrameLength: Int,
     val alacChannels: Int,
     val alacBits: Int,
-    val widevine: Boolean = false,
+    val widevineManifest: ByteArray? = null,
 ) {
+    val widevine: Boolean get() = widevineManifest != null
+
     // Keep key requests on the server that resolved this track, even if prefs change.
     internal var templateServer: HttpUrl? = null
 }
@@ -173,7 +175,8 @@ internal class AppleNativeDecrypt(
                 ?: adamId
             return AppleNativeTrack(
                 mediaAdamId, selected, mediaUrl, media, rewrittenInitBytes, init.alacCookie,
-                init.alacFrameLength, init.alacChannels, init.alacBits, widevine,
+                init.alacFrameLength, init.alacChannels, init.alacBits,
+                widevineManifest = if (widevine) media3WidevineManifest(text) else null,
             ).also { it.templateServer = base }
         }
         if (wanted != null && unsupportedAtmos) throw IOException("该设备不能解码杜比全景声")
@@ -410,6 +413,32 @@ private fun JSONObject.requiredString(key: String, error: String): String =
 private fun attributes(line: String): Map<String, String> = HLS_ATTRIBUTE.findAll(line.substringAfter(':'))
     .associate { it.groupValues[1] to it.groupValues[2].trim().removeSurrounding("\"") }
 
+/** Convert Apple's legacy CENC key tag into the form Media3's HLS parser reads. */
+internal fun media3WidevineManifest(text: String): ByteArray = buildString(text.length) {
+    for (raw in text.lineSequence()) {
+        val line = raw.trim()
+        if (!line.startsWith("#EXT-X-KEY:")) {
+            appendLine(raw)
+            continue
+        }
+        val fields = attributes(line)
+        val uri = fields["URI"]
+        val method = fields["METHOD"]
+        if (uri == null || !uri.startsWith("data:", ignoreCase = true) || method == "NONE") {
+            appendLine(raw)
+            continue
+        }
+        val pssh = Base64.getEncoder().encodeToString(appleWidevinePssh(uri))
+        append("#EXT-X-KEY:METHOD=")
+        append(if (method == "ISO-23001-7") "SAMPLE-AES-CTR" else method)
+        append(",URI=\"data:application/octet-stream;base64,").append(pssh).append('"')
+        append(",KEYFORMAT=\"").append(WIDEVINE_KEYFORMAT).append('"')
+        fields["KEYFORMATVERSIONS"]?.let { append(",KEYFORMATVERSIONS=\"").append(it).append('"') }
+        fields["IV"]?.let { append(",IV=").append(it) }
+        appendLine()
+    }
+}.toByteArray(Charsets.UTF_8)
+
 private fun parseMaster(text: String, base: HttpUrl): List<AppleNativeVariant> {
     val groups = HashMap<String, Map<String, String>>()
     val streams = ArrayList<Pair<Map<String, String>, String>>()
@@ -485,7 +514,7 @@ private fun parseMedia(text: String, base: HttpUrl, widevine: Boolean): AppleNat
                 if (fields["METHOD"] == "NONE" || uri == null) {
                     keyUri = null
                 } else if (uri.startsWith("data:", ignoreCase = true)) {
-                    if (!format.equals(WIDEVINE_KEYFORMAT, true)) throw IOException("Apple HLS 密钥格式不受支持")
+                    if (format != null && !format.equals(WIDEVINE_KEYFORMAT, true)) throw IOException("Apple HLS 密钥格式不受支持")
                     if (widevine) keyUri = uri
                 } else {
                     keyUri = uri
