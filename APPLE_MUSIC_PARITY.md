@@ -22,6 +22,16 @@
 - 「查看歌曲制作信息」按需读取当前录音的署名。Apple Music 通过配置服务读取人员和角色分组，缺少有效人员时使用 `composerName`。QQ 音乐读取官方歌曲详情中的明确角色。网易云音乐只显示官方 LRC 明确标注的「网易云音乐歌词署名」。[Apple Music 制作信息说明](https://support.apple.com/guide/music-web/view-song-credits-apdm3b93fb16/web)
 - 公开构建使用 Android 系统字体。可选字体配置见[本地构建说明](AGENTS.md#local-release-apks)。
 
+## Apple 在线流定位与时钟
+
+- 歌词定位沿用 `NativeLyricsView → LyricsController → PlayerConnection → MediaController → FantasticSessionPlayer`，不修改歌词时码或增加 UI 时钟。每次定位同步保存最后目标；暂停定位不自动播放。
+- ALAC 的每次定位以请求和 `seekGeneration` 隔离，输出协程独占解码器及 AudioTrack，取消时先摘除输出并 `pause()+flush()`，等待旧协程清理后才创建新输出。时钟为绝对起点加 unsigned 播放头差量，下载/提交帧不充当已播时间；缓冲耗尽停止会话外推，尾部真实排空后才结束。
+- AAC/Widevine 沿用 Media3 1.5.1 的原生 HLS/DRM 路径。仅当前请求的非占位 window 可接管位置；加载期多次定位只应用最后目标，保留播放/暂停意图。用户 seek 由 `SimpleBasePlayer` 发出 SEEK discontinuity，不再把小于一秒的位置伪装为自动循环。
+- 诊断标签 `FantasticPlayback` 每次接受定位记录 `apple-seek`，对应 ALAC 首输出或 Media3 READY 记录 `apple-seek-output`；包含安全曲目 ID、occurrence、request、seek 与绝对位置，不打印服务器、鉴权或 CDN URL。
+- 依据：[Apple Android 同步歌词说明（2025-09-17）](https://support.apple.com/en-us/109355)、[AudioTrack 播放头及 pause/flush 契约](https://developer.android.com/reference/android/media/AudioTrack#getPlaybackHeadPosition())、Media3 1.5.1 [MaskingMediaSource](https://github.com/androidx/media/blob/1.5.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/source/MaskingMediaSource.java) 与 [SimpleBasePlayer](https://github.com/androidx/media/blob/1.5.1/libraries/common/src/main/java/androidx/media3/common/SimpleBasePlayer.java)。10ms 写入背压轮询、100ms 输出采样是工程实现值，不是 Apple 参数。
+- 本次 ADB 无在线设备；真实在线 ALAC 与 AAC/Widevine 的 90s/180s 歌词点击、快速覆盖、暂停五秒后恢复、慢加载/再缓冲、分片边界/曲尾、切歌/音质切换均未设备验收。构建与包体核验不能证明声音、歌词、进度及 MediaSession 已对齐。
+
+
 ## 设备验收
 
 多数原先列为待实机验收的项目已由项目维护者在实机验收。下表汇总有具体曲目或操作记录的场景。

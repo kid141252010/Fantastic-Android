@@ -101,7 +101,6 @@ internal class FantasticSessionPlayer(
     internal var onCurrentAudioChanged: (CurrentAudio?) -> Unit = {}
     private var publishedAudio: CurrentAudio? = null
     private val spatialDecoders = mutableMapOf<Pair<String, Int?>, Boolean>()
-    private var lastAppleSeek = 0
     private var lastAppleLoops = 0L
     private var discontinuity: Pair<Int, Long>? = null
     private var automaticOccurrence: Int? = null
@@ -191,12 +190,8 @@ internal class FantasticSessionPlayer(
                             return@collect
                         }
                     }
-                    if (current?.uid == song.uid && state.seekGeneration != lastAppleSeek && apple.position() < 1_000) {
-                        discontinuity = Player.DISCONTINUITY_REASON_AUTO_TRANSITION to apple.position()
-                    }
                     engineSelected(song)
                 }
-                lastAppleSeek = state.seekGeneration
                 apple.activeCacheSource?.let(::observeApplePlayback)
                 if (state.ended && state.playWhenReady) adjacent(true, automatic = true)?.let { start(it, 0L, true) }
                 publish()
@@ -765,7 +760,6 @@ internal class FantasticSessionPlayer(
                 apple.setRepeatMode(engineRepeatMode())
                 apple.playQueue(run.map { it.song }, before.size, at, playing, song.quality,
                     server = selected.server, storefront = selected.key?.storefront ?: prefs.storefront)
-                lastAppleSeek = appleState.seekGeneration
                 lastAppleLoops = apple.completedLoops
             } else {
                 if (wasApple) apple.stop()
