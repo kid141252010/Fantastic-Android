@@ -18,6 +18,7 @@ import androidx.media3.extractor.mp4.PsshAtomUtil
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.SourceStatus
 import kotlinx.coroutines.currentCoroutineContext
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -286,24 +287,21 @@ internal class AppleNativeDecrypt(
             val keyUri = segment.keyUri
             if (keyUri != null) {
                 if (!keyUri.startsWith("skd://")) throw IOException("Apple 分片密钥格式不受支持")
-                val key = if (keyUri == PREFETCH_URI) {
-                    TemplateKey(null, "", keyUri)
-                } else {
-                    TemplateKey(track.templateServer ?: appleServer(api.url("")), track.adamId, keyUri)
-                }
-                val template = applePreparation("fairplay_template") { acquireTemplate(key) }
-                synchronized(template) {
-                    if (closed) throw IOException("Apple 解密模板已关闭")
-                    for (range in samples) {
-                        context.ensureActive()
-                        val end = range.last + 1
-                        val clear = Temari.decrypt(template.handle, bytes.copyOfRange(range.first, end))
-                        if (clear.size != end - range.first) {
-                            throw ApplePreparationException("fairplay_decrypt", "length_mismatch", "Apple 分片解密失败")
-                        }
-                        clear.copyInto(bytes, range.first)
+                val server = track.templateServer ?: appleServer(api.url(""))
+                val prefetch = isPrefetchKey(keyUri)
+                val primary = if (prefetch) TemplateKey(null, "", PREFETCH_URI) else TemplateKey(server, track.adamId, keyUri)
+                val alternate = if (prefetch) TemplateKey(server, track.adamId, keyUri) else TemplateKey(null, "", PREFETCH_URI)
+                val encrypted = bytes.copyOf()
+                var plain = decryptSamples(primary, encrypted, samples, context)
+                val channels = track.alacChannels
+                if (channels in 1..2 && samples.isNotEmpty() && !looksLikeAlac(plain, samples.first().first, channels)) {
+                    val fallback = runCatching { decryptSamples(alternate, encrypted, samples, context) }.getOrNull()
+                    if (fallback != null && looksLikeAlac(fallback, samples.first().first, channels)) {
+                        Log.i("FantasticPlayback", "apple-decrypt-retry id=${track.adamId.appleLogToken()} prefetch=$prefetch")
+                        plain = fallback
                     }
                 }
+                plain.copyInto(bytes)
             }
             if (track.alacCookie != null) {
                 for (range in samples) {
@@ -313,6 +311,29 @@ internal class AppleNativeDecrypt(
             applePreparation("segment_container") { fragment.clearFragmentBoxes() }
         }
         return AppleNativeFetchedSegment(bytes, samples, segment.durationMs)
+    }
+
+    private suspend fun decryptSamples(
+        key: TemplateKey,
+        encrypted: ByteArray,
+        samples: List<IntRange>,
+        context: CoroutineContext,
+    ): ByteArray {
+        val template = applePreparation("fairplay_template") { acquireTemplate(key) }
+        val out = encrypted.copyOf()
+        synchronized(template) {
+            if (closed) throw IOException("Apple 解密模板已关闭")
+            for (range in samples) {
+                context.ensureActive()
+                val end = range.last + 1
+                val clear = Temari.decrypt(template.handle, out.copyOfRange(range.first, end))
+                if (clear.size != end - range.first) {
+                    throw ApplePreparationException("fairplay_decrypt", "length_mismatch", "Apple 分片解密失败")
+                }
+                clear.copyInto(out, range.first)
+            }
+        }
+        return out
     }
 
     // These operations preserve size and update the owned network buffer in place.
@@ -845,6 +866,16 @@ private fun repairPacket(bytes: ByteArray, offset: Int, size: Int, frameLength: 
         val index = offset + (bit / 8).toInt()
         bytes[index] = (bytes.u8(index) or (0x80 ushr (bit % 8).toInt())).toByte()
     }
+}
+
+private fun isPrefetchKey(uri: String): Boolean =
+    uri.equals(PREFETCH_URI, ignoreCase = true) || uri.contains("P000000000/s1/e1", ignoreCase = true)
+
+private fun looksLikeAlac(bytes: ByteArray, offset: Int, channels: Int): Boolean {
+    if (offset < 0 || offset + 3 > bytes.size) return false
+    val header = (bytes.u8(offset) shl 16) or (bytes.u8(offset + 1) shl 8) or bytes.u8(offset + 2)
+    val element = header ushr 21
+    return if (channels == 1) element == 0 || element == 3 else element == 1
 }
 
 private fun ByteArray.u8(index: Int): Int = this[index].toInt() and 0xff
