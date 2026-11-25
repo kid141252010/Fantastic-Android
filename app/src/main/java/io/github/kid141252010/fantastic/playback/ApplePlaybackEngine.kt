@@ -678,15 +678,15 @@ private class AlacOutput(
             val sampleRate = AlacDecoder.sampleRate(decoder).takeIf { it > 0 } ?: track.variant.sampleRate
             val channels = AlacDecoder.channels(decoder).takeIf { it > 0 } ?: track.alacChannels
             val bits = AlacDecoder.bits(decoder).takeIf { it > 0 } ?: track.alacBits
-            val encoding = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_FLOAT
             val channelMask = when (channels) {
                 1 -> AudioFormat.CHANNEL_OUT_MONO
                 2 -> AudioFormat.CHANNEL_OUT_STEREO
                 6 -> AudioFormat.CHANNEL_OUT_5POINT1
                 else -> throw IOException("Apple ALAC 声道数不可播放")
             }
+            val encoding = alacOutputEncoding(sampleRate, channelMask, bits)
             val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
-            if (minBuffer <= 0) throw IOException("Apple ALAC 音频格式不可播放：$minBuffer")
+            if (minBuffer <= 0) throw ApplePreparationException("alac_buffer", "buffer_$minBuffer", "设备不支持此 ALAC 输出格式")
             val trackOutput = AudioTrack.Builder()
                 .setAudioAttributes(
                     PlatformAudioAttributes.Builder()
@@ -706,7 +706,7 @@ private class AlacOutput(
                 .build()
             output = trackOutput
             Log.i("FantasticPlayback", "apple-alac-output id=${track.adamId.appleLogToken()} bits=$bits " +
-                "sampleRate=$sampleRate channels=$channels encoding=$encoding")
+                "sampleRate=$sampleRate channels=$channels encoding=$encoding pcm16=${encoding == AudioFormat.ENCODING_PCM_16BIT && bits != 16}")
             val bytesPerFrame = channels * if (bits == 16) 2 else 4
             supervisorScope {
                 val segments = track.playlist.segments
@@ -747,7 +747,7 @@ private class AlacOutput(
                             stage = "audio_output"
                             val frames = (pcm.size - offset) / bytesPerFrame
                             if (frames > 0) {
-                                writeFully(trackOutput, pcm, offset, pcm.size - offset, encoding)
+                                writeFully(trackOutput, pcm, offset, pcm.size - offset, encoding, bits)
                                 if (firstPcm) {
                                     firstPcm = false
                                     onFirstPcm(segmentIndex, frames)
@@ -797,7 +797,12 @@ private class AlacOutput(
         )
     }
 
-    private fun writeFully(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int, encoding: Int) {
+    private fun writeFully(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int, encoding: Int, bits: Int) {
+        if (encoding == AudioFormat.ENCODING_PCM_16BIT && bits != 16) {
+            val converted = floatPcmToPcm16(pcm, offset, length)
+            writePcm16(output, converted, 0, converted.size)
+            return
+        }
         if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
             val buffer = ByteBuffer.wrap(pcm, offset, length).order(ByteOrder.LITTLE_ENDIAN)
             while (buffer.hasRemaining()) {
@@ -806,12 +811,29 @@ private class AlacOutput(
             }
             return
         }
+        writePcm16(output, pcm, offset, length)
+    }
+
+    private fun writePcm16(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int) {
         var written = 0
         while (written < length) {
             val count = output.write(pcm, offset + written, length - written, AudioTrack.WRITE_BLOCKING)
             if (count <= 0) throw ApplePreparationException("audio_output", "write_$count", "设备无法输出 ALAC 音频")
             written += count
         }
+    }
+
+    private fun floatPcmToPcm16(pcm: ByteArray, offset: Int, length: Int): ByteArray {
+        val input = ByteBuffer.wrap(pcm, offset, length).order(ByteOrder.LITTLE_ENDIAN)
+        val out = ByteArray(length / 4 * 2)
+        var index = 0
+        while (input.remaining() >= 4) {
+            val sample = (input.float.coerceIn(-1f, 1f) * 32767f).toInt().coerceIn(-32768, 32767)
+            out[index] = sample.toByte()
+            out[index + 1] = (sample shr 8).toByte()
+            index += 2
+        }
+        return out
     }
 
     private fun List<AppleNativeSegment>.indexForPosition(positionMs: Long): Int {

@@ -182,12 +182,14 @@ internal class AppleNativeDecrypt(
                 if (automaticLossless && (codec == AudioCodec.AAC || codec == AudioCodec.HE)) {
                     val reason = firstAlacFailure?.reason ?: missingAlacReason(variants)
                     val stage = firstAlacFailure?.stage ?: qualitySelectionStage(reason)
+                    if (firstAlacFailure != null) throw firstAlacFailure
                     return prepareLosslessFallback(base, adamId, variant, maxRate, false, stage, reason)
                 }
                 return prepareVariant(base, adamId, variant, maxRate, widevine = false)
             } catch (failure: ApplePreparationException) {
                 if (codec == AudioCodec.ALAC && firstAlacFailure == null) firstAlacFailure = failure
                 val next = candidates.getOrNull(index + 1)?.first
+                if (automaticLossless && codec != AudioCodec.ALAC && firstAlacFailure != null) throw firstAlacFailure
                 if (explicit || next == null || codec != AudioCodec.ALAC && unavailable == null) throw failure
                 Log.i("FantasticPlayback", "apple-fallback id=${adamId.appleLogToken()} from=${variant.groupId.appleLogToken()} " +
                     "to=${next.groupId.appleLogToken()} stage=${failure.stage.appleLogToken()} reason=${failure.reason.appleLogToken()}")
@@ -803,17 +805,25 @@ private fun playableAlacRate(init: AppleNativeInit): Int {
         }
         val rate = AlacDecoder.sampleRate(handle)
         if (rate <= 0) throw ApplePreparationException("alac_rate", "invalid_rate", "Apple ALAC 采样率无效")
-        val encoding = when (AlacDecoder.bits(handle)) {
-            16 -> AudioFormat.ENCODING_PCM_16BIT
-            20, 24, 32 -> AudioFormat.ENCODING_PCM_FLOAT
-            else -> throw ApplePreparationException("alac_bit_depth", "unsupported_bits", "Apple ALAC PCM 位深不受支持")
+        val bits = AlacDecoder.bits(handle)
+        if (bits != 16 && bits != 20 && bits != 24 && bits != 32) {
+            throw ApplePreparationException("alac_bit_depth", "unsupported_bits", "Apple ALAC PCM 位深不受支持")
         }
-        val minBuffer = AudioTrack.getMinBufferSize(rate, mask, encoding)
-        if (minBuffer <= 0) throw ApplePreparationException("alac_buffer", "buffer_$minBuffer", "Apple ALAC 音频格式不可播放：$minBuffer")
+        alacOutputEncoding(rate, mask, bits)
         return rate
     } finally {
         AlacDecoder.close(handle)
     }
+
+internal fun alacOutputEncoding(sampleRate: Int, channelMask: Int, bits: Int): Int {
+    val preferred = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_FLOAT
+    if (AudioTrack.getMinBufferSize(sampleRate, channelMask, preferred) > 0) return preferred
+    if (preferred != AudioFormat.ENCODING_PCM_16BIT &&
+        AudioTrack.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT) > 0
+    ) {
+        return AudioFormat.ENCODING_PCM_16BIT
+    }
+    throw ApplePreparationException("alac_buffer", "buffer_unavailable", "设备不支持此 ALAC 输出格式")
 }
 
 private fun repairPacket(bytes: ByteArray, offset: Int, size: Int, frameLength: Int, channels: Int, bits: Int) {
