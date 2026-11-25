@@ -63,6 +63,8 @@ import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -73,7 +75,7 @@ import java.util.Locale
 /** Native Apple editorial catalogue, using only the configured Fantastic server. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, onOpen: (CatalogHit) -> Unit, searchLanding: Boolean = false, modifier: Modifier = Modifier) {
+fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit, searchLanding: Boolean = false, modifier: Modifier = Modifier) {
     val storefront = app.prefs.storefront
     val initialArea = if (searchLanding) AREA_CATEGORIES else if (radio) AREA_RADIO else AREA_NEW
     var area by rememberSaveable(initialArea) { mutableStateOf(initialArea) }
@@ -87,6 +89,21 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, onOpen: (CatalogHit)
     var loadingMore by remember { mutableStateOf(false) }
     var moreJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
+    var handledRootNavigationRequest by rememberSaveable { mutableStateOf(rootNavigationRequest) }
+    LaunchedEffect(rootNavigationRequest) {
+        if (handledRootNavigationRequest != rootNavigationRequest) {
+            if (stack.isNotEmpty() || area != initialArea || chartKind != null || genreId != ALL_GENRES) {
+                moreJob?.cancel()
+                moreJob = null
+                loadingMore = false
+                stack = emptyList()
+                area = initialArea
+                chartKind = null
+                genreId = ALL_GENRES
+            }
+            handledRootNavigationRequest = rootNavigationRequest
+        }
+    }
     val target = stack.lastOrNull()
 
     BackHandler(enabled = stack.isNotEmpty() || chartKind != null || area != initialArea) {
@@ -281,6 +298,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, onOpen: (CatalogHit)
                                         }
                                         try {
                                             val response = app.apple.page(cursor, params = TRACK_PAGE_PARAMS)
+                                            currentCoroutineContext().ensureActive()
                                             val chart = pageModel.nextChartKind
                                             val page = if (chart != null) response.charts(chart).firstOrNull() else null
                                             val more = page?.data ?: response.data

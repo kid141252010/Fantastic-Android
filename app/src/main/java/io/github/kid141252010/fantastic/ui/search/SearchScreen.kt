@@ -93,7 +93,7 @@ private class SearchResults(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
+fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var source by rememberSaveable { mutableStateOf(Source.Apple) }
     var kind by rememberSaveable { mutableStateOf<SearchCatalog.Kind?>(null) }
@@ -109,6 +109,15 @@ fun SearchScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
     val result = if (selectedKind == null) overview else category
     val player by app.player.state.collectAsStateWithLifecycle()
     val focus = LocalFocusManager.current
+    var handledRootNavigationRequest by rememberSaveable { mutableStateOf(rootNavigationRequest) }
+    LaunchedEffect(rootNavigationRequest) {
+        if (handledRootNavigationRequest != rootNavigationRequest) {
+            kind = null
+            editing = false
+            focus.clearFocus()
+            handledRootNavigationRequest = rootNavigationRequest
+        }
+    }
 
     LaunchedEffect(result, result.pageRequest, selectedKind) {
         if (term.isEmpty()) return@LaunchedEffect
@@ -221,7 +230,7 @@ fun SearchScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
         }
         if (term.isEmpty() && !editing && source == Source.Apple) {
             Box(Modifier.weight(1f)) {
-                AppleDiscoveryScreen(app, radio = false, onOpen = onOpen, searchLanding = true)
+                AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = onOpen, searchLanding = true)
             }
             return@Column
         }

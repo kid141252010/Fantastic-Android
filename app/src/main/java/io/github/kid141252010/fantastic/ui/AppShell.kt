@@ -86,6 +86,7 @@ enum class Tab(val label: String, val icon: ImageVector) {
 @Composable
 fun AppShell(app: FantasticApp) {
     var tab by rememberSaveable { mutableStateOf(Tab.Home) }
+    var rootNavigationRequest by rememberSaveable { mutableStateOf(0) }
     var nowPlaying by rememberSaveable { mutableStateOf(false) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var playerPane by rememberSaveable {
@@ -93,6 +94,7 @@ fun AppShell(app: FantasticApp) {
     }
     var lyricTranslation by rememberSaveable { mutableStateOf(app.prefs.lyricTranslation) }
     var lyricPronunciation by rememberSaveable { mutableStateOf(app.prefs.lyricPronunciation) }
+    var showLibrarySources by rememberSaveable { mutableStateOf(app.prefs.showLibrarySources) }
     val playerConnection = app.player
     val lifecycleOwner = LocalLifecycleOwner.current
     val savedPane = rememberUpdatedState(playerPane)
@@ -145,10 +147,10 @@ fun AppShell(app: FantasticApp) {
                         .then(if (playerExpanded || settings || catalog != null) Modifier.clearAndSetSemantics {} else Modifier),
                 ) {
                     when (tab) {
-                        Tab.Search -> SearchScreen(app, onOpen = { catalog = it })
-                        Tab.Library -> MusicLibraryScreen(app, onOpen = { catalog = it })
-                        Tab.New -> AppleDiscoveryScreen(app, radio = false, onOpen = { catalog = it })
-                        Tab.Radio -> AppleDiscoveryScreen(app, radio = true, onOpen = { catalog = it })
+                        Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
+                        Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest, onOpen = { catalog = it })
+                        Tab.New -> AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
+                        Tab.Radio -> AppleDiscoveryScreen(app, radio = true, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
                         Tab.Home -> Placeholder(tab, onSettings = { settings = true })
                     }
                 }
@@ -189,7 +191,12 @@ fun AppShell(app: FantasticApp) {
                         ) {
                             TabBar(
                                 selected = tab,
-                                onSelect = { catalog = null; tab = it },
+                                onSelect = {
+                                    catalog = null
+                                    settings = false
+                                    tab = it
+                                    rootNavigationRequest++
+                                },
                                 enabled = !glassSheetState.value && chromeInteractive,
                             )
                         }
@@ -198,7 +205,9 @@ fun AppShell(app: FantasticApp) {
 
                 if (settings) {
                     if (!glassSheetState.value) BackHandler { settings = false }
-                    SettingsScreen(app, app.lyrics, onClose = { settings = false })
+                    SettingsScreen(app, app.lyrics, showLibrarySources,
+                        onShowLibrarySourcesChange = { showLibrarySources = it; app.prefs.showLibrarySources = it },
+                        onClose = { settings = false })
                 }
                 appleMedia?.let { hit -> AppleMediaScreen(app, hit, onClose = { catalog = null }) }
             }

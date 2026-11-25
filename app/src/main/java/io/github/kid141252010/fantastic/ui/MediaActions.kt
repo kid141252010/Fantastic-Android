@@ -217,6 +217,7 @@ internal fun MediaActionContent(
                         library.toggleFavorite(app.librarySongHit(hit))
                         saveParentAlbum?.invoke()
                     }
+                    hit.kind == "song" && saved?.isFavorite == true -> { library.toggleFavorite(saved.hit); onDismiss() }
                     else -> { library.toggleFavorite(hit); onDismiss() }
                 }
             }))
