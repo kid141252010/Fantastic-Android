@@ -65,9 +65,15 @@ tasks.register<Copy>("copyApacheLicense") {
     from(rootProject.file("LICENSE"))
     into(generatedLicenseAssets)
 }
+tasks.register<Copy>("copyThirdPartyLicenses") {
+    from(rootProject.file("native/vendor/temari/LICENSE")) { rename { "temari.txt" } }
+    from(rootProject.file("native/vendor/alac/LICENSE")) { rename { "alac.txt" } }
+    into(rootProject.file("app/src/main/assets/licenses"))
+}
+
 
 tasks.named("preBuild").configure {
-    dependsOn("copyApacheLicense")
+    dependsOn("copyApacheLicense", "copyThirdPartyLicenses")
 }
 
 dependencies {
