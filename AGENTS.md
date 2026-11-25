@@ -53,7 +53,9 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 - 任务完成后，逐块核对并只提交本次改动，保留其他已暂存和未暂存的改动。主动将任务分支推送到 `origin`，无需等待用户提醒或另行确认。
 - 推送成功后，询问用户是否合入。用户明确批准后，同一个任务改动先合入发行主线 `main`，再将 `main` 同步到本地调试主线 `fix/debug-side-by-side`。已明确批准时不重复询问。
 - `main` 与 `origin/main` 保持同步，保留正式应用 ID `io.github.kid141252010.fantastic` 和发行签名。`fix/debug-side-by-side` 不推远端、不反向合入 `main`；保留 Debug 的 `.debug` 应用 ID 后缀和现有调试签名，以便与正式版并存。两条线的功能源码保持一致，合入后核对差异只涉及 Debug 安装身份。
+- 用户明确只要求 Debug 验收时，可先将指定任务提交合入本地 `fix/debug-side-by-side`；不得因打 Debug 包而将该功能合入 `main`。必须从 `.work/debug-local` 的实际 Debug 分支构建，不在任务分支临时注入 `.debug` 后缀。
 - 双线交付使用上文固定的工具链和独立构建目录：从 `main` 构建并用既有发行密钥签署 Release APK，从本地 Debug 分支执行 `:app:compileDebugKotlin --offline --rerun-tasks --console=plain` 与 `:app:assembleDebug --offline --console=plain`。两边本机交付均显式传 `-PincludeLocalAmFonts=true`，缺少字体则停止交付；不提交私有字体和签名材料，公开 CI 继续使用系统字体。
+- 用户要求两条线同步版本时，在 `app/build.gradle.kts` 固化相同的 `versionName` 和本地基准 `versionCode`，不使用临时 init 脚本覆盖；CI 构建号不得低于源码基准。打包后用 `aapt2 dump badging` 核对最终版本值。
 - 交付前核对两种应用 ID、APK 签名、字体资产和 SHA-256，分别给出 Release 和 Debug 路径。构建和静态检查通过不等于实机验收。
 
 ## Code Conventions & Common Patterns

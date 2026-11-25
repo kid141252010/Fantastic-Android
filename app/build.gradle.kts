@@ -25,8 +25,9 @@ android {
         applicationId = "io.github.kid141252010.fantastic"
         minSdk = 26
         targetSdk = 35
-        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "1.0.0"
+        val releaseVersionCode = 6
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt()?.coerceAtLeast(releaseVersionCode) ?: releaseVersionCode
+        versionName = "1.2.0"
         // 设置页「歌词诊断」显示构建对应的提交，便于确认手机上装的是哪个 nightly
         buildConfigField("String", "GIT_SHA", "\"${(System.getenv("GITHUB_SHA") ?: "local").take(7)}\"")
     }
