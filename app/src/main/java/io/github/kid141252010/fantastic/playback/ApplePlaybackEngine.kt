@@ -686,7 +686,7 @@ private class AlacOutput(
                 6 -> AudioFormat.CHANNEL_OUT_5POINT1
                 else -> throw IOException("Apple ALAC 声道数不可播放")
             }
-            val opened = openAlacTrack(sampleRate, channelMask, bits)
+            val opened = openAlacTrack(sampleRate, channelMask, bits, track.outputRateCap)
             val trackOutput = opened.track
             val encoding = opened.encoding
             val outputRate = opened.sampleRate
@@ -867,11 +867,11 @@ private class AlacOutput(
 
 private class OpenedAlacTrack(val track: AudioTrack, val encoding: Int, val sampleRate: Int)
 
-private fun openAlacTrack(nativeRate: Int, channelMask: Int, bits: Int): OpenedAlacTrack {
+private fun openAlacTrack(nativeRate: Int, channelMask: Int, bits: Int, rateCap: Int = Int.MAX_VALUE): OpenedAlacTrack {
     val nativeEncodings = if (bits == 16) intArrayOf(AudioFormat.ENCODING_PCM_16BIT) else intArrayOf(AudioFormat.ENCODING_PCM_FLOAT, AudioFormat.ENCODING_PCM_16BIT)
     val attempts = buildList {
-        for (encoding in nativeEncodings) add(nativeRate to encoding)
-        for (rate in intArrayOf(48_000, 44_100)) if (rate != nativeRate) add(rate to AudioFormat.ENCODING_PCM_16BIT)
+        if (nativeRate in 1..rateCap) for (encoding in nativeEncodings) add(nativeRate to encoding)
+        for (rate in intArrayOf(48_000, 44_100, rateCap)) if (rate in 1..rateCap && rate != nativeRate) add(rate to AudioFormat.ENCODING_PCM_16BIT)
     }
     for ((rate, encoding) in attempts) {
         if (rate <= 0) continue

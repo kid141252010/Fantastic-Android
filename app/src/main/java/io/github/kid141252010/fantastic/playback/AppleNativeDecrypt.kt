@@ -54,6 +54,7 @@ internal data class AppleNativeTrack(
     val alacBits: Int,
     val widevineManifest: ByteArray? = null,
     val audioQualityNotice: String? = null,
+    val outputRateCap: Int = Int.MAX_VALUE,
 ) {
     val widevine: Boolean get() = widevineManifest != null
 
@@ -237,9 +238,9 @@ internal class AppleNativeDecrypt(
         } else AppleNativeInit(rawInitBytes, null, 0, 0, 0)
         val selected = if (alac) {
             val rate = applePreparation("alac_capability") { playableAlacRate(init) }
-            if (rate > maxRate) throw ApplePreparationException("alac_rate", "rate_above_quality_limit", "Apple ALAC 采样率超出所选音质")
             variant.copy(sampleRate = rate, bitDepth = init.alacBits, channels = init.alacChannels)
         } else variant
+        val outputRateCap = if (alac && selected.sampleRate > maxRate) maxRate else Int.MAX_VALUE
         return applePreparation(if (widevine) "widevine_manifest" else "init_container") {
             val rewrittenInitBytes = rawInitBytes.copyOf().also {
                 if (!widevine) AppleMp4(it).clearInitBoxes()
@@ -254,6 +255,7 @@ internal class AppleNativeDecrypt(
                 init.alacFrameLength, init.alacChannels, init.alacBits,
                 widevineManifest = if (widevine) media3WidevineManifest(text) else null,
                 audioQualityNotice = audioQualityNotice,
+                outputRateCap = outputRateCap,
             ).also { it.templateServer = base }
         }
     }
@@ -718,9 +720,7 @@ private fun qualitySelectionStage(reason: String): String =
 private fun explicitCandidates(variants: List<AppleNativeVariant>, wanted: String): List<Pair<AppleNativeVariant, Int>> {
     if (wanted == "lossless" || wanted == "hires") {
         val maxRate = if (wanted == "lossless") 48_000 else 192_000
-        return variants.filter { it.qualityKind() == QualityKind.ALAC && it.alacSelectionRate() <= maxRate }
-            .sortedByDescending { it.alacSelectionRate() * 100L + it.bitDepth }
-            .map { it to maxRate }
+        return cappedAlac(variants, maxRate).map { it to maxRate }
     }
     val exact = variants.filter {
         it.groupId == wanted || it.quality == wanted && (wanted != "alac" || it.audioCodec() == AudioCodec.ALAC)
@@ -771,10 +771,16 @@ private fun profileCandidates(variants: List<AppleNativeVariant>, profile: Apple
     val classified = variants.groupBy { it.qualityKind() }
     return steps.flatMap { (kind, maxRate) ->
         classified[kind].orEmpty()
-            .filter { kind != QualityKind.ALAC || it.alacSelectionRate() <= maxRate }
+            .filter { kind != QualityKind.ALAC || it.alacSelectionRate() <= maxRate || cappedAlac(classified[kind].orEmpty(), maxRate).contains(it) }
             .sortedByDescending { if (kind == QualityKind.ALAC) it.alacSelectionRate() * 100L + it.bitDepth else it.bandwidth }
             .map { it to maxRate }
     }
+}
+
+private fun cappedAlac(variants: List<AppleNativeVariant>, maxRate: Int): List<AppleNativeVariant> {
+    val within = variants.filter { it.alacSelectionRate() in 1..maxRate }
+    if (within.isNotEmpty()) return within.sortedByDescending { it.alacSelectionRate() * 100L + it.bitDepth }
+    return listOfNotNull(variants.filter { it.alacSelectionRate() > maxRate }.minByOrNull { it.alacSelectionRate() }).ifEmpty { variants }
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
