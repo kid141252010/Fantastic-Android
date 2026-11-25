@@ -15,9 +15,9 @@ Fantastic Android is a Kotlin and Jetpack Compose client for a user-configured F
 
 - `FantasticApp` is the process-wide manual dependency container. It creates shared `Prefs` and `FantasticApi` instances and lazily provides API clients, `PlayerConnection`, and `LyricsController`; reuse them instead of adding a DI framework.
 - `MainActivity` hosts `FantasticTheme` and `AppShell`. Compose state and overlays drive navigation. `SearchScreen` debounces queries and uses the source catalog clients to populate results.
-- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ Music, NetEase Cloud Music, and local audio use Media3. Online Apple songs are FairPlay/Widevine-decrypted in process and then handed to Media3 or ALAC AudioTrack. Apple media pages and lyrics keep their WebViews.
+- `PlayerConnection` routes source-tagged queue items to the service-owned `FantasticSessionPlayer`. QQ Music, NetEase Cloud Music, and local audio use Media3. Online Apple Music uses Fantastic’s web player through `ApplePlaybackEngine`, with shared session state exposed through `PlayerConnection`.
 - `MusicLibrary` serializes mutations on an IO coroutine scope, persists snapshots with `AtomicFile`, and exposes immutable state through `StateFlow`.
-- `LyricParser` parses Apple TTML and provider lyrics in native Kotlin on `Dispatchers.Default`. `NativeLyricsView` and `LyricInkView` render the playback surface. Apple media pages and lyrics keep their WebViews.
+- `LyricParser` parses Apple TTML and provider lyrics in native Kotlin on `Dispatchers.Default`. `NativeLyricsView` and `LyricInkView` render the playback surface. Apple online playback, offline export, and media pages use separate WebViews.
 
 ## Key Directories
 

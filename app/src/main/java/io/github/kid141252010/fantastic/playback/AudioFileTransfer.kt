@@ -61,9 +61,7 @@ internal class AudioFileTransfer(
         withContext(Dispatchers.IO) { target.parentFile?.mkdirs() }
         val duration = maxOf(request.track.durationMs, request.expectedDurationMs)
         if (request.track.source == Source.Apple) {
-            val result = AppleNativeExporter(api, context).export(request, target, reserve, progress)
-            return verifyAudio(target, duration, request.strict, request.quality)
-                .copy(quality = result.quality.ifBlank { request.quality })
+            return AppleOfflineExporter(context).export(request, target, reserve, progress)
         }
         val qqPlayFallback = transferNative(request, target, reserve, progress, duration)
         return withContext(Dispatchers.IO) { verifyAudio(target, duration, request.strict || qqPlayFallback, request.quality) }

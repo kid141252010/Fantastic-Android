@@ -1,3 +1,0 @@
-Source URL: https://github.com/macosforge/alac/archive/refs/heads/master.tar.gz
-Archive SHA-256: 5d6ff9a7aa39f8c5745a471011a573629d18276d22565865218f438cf2b92efa
-Extracted Git commit: unavailable in the GitHub branch archive
