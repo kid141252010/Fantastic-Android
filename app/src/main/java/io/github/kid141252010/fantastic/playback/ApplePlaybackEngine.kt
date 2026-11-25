@@ -64,9 +64,11 @@ internal fun ApplePlaybackProfile.requestsLossless(explicitQuality: String?): Bo
 internal fun applePlaybackNetwork(context: Context): String? {
     val manager = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return null
     val network = manager.activeNetwork ?: return null
-    val cellular = manager.getNetworkCapabilities(network)
-        ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) == true
-    return if (cellular) "cellular" else "wifi"
+    val capabilities = manager.getNetworkCapabilities(network) ?: return null
+    val unmetered = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+        capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+    val cellular = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
+    return if (unmetered || !cellular) "wifi" else "cellular"
 }
 
 internal fun applePlaybackProfile(context: Context, prefs: Prefs, offlineNetwork: String? = null): ApplePlaybackProfile {
