@@ -814,6 +814,7 @@ private fun playableAlacRate(init: AppleNativeInit): Int {
     } finally {
         AlacDecoder.close(handle)
     }
+}
 
 internal fun alacOutputEncoding(sampleRate: Int, channelMask: Int, bits: Int): Int {
     val preferred = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_FLOAT
