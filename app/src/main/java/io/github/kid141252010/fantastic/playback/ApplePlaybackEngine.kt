@@ -307,14 +307,17 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
                     true, requestedQuality, scopeServer, activeStorefront)
             } else {
                 _state.value = state.copy(playWhenReady = true, buffering = true, ended = false)
-                mediaPlayer?.play()
-                if (mediaPlayer != null) publishMedia3State(activeSerial)
+                if (isCurrent(activeSerial)) {
+                    mediaPlayer?.play()
+                    if (mediaPlayer != null) publishMedia3State(activeSerial)
+                }
                 val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) }
                 if (run != null) {
                     run.output.play()
                     publishAlacState(run)
                 }
-                if (mediaPlayer == null && run == null && requestJob?.isActive != true && alacJob?.isActive != true) {
+                if (run == null && (mediaPlayer == null || !isCurrent(activeSerial)) &&
+                    requestJob?.isActive != true && alacJob?.isActive != true) {
                     val track = activeTrack
                     val decrypt = nativeDecrypt
                     if (track != null && decrypt != null && isCurrent(requestSerial) && track.variant.groupId.contains("alac", true)) {
