@@ -686,29 +686,14 @@ private class AlacOutput(
                 6 -> AudioFormat.CHANNEL_OUT_5POINT1
                 else -> throw IOException("Apple ALAC 声道数不可播放")
             }
-            val encoding = alacOutputEncoding(sampleRate, channelMask, bits)
-            val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
-            if (minBuffer <= 0) throw ApplePreparationException("alac_buffer", "buffer_$minBuffer", "设备不支持此 ALAC 输出格式")
-            val trackOutput = AudioTrack.Builder()
-                .setAudioAttributes(
-                    PlatformAudioAttributes.Builder()
-                        .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
-                        .setContentType(PlatformAudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(encoding)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(channelMask)
-                        .build(),
-                )
-                .setBufferSizeInBytes((minBuffer * 2).coerceAtLeast(32 * 1024))
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+            val opened = openAlacTrack(sampleRate, channelMask, bits)
+            val trackOutput = opened.track
+            val encoding = opened.encoding
+            val outputRate = opened.sampleRate
             output = trackOutput
             Log.i("FantasticPlayback", "apple-alac-output id=${track.adamId.appleLogToken()} bits=$bits " +
-                "sampleRate=$sampleRate channels=$channels encoding=$encoding pcm16=${encoding == AudioFormat.ENCODING_PCM_16BIT && bits != 16}")
+                "sampleRate=$sampleRate outputRate=$outputRate channels=$channels encoding=$encoding " +
+                "pcm16=${encoding == AudioFormat.ENCODING_PCM_16BIT && bits != 16}")
             val bytesPerFrame = channels * if (bits == 16) 2 else 4
             supervisorScope {
                 val segments = track.playlist.segments
@@ -732,7 +717,7 @@ private class AlacOutput(
                             while (paused && !closed) {
                                 if (trackOutput.playState == AudioTrack.PLAYSTATE_PLAYING) trackOutput.pause()
                                 playing.set(false)
-                                publishPosition(trackOutput, sampleRate)
+                                publishPosition(trackOutput, outputRate)
                                 delay(20L)
                             }
                             if (closed) break
@@ -749,14 +734,14 @@ private class AlacOutput(
                             stage = "audio_output"
                             val frames = (pcm.size - offset) / bytesPerFrame
                             if (frames > 0) {
-                                writeFully(trackOutput, pcm, offset, pcm.size - offset, encoding, bits)
+                                writeFully(trackOutput, pcm, offset, pcm.size - offset, encoding, bits, channels, sampleRate, outputRate)
                                 if (firstPcm) {
                                     firstPcm = false
                                     onFirstPcm(segmentIndex, frames)
                                 }
                                 if (!playing.get()) playing.set(true)
                             }
-                            publishPosition(trackOutput, sampleRate)
+                            publishPosition(trackOutput, outputRate)
                         }
                         if (closed) break
                         stage = "fragment"
@@ -799,21 +784,47 @@ private class AlacOutput(
         )
     }
 
-    private fun writeFully(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int, encoding: Int, bits: Int) {
-        if (encoding == AudioFormat.ENCODING_PCM_16BIT && bits != 16) {
-            val converted = floatPcmToPcm16(pcm, offset, length)
-            writePcm16(output, converted, 0, converted.size)
-            return
+    private fun writeFully(
+        output: AudioTrack,
+        pcm: ByteArray,
+        offset: Int,
+        length: Int,
+        encoding: Int,
+        bits: Int,
+        channels: Int,
+        nativeRate: Int,
+        outputRate: Int,
+    ) {
+        val frameBytes = channels * if (bits == 16) 2 else 4
+        val frames = length / frameBytes
+        if (frames <= 0) return
+        val input = ByteBuffer.wrap(pcm, offset, frames * frameBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val samples = FloatArray(frames * channels)
+        if (bits == 16) {
+            for (index in samples.indices) samples[index] = input.short / 32768f
+        } else {
+            for (index in samples.indices) samples[index] = input.float
         }
+        val played = if (nativeRate == outputRate) samples else resample(samples, channels, nativeRate, outputRate)
         if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
-            val buffer = ByteBuffer.wrap(pcm, offset, length).order(ByteOrder.LITTLE_ENDIAN)
+            val buffer = ByteBuffer.allocate(played.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+            played.forEach(buffer::putFloat)
+            buffer.flip()
             while (buffer.hasRemaining()) {
                 val count = output.write(buffer, buffer.remaining(), AudioTrack.WRITE_BLOCKING)
                 if (count <= 0) throw ApplePreparationException("audio_output", "write_$count", "设备无法输出 ALAC 音频")
             }
             return
         }
-        writePcm16(output, pcm, offset, length)
+        val converted = ByteArray(played.size * 2)
+        var index = 0
+        for (sample in played) {
+            val value = (sample.coerceIn(-1f, 1f) * 32767f).toInt().coerceIn(-32768, 32767)
+            converted[index] = value.toByte()
+            converted[index + 1] = (value shr 8).toByte()
+            index += 2
+        }
+        writePcm16(output, converted, 0, converted.size)
     }
 
     private fun writePcm16(output: AudioTrack, pcm: ByteArray, offset: Int, length: Int) {
@@ -825,15 +836,21 @@ private class AlacOutput(
         }
     }
 
-    private fun floatPcmToPcm16(pcm: ByteArray, offset: Int, length: Int): ByteArray {
-        val input = ByteBuffer.wrap(pcm, offset, length).order(ByteOrder.LITTLE_ENDIAN)
-        val out = ByteArray(length / 4 * 2)
-        var index = 0
-        while (input.remaining() >= 4) {
-            val sample = (input.float.coerceIn(-1f, 1f) * 32767f).toInt().coerceIn(-32768, 32767)
-            out[index] = sample.toByte()
-            out[index + 1] = (sample shr 8).toByte()
-            index += 2
+    private fun resample(input: FloatArray, channels: Int, fromRate: Int, toRate: Int): FloatArray {
+        val inFrames = input.size / channels
+        if (inFrames <= 1 || fromRate == toRate) return input
+        val outFrames = ((inFrames.toLong() * toRate) / fromRate).toInt().coerceAtLeast(1)
+        val out = FloatArray(outFrames * channels)
+        for (frame in 0 until outFrames) {
+            val source = frame.toDouble() * fromRate / toRate
+            val left = source.toInt().coerceIn(0, inFrames - 1)
+            val right = (left + 1).coerceAtMost(inFrames - 1)
+            val fraction = (source - left).toFloat()
+            for (channel in 0 until channels) {
+                val start = input[left * channels + channel]
+                val end = input[right * channels + channel]
+                out[frame * channels + channel] = start + (end - start) * fraction
+            }
         }
         return out
     }
@@ -846,4 +863,43 @@ private class AlacOutput(
         }
         return lastIndex.coerceAtLeast(0)
     }
+}
+
+private class OpenedAlacTrack(val track: AudioTrack, val encoding: Int, val sampleRate: Int)
+
+private fun openAlacTrack(nativeRate: Int, channelMask: Int, bits: Int): OpenedAlacTrack {
+    val nativeEncodings = if (bits == 16) intArrayOf(AudioFormat.ENCODING_PCM_16BIT) else intArrayOf(AudioFormat.ENCODING_PCM_FLOAT, AudioFormat.ENCODING_PCM_16BIT)
+    val attempts = buildList {
+        for (encoding in nativeEncodings) add(nativeRate to encoding)
+        for (rate in intArrayOf(48_000, 44_100)) if (rate != nativeRate) add(rate to AudioFormat.ENCODING_PCM_16BIT)
+    }
+    for ((rate, encoding) in attempts) {
+        if (rate <= 0) continue
+        val minBuffer = AudioTrack.getMinBufferSize(rate, channelMask, encoding)
+        if (minBuffer <= 0) continue
+        val track = try {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    PlatformAudioAttributes.Builder()
+                        .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
+                        .setContentType(PlatformAudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(encoding)
+                        .setSampleRate(rate)
+                        .setChannelMask(channelMask)
+                        .build(),
+                )
+                .setBufferSizeInBytes((minBuffer * 2).coerceAtLeast(32 * 1024))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+        } catch (_: IllegalArgumentException) {
+            continue
+        }
+        if (track.state == AudioTrack.STATE_INITIALIZED) return OpenedAlacTrack(track, encoding, rate)
+        track.release()
+    }
+    throw ApplePreparationException("alac_buffer", "buffer_unavailable", "设备不支持此 ALAC 输出格式")
 }
