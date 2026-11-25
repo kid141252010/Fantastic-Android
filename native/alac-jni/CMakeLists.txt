@@ -18,4 +18,5 @@ set(ALAC_SOURCES
 add_library(fantastic_alac SHARED alac_jni.cpp ${ALAC_SOURCES})
 target_include_directories(fantastic_alac PRIVATE "${ALAC_CODEC_DIR}")
 target_compile_options(fantastic_alac PRIVATE -fvisibility=hidden)
+target_link_options(fantastic_alac PRIVATE "-Wl,-z,max-page-size=16384")
 set_target_properties(fantastic_alac PROPERTIES OUTPUT_NAME "fantastic_alac")
