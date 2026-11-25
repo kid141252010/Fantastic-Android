@@ -1,32 +1,46 @@
 package io.github.kid141252010.fantastic.playback
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Bitmap
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
-import android.view.View
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsMediaSource
+import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.reportedAudioDetails
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 internal data class ApplePlaybackProfile(val network: String, val quality: String, val spatial: String)
 
@@ -60,10 +74,11 @@ internal data class AppleCacheSource(
     val storefront: String,
 )
 
-/** Hidden adapter over Fantastic's own Apple web player; it deliberately adds no playback/codec implementation. */
-internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
+@UnstableApi
+internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, private val api: FantasticApi) {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
     private val _cacheSource = MutableStateFlow<AppleCacheSource?>(null)
@@ -74,53 +89,56 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
     internal var completedLoops: Long = 0L
         private set
 
-    private data class HostedScope(val server: String, val storefront: String, val configuredServer: String)
-    private data class HostedRun(val server: String, val storefront: String, val profile: ApplePlaybackProfile)
-    private data class QualityChange(val occurrence: Int, val revision: Long)
-    private var hostedScope: HostedScope? = null
-    private var hostedRun: HostedRun? = null
-    private val closed = AtomicBoolean(false)
-    private var webView: WebView? = null
-    private var baseUrl = ""
-    private var readyStartedAt = 0L
-    private var poller: Runnable? = null
-    private var readyPoller: Runnable? = null
-    private var lastPositionMs = 0L
-    private var requestSerial = 0L
-    private enum class StartupStage { Page, Ready, Resolve, Prepare, Playing, Failed }
-    private var startupStartedAt = 0L
-    private var startupStage: StartupStage? = null
-    private var startupRequestSerial = 0L
+    @Volatile private var closed = false
+    @Volatile private var requestSerial = 0L
+    @Volatile private var activeSerial = -1L
     private var songs = emptyList<QueuedSong>()
-    private val sessionScript by lazy { appContext.assets.open("playback/apple-session.js").bufferedReader().use { it.readText() } }
-    private var seekSerial = 0L
-    private var lastHostedLoops = 0L
     private var occurrence = -1
-    internal val currentUid: Int get() = songs.getOrNull(occurrence)?.uid ?: -1
-    private var sampleTime = 0L
-    private var waitingToPlay = false
-    private var pendingStartupSeek = false
-    private var hasHostedTrack = false
-    private var qualityChange: QualityChange? = null
-    private var qualitySerial = 0L
-    private var variantDetailTrackId: String? = null
-    private var variantDetailCodecs: String? = null
-    private var variantDetailSampleRate = 0
-    private var variantDetailBitDepth = 0
-    private var variantDetailChannels: String? = null
-    private var variantDetailBandwidth = 0L
-    private var variantDetailValue: String? = null
+    private var mediaPlayer: ExoPlayer? = null
+    private var requestJob: Job? = null
+    private var serverMonitorJob: Job? = null
+    private var nativeDecrypt: AppleNativeDecrypt? = null
+    private var activeTrack: AppleResolvedTrack? = null
+    private var activeProfile = ApplePlaybackProfile("wifi", "hires", "auto")
+    private var activeServer = ""
+    private var configuredServer = ""
+    private var activeStorefront = "us"
+    private var requestedQuality: String? = null
+    private var pendingPositionMs = 0L
+    private var timelineInstalled = false
+    private var pendingSeekBeforeTimeline = false
+    @Volatile private var alacOutput: AudioTrack? = null
+    @Volatile private var alacHandle = 0L
+    @Volatile private var alacSampleRate = 0
+    @Volatile private var alacChannels = 0
+    @Volatile private var alacStartFrame = 0L
+    @Volatile private var alacStartPositionMs = 0L
+    @Volatile private var alacSubmittedSerial = -1L
+    private var loggedOutputSerial = -1L
 
-    internal fun prewarm(server: String) = onMain {
-        if (closed.get()) return@onMain
-        val normalized = SourceStatus.normalizeBaseUrl(server) ?: return@onMain
-        ensureCurrentServer(normalized)
+    internal val currentUid: Int get() = songs.getOrNull(occurrence)?.uid ?: -1
+
+    internal fun prewarm(server: String) {
+        if (!closed) SourceStatus.normalizeBaseUrl(server)
     }
 
     fun position(): Long {
-        val state = _state.value
-        val elapsed = if (state.isPlaying) (android.os.SystemClock.uptimeMillis() - sampleTime).coerceIn(0, 500) else 0L
-        return (lastPositionMs + elapsed).coerceAtMost(state.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
+        val track = activeTrack ?: return pendingPositionMs
+        if (activeSerial != requestSerial) return pendingPositionMs
+        val currentSong = songs.getOrNull(occurrence) ?: return pendingPositionMs
+        if (_state.value.queueIndex != occurrence || _state.value.mediaId != "apple:${currentSong.track.id}") return pendingPositionMs
+        val duration = track.media.durationMs.takeIf { it > 0L }
+            ?: songs.getOrNull(occurrence)?.track?.durationMs?.takeIf { it > 0L }
+        val position = if (track.variant.groupId.contains("alac", true)) {
+            val output = alacOutput ?: return pendingPositionMs
+            val rate = alacSampleRate.takeIf { it > 0 } ?: return pendingPositionMs
+            val frames = output.playbackHeadPosition.toLong() and 0xffff_ffffL
+            alacStartPositionMs + (frames - alacStartFrame).coerceAtLeast(0L) * 1000L / rate
+        } else {
+            if (!timelineInstalled) return pendingPositionMs
+            (mediaPlayer?.currentPosition ?: pendingPositionMs).coerceAtLeast(0L)
+        }
+        return position.coerceAtMost(duration ?: Long.MAX_VALUE)
     }
 
     fun playQueue(
@@ -128,602 +146,593 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
         playWhenReady: Boolean = true, quality: String? = null,
         server: String = prefs.baseUrl, storefront: String = prefs.storefront,
     ) = onMain {
-        if (closed.get()) return@onMain
+        if (closed) return@onMain
         val selected = songs.getOrNull(index) ?: return@onMain
-        val track = selected.track
         require(songs.all { it.track.source == Source.Apple })
         val previous = _state.value
         val serial = ++requestSerial
-        activeCacheSource = null
-        val scope = HostedScope(server, storefront.lowercase().takeIf { STORE_FRONT.matches(it) } ?: "us", prefs.baseUrl)
-        hostedScope = scope
-        hostedRun = null
-        qualityChange = null
-        startupStartedAt = SystemClock.elapsedRealtime()
-        startupStage = null
-        startupRequestSerial = serial
-        resetHostedPlayer(serial)
+        cancelActive(releasePlayer = false)
         this.songs = if (quality == null || selected.quality == quality) songs.toList()
-        else songs.toMutableList().apply { this[index] = selected.copy(quality = quality) }
-        seekSerial = 0L
-        lastHostedLoops = 0L
+            else songs.toMutableList().apply { this[index] = selected.copy(quality = quality) }
         occurrence = index
-        waitingToPlay = playWhenReady
-        pendingStartupSeek = false
-        hasHostedTrack = false
-        lastPositionMs = startPositionMs.coerceIn(0L, track.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
-        _state.value = previous.copy(mediaId = "apple:${track.id}", title = track.title, artist = track.artist,
-            artworkUri = track.artwork(600), durationMs = track.durationMs, isPlaying = false,
-            playWhenReady = playWhenReady, buffering = playWhenReady, ended = false, bufferedPositionMs = 0L,
-            error = null, quality = null, qualityLabel = null, audioDetails = null, queue = songs.map { it.track }, queueIndex = index,
-            hasPrevious = true, hasNext = index < songs.lastIndex,
-            seekGeneration = previous.seekGeneration + 1)
+        requestedQuality = quality ?: selected.quality
+        activeStorefront = storefront.lowercase().takeIf(STORE_FRONT::matches) ?: "us"
+        activeServer = server
+        configuredServer = prefs.baseUrl
+        pendingPositionMs = startPositionMs.coerceIn(0L, selected.track.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
+        timelineInstalled = false
+        pendingSeekBeforeTimeline = false
+        loggedOutputSerial = -1L
+        _state.value = previous.copy(
+            connected = false,
+            mediaId = "apple:${selected.track.id}",
+            title = selected.track.title,
+            artist = selected.track.artist,
+            artworkUri = selected.track.artwork(600),
+            isPlaying = false,
+            buffering = playWhenReady,
+            durationMs = selected.track.durationMs,
+            hasNext = index < this.songs.lastIndex || previous.repeatMode == Player.REPEAT_MODE_ALL,
+            hasPrevious = index > 0,
+            error = null,
+            seekGeneration = previous.seekGeneration + 1,
+            queue = this.songs.map { it.track },
+            queueIndex = index,
+            currentTrack = selected.track,
+            quality = null,
+            playWhenReady = playWhenReady,
+            ended = false,
+            bufferedPositionMs = pendingPositionMs,
+            qualityLabel = null,
+            audioDetails = null,
+        )
         if (!playWhenReady) return@onMain
-        val normalized = SourceStatus.normalizeBaseUrl(scope.server) ?: run {
-            destroyView()
-            publishError("Fantastic 服务器地址无效")
+        val normalized = SourceStatus.normalizeBaseUrl(server) ?: run {
+            publishError("服务器地址无效")
             return@onMain
         }
-        readyStartedAt = SystemClock.uptimeMillis()
-        ensureCurrentServer(normalized)
-        val run = HostedRun(baseUrl, scope.storefront, applePlaybackProfile(appContext, prefs))
-        hostedRun = run
-        schedulePoll()
-        runWhenReady(serial) {
-            val entries = hostedEntries(this.songs, run.storefront)
-            val start = lastPositionMs / 1000.0
-            pendingStartupSeek = false
-            val repeat = repeatScript(_state.value.repeatMode)
-            val script = sessionScript + "\n(function(){var p=window.AmApp&&AmApp.player;if(!p)return 'not-ready';" +
-                "p.fantasticRequest=$serial;p.fantasticSeek=0;p.fantasticLoops=0;p.fantasticLoopOccurrence=null;" +
-                "p.fantasticStart=$start;$repeat;" +
-                "var r=p.playQueue($entries,$index,{shuffle:false});" +
-                "if(!p.fantasticSessionInstalled&&$start>0)Promise.resolve(r).then(function(){" +
-                "if(p.fantasticRequest===$serial&&p.current)p.transport().currentTime=$start;});return 'ok'})()"
-            evaluate(script) { result ->
-                if (serial == requestSerial && result != "ok") publishError("Fantastic 播放器未就绪")
+        activeServer = normalized
+        activeProfile = applePlaybackProfile(appContext, prefs)
+        val profile = activeProfile
+        val choice = requestedQuality ?: profile.quality
+        requestJob = scope.launch {
+            try {
+                val decrypt = AppleNativeDecrypt(appContext, api, normalized)
+                val resolved = decrypt.prepare(selected.track.id, choice, profile)
+                if (closed || serial != requestSerial) return@launch
+                nativeDecrypt = decrypt
+                activeTrack = resolved
+                activeSerial = serial
+                val duration = resolved.media.durationMs.takeIf { it > 0L } ?: selected.track.durationMs
+                _state.value = _state.value.copy(connected = true, buffering = true, durationMs = duration)
+                startServerMonitor(serial)
+                if (resolved.variant.groupId.contains("alac", true)) {
+                    releaseMediaPlayer()
+                    playAlac(resolved, decrypt, serial, pendingPositionMs)
+                } else {
+                    startMedia3(resolved, decrypt, serial, normalized)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (!closed && serial == requestSerial) publishError(error.message?.takeIf(String::isNotBlank) ?: "Apple 播放失败")
             }
         }
     }
 
-    private fun hostedEntries(songs: List<QueuedSong>, storefront: String): JSONArray = JSONArray().apply {
-        songs.forEach { song ->
-            val track = song.track
-            put(JSONObject().apply {
-                put("source", "apple")
-                put("key", track.mediaId)
-                put("fantasticIndex", song.uid)
-                put("track", track.id)
-                put("country", storefront)
-                put("name", track.title)
-                put("title", track.title)
-                put("artist", track.artist)
-                put("album", track.album)
-                put("artwork", track.artwork(600) ?: "")
-                put("duration", track.durationMs)
-                put("href", "/$storefront/song/${Uri.encode(track.title)}/${Uri.encode(track.id)}")
-            })
-        }
-    }
-
-    /** Preserve the active hosted item and its audio buffer while replacing the upcoming run. */
     fun replaceUpcoming(tail: List<QueuedSong>) = onMain {
-        val selected = songs.getOrNull(occurrence) ?: return@onMain
+        if (occurrence !in songs.indices) return@onMain
         songs = songs.take(occurrence + 1) + tail
-        _state.value = _state.value.copy(queue = songs.map { it.track }, hasNext = tail.isNotEmpty())
-        val run = hostedRun ?: return@onMain
-        val entries = hostedEntries(tail, run.storefront)
-        command("""const q=p.queue;
-          if(!q||q.entries[q.pos]?.fantasticIndex!==${selected.uid})return;
-          const current=new Map(q.entries.slice(q.pos+1).map(e=>[e.fantasticIndex,e]));
-          q.entries.splice(q.pos+1,q.entries.length-q.pos-1,...$entries.map(e=>current.get(e.fantasticIndex)||e));
-          p.renderQueue(true);p.renderModes();p.prepareNext();""")
+        _state.value = _state.value.copy(
+            queue = songs.map { it.track },
+            hasNext = tail.isNotEmpty() || _state.value.repeatMode == Player.REPEAT_MODE_ALL,
+        )
     }
 
     fun pause() = onMain {
         val previous = _state.value
         if (!previous.playWhenReady) return@onMain
+        pendingPositionMs = position()
         activeCacheSource = null
-        qualityChange = null
-        lastPositionMs = position()
-        waitingToPlay = false
-        pendingStartupSeek = false
-        stopStatePolling()
-        stopReadyPolling()
-        webView?.onPause()
-        val serial = ++requestSerial
-        if (!hasHostedTrack) {
-            resetHostedPlayer(serial)
-        } else {
-            evaluate("(function(){var p=window.AmApp&&AmApp.player;if(!p)return null;" +
-                "p.fantasticRequest=$serial;if(p.pendingKey||p.attempting){$RESET_HOSTED;return 'reset';}" +
-                "p.pause();return 'paused';})()") { result ->
-                if (serial == requestSerial && result != "paused") hasHostedTrack = false
-            }
-        }
-        _state.value = previous.copy(playWhenReady = false, isPlaying = false, buffering = false)
+        mediaPlayer?.pause()
+        runCatching { alacOutput?.pause() }
+        _state.value = previous.copy(playWhenReady = false, isPlaying = false, buffering = false,
+            bufferedPositionMs = pendingPositionMs)
     }
-
 
     fun seekTo(ms: Long) = onMain {
         val state = _state.value
         if (state.queueIndex !in state.queue.indices) return@onMain
-        lastPositionMs = ms.coerceIn(0L, state.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
-        sampleTime = android.os.SystemClock.uptimeMillis()
-        if (waitingToPlay) {
-            // Keep the current resolve/prepare request. Only the latest scrub position matters.
-            pendingStartupSeek = true
-        } else if (hasHostedTrack) {
-            seekHosted()
+        val duration = state.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
+        pendingPositionMs = ms.coerceIn(0L, duration)
+        activeCacheSource = null
+        _state.value = state.copy(ended = false, seekGeneration = state.seekGeneration + 1,
+            bufferedPositionMs = pendingPositionMs)
+        val track = activeTrack ?: return@onMain
+        if (activeSerial != requestSerial) return@onMain
+        if (track.variant.groupId.contains("alac", true)) {
+            val serial = requestSerial
+            requestJob?.cancel()
+            releaseAlacOutput()
+            requestJob = scope.launch {
+                try {
+                    playAlac(track, nativeDecrypt ?: return@launch, serial, pendingPositionMs)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (isCurrent(serial)) publishError(error.message?.takeIf(String::isNotBlank) ?: "ALAC 播放失败")
+                }
+            }
+        } else {
+            val player = mediaPlayer
+            if (player != null && timelineInstalled) player.seekTo(pendingPositionMs)
+            else pendingSeekBeforeTimeline = player != null
         }
-        _state.value = state.copy(ended = false, seekGeneration = state.seekGeneration + 1)
     }
 
-    private fun seekHosted() {
-        val seek = ++seekSerial
-        command("if(p.current){p.fantasticSeek=$seek;p.transport().currentTime=${lastPositionMs / 1000.0};}")
-    }
-
-    /** Use the already prepared seam for a skip when one exists. Otherwise select normally. */
-    fun skipTo(index: Int): Boolean {
-        if (!hasHostedTrack || !_state.value.isPlaying || index != occurrence + 1) return false
-        val target = songs.getOrNull(index) ?: return false
-        command("if(p.queue?.entries[p.queue.pos+1]?.fantasticIndex===${target.uid})p.next();")
-        return true
-    }
+    /** Queue advancement is owned by FantasticSessionPlayer; never consume its prepared UP transition. */
+    fun skipTo(index: Int): Boolean = false
 
     fun setPlaying(playing: Boolean) = onMain {
         val state = _state.value
         if (!playing) {
             pause()
-        } else if (state.queueIndex in state.queue.indices && !waitingToPlay && !state.isPlaying) {
-            webView?.onResume()
-            if (hasHostedTrack && state.error == null && !state.ended) {
-                _state.value = state.copy(playWhenReady = true)
-                schedulePoll()
-                command("if(p.current&&p.transport().paused)p.toggle()")
+        } else if (state.queueIndex in state.queue.indices && !state.playWhenReady) {
+            if (state.ended || state.error != null) {
+                val scopeServer = activeServer.takeIf { it.isNotBlank() } ?: prefs.baseUrl
+                playQueue(songs, state.queueIndex, if (state.ended) 0L else pendingPositionMs,
+                    true, requestedQuality, scopeServer, activeStorefront)
             } else {
-                val scope = hostedScope?.takeIf { it.configuredServer == prefs.baseUrl }
-                playQueue(songs, state.queueIndex, if (state.ended) 0L else lastPositionMs,
-                    server = scope?.server ?: prefs.baseUrl, storefront = scope?.storefront ?: prefs.storefront)
+                _state.value = state.copy(playWhenReady = true, ended = false)
+                mediaPlayer?.play()
+                val output = alacOutput
+                if (output != null) {
+                    output.play()
+                    if (alacSubmittedSerial == requestSerial) publishOutputStarted(requestSerial, "alac")
+                }
+                if (mediaPlayer == null && output == null && requestJob == null) {
+                    playQueue(songs, state.queueIndex, pendingPositionMs, true, requestedQuality, prefs.baseUrl, prefs.storefront)
+                }
             }
         }
     }
 
     fun stop() = onMain {
-        val serial = ++requestSerial
-        activeCacheSource = null
-        hostedScope = null
-        hostedRun = null
+        val repeatMode = _state.value.repeatMode
+        ++requestSerial
+        cancelActive(releasePlayer = true)
         songs = emptyList()
         occurrence = -1
-        waitingToPlay = false
-        pendingStartupSeek = false
-        hasHostedTrack = false
-        qualityChange = null
-        lastPositionMs = 0L
-        resetHostedPlayer(serial)
-        destroyView()
-        _state.value = PlayerState(connected = false, repeatMode = _state.value.repeatMode)
+        requestedQuality = null
+        pendingPositionMs = 0L
+        _state.value = PlayerState(connected = false, repeatMode = repeatMode)
     }
 
-    private fun resetHostedPlayer(serial: Long) {
-        evaluate("(function(){var p=window.AmApp&&AmApp.player;if(!p)return;" +
-            "p.fantasticRequest=$serial;$RESET_HOSTED;})()")
-    }
     fun setRepeatMode(mode: Int) = onMain {
-        if (_state.value.repeatMode == mode) return@onMain
-        _state.value = _state.value.copy(repeatMode = mode)
-        command(repeatScript(mode))
-    }
-
-    private fun repeatScript(mode: Int): String {
-        val target = when (mode) { Player.REPEAT_MODE_ALL -> "all"; Player.REPEAT_MODE_ONE -> "one"; else -> "off" }
-        return "if(p.repeat!=='$target'){p.repeat='$target';p.renderModes();p.prepareNext()}"
+        if (_state.value.repeatMode != mode) _state.value = _state.value.copy(repeatMode = mode)
     }
 
     fun selectQuality(group: String) = onMain {
-        if (group !in CACHE_QUALITIES) return@onMain
-        val song = songs.getOrNull(occurrence) ?: return@onMain
-        songs = songs.toMutableList().apply { this[occurrence] = song.copy(quality = group) }
-        activeCacheSource = null
-        qualityChange = null
-        if (hasHostedTrack && !waitingToPlay) switchQuality(song.uid, group) else ++qualitySerial
+        if (group !in CACHE_QUALITIES || occurrence !in songs.indices) return@onMain
+        val resumeAt = position()
+        val next = songs.toMutableList().apply { this[occurrence] = this[occurrence].copy(quality = group) }
+        val server = activeServer.takeIf(String::isNotBlank) ?: prefs.baseUrl
+        playQueue(next, occurrence, resumeAt, _state.value.playWhenReady, group, server, activeStorefront)
     }
-
-    private fun switchQuality(uid: Int, group: String) {
-        val id = JSONObject.quote(group)
-        val request = requestSerial
-        val revision = ++qualitySerial
-        qualityChange = QualityChange(uid, revision)
-        command("""const entry=p.queue?.entries[p.queue.pos];
-        if(entry?.fantasticIndex!==$uid)return;
-        p.fantasticQuality=$revision;
-        p.fantasticQualityGroup=null;
-        (function run(attempt){
-          const player=p, current=p.current;
-          if(!current||p.pendingKey||p.queue?.entries[p.queue.pos]!==entry||
-             (p.fantasticSessionInstalled&&current.fantasticIndex!==$uid)||
-             p.fantasticRequest!==$request||p.fantasticQuality!==$revision)return;
-          const state=p.variantsOf(current);
-          if(state.loading&&attempt<100){setTimeout(function(){run(attempt+1);},100);return;}
-          if(state.error){player.showError(state.error);return 'failed';}
-          var wanted=$id;
-          var variants=state.variants||[];
-          var matches=function(item){
-            var g=String(item.group_id||'').toLowerCase();
-            if(wanted==='alac')return g.indexOf('alac')>=0;
-            if(wanted==='atmos')return g.indexOf('atmos')>=0&&g.indexOf('downmix')<0&&g.indexOf('binaural')<0;
-            if(wanted==='aac')return g.includes('stereo-')&&!['alac','he-','binaural','downmix','atmos'].some(word=>g.includes(word));
-            if(wanted==='aac-128')return g.includes('stereo-128')&&!['alac','binaural','downmix','he-'].some(word=>g.includes(word));
-            if(wanted==='aac-he')return g.indexOf('he-stereo-')>=0&&g.indexOf('binaural')<0&&g.indexOf('downmix')<0;
-            if(wanted==='aac-binaural')return g.indexOf('binaural')>=0&&g.indexOf('128')<0&&g.indexOf('he-')<0;
-            if(wanted==='aac-binaural-128')return g.indexOf('binaural')>=0&&g.indexOf('128')>=0&&g.indexOf('he-')<0;
-            if(wanted==='he-binaural')return g.indexOf('binaural')>=0&&g.indexOf('he-')>=0;
-            if(wanted==='aac-downmix')return g.indexOf('downmix')>=0&&g.indexOf('128')<0&&g.indexOf('he-')<0;
-            if(wanted==='aac-downmix-128')return g.indexOf('downmix')>=0&&g.indexOf('128')>=0&&g.indexOf('he-')<0;
-            if(wanted==='he-downmix')return g.indexOf('downmix')>=0&&g.indexOf('he-')>=0;
-            return false;
-          };
-          var exact=variants.filter(function(item){return item.group_id===wanted||item.quality===wanted;});
-          var choices=exact.length?exact:variants.filter(matches);
-          choices.sort(function(a,b){
-            var rank=function(v){return v.sample_rate?Number(v.sample_rate)*100+Number(v.bit_depth||0):Number(v.bandwidth||0);};
-            return rank(b)-rank(a);
-          });
-          var variant=choices[0];
-          if(!variant){player.showError('该曲目没有所选音质');return;}
-          p.fantasticQualityGroup=variant.group_id;
-          if(p.transport().paused){
-            const next={...current,id:current.track+':'+variant.group_id,variant,
-              codecs:variant.codecs,m3u8Url:variant.m3u8Url||variant.url,
-              label:window.AmHook?.variantLabel(variant),badge:window.AmHook?.qualityBadge(variant),duration:0};
-            void player.start(next,{force:true,resumeAt:p.transport().currentTime,paused:true});
-          }else void player.switchVariant(variant);
-        })(0)""")
-    }
-
-    private fun playbackSettingsScript(profile: ApplePlaybackProfile): String {
-        val settings = JSONObject()
-            .put("quality", profile.quality)
-            .put("spatial", profile.spatial)
-            .put("network", profile.network)
-            .put("transition", prefs.appleTransition)
-            .put("crossfade", prefs.appleCrossfade)
-        return "(function(){if(window.AmHook&&AmHook.usePlaybackSettings){var s=" + settings.toString() + ";" +
-            "AmHook.usePlaybackSettings({get:function(){return s;},set:function(){}});}})()"
-    }
-
 
     fun close() = onMain {
-        if (!closed.compareAndSet(false, true)) return@onMain
-        activeCacheSource = null
-        hostedScope = null
-        hostedRun = null
-        qualityChange = null
-        destroyView()
+        if (closed) return@onMain
+        closed = true
+        ++requestSerial
+        cancelActive(releasePlayer = true)
         songs = emptyList()
+        occurrence = -1
         _state.value = PlayerState()
+        scope.cancel()
     }
 
-    private fun command(body: String) = onMain {
-        if (closed.get() || !_state.value.connected || webView == null) return@onMain
-        evaluate("(function(){var p=window.AmApp&&AmApp.player;if(!p)return;$body;})()")
-    }
-
-    private fun runWhenReady(serial: Long, action: () -> Unit) {
-        val view = webView ?: return
-        if (closed.get() || serial != requestSerial || view !== webView) {
-            stopReadyPolling()
-            return
+    private fun startMedia3(track: AppleResolvedTrack, decrypt: AppleNativeDecrypt, serial: Long, server: String) {
+        val mediaItemBuilder = MediaItem.Builder()
+            .setMediaId("apple:${songs.getOrNull(occurrence)?.track?.id.orEmpty()}")
+            .setUri(Uri.parse("apple-native://$serial/playlist.m3u8"))
+        val drmManager = if (track.variant.widevine) appleWidevineSessionManager(api, server, track) else null
+        if (drmManager != null) {
+            mediaItemBuilder.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+                .setLicenseUri("$server/mv/license").setMultiSession(false).build())
         }
-        view.onResume()
-        if (_state.value.connected) {
-            stopReadyPolling()
-            if (serial == requestSerial) {
-                val profile = hostedRun?.profile ?: return
-                recordStartup(StartupStage.Ready)
-                evaluate(playbackSettingsScript(profile))
-                action()
+        val sourceFactory = HlsMediaSource.Factory(DataSource.Factory {
+            AppleNativeDataSource(appContext, decrypt, track, serial)
+        }).setAllowChunklessPreparation(false)
+        if (drmManager != null) sourceFactory.setDrmSessionManagerProvider { drmManager }
+        val source = sourceFactory.createMediaSource(mediaItemBuilder.build())
+        val player = ensureMediaPlayer()
+        timelineInstalled = false
+        pendingSeekBeforeTimeline = false
+        player.setMediaSource(source, pendingPositionMs)
+        player.prepare()
+        player.playWhenReady = true
+        _state.value = _state.value.copy(connected = true, buffering = true, playWhenReady = true)
+    }
+
+    private fun ensureMediaPlayer(): ExoPlayer {
+        mediaPlayer?.let { return it }
+        val player = ExoPlayer.Builder(appContext)
+            .setAudioAttributes(
+                androidx.media3.common.AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                true,
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .build()
+        player.addListener(mediaListener)
+        mediaPlayer = player
+        return player
+    }
+
+    private val mediaListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) = onMain {
+            val serial = activeSerial
+            if (!isCurrent(serial)) return@onMain
+            val player = mediaPlayer ?: return@onMain
+            if (isPlaying) publishOutputStarted(serial, "mse") else activeCacheSource = null
+            _state.value = _state.value.copy(isPlaying = isPlaying, playWhenReady = player.playWhenReady,
+                buffering = player.playbackState == Player.STATE_BUFFERING)
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = onMain {
+            val serial = activeSerial
+            if (isCurrent(serial)) _state.value = _state.value.copy(playWhenReady = playWhenReady)
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) = onMain {
+            val serial = activeSerial
+            if (!isCurrent(serial)) return@onMain
+            val player = mediaPlayer ?: return@onMain
+            val ended = playbackState == Player.STATE_ENDED
+            if (ended) activeCacheSource = null
+            _state.value = _state.value.copy(
+                connected = true,
+                isPlaying = player.isPlaying,
+                playWhenReady = player.playWhenReady,
+                buffering = playbackState == Player.STATE_BUFFERING,
+                ended = ended,
+                bufferedPositionMs = player.bufferedPosition.coerceAtLeast(0L),
+            )
+        }
+
+        override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = onMain {
+            val serial = activeSerial
+            val player = mediaPlayer ?: return@onMain
+            if (!isCurrent(serial) || timeline.isEmpty) return@onMain
+            timelineInstalled = true
+            if (pendingSeekBeforeTimeline) {
+                pendingSeekBeforeTimeline = false
+                player.seekTo(pendingPositionMs)
             }
-            return
+            pendingPositionMs = player.currentPosition.coerceAtLeast(0L)
         }
-        if (!waitingToPlay) {
-            stopReadyPolling()
-            return
+
+        override fun onPlayerError(error: PlaybackException) = onMain {
+            val serial = activeSerial
+            if (!isCurrent(serial)) return@onMain
+            val message = if (activeTrack?.variant?.widevine == true) AppleWidevineCallback.LICENSE_REJECTED
+                else error.message?.takeIf(String::isNotBlank) ?: "Apple 播放失败"
+            publishError(message)
         }
-        recordStartup(StartupStage.Page)
-        if (SystemClock.uptimeMillis() - readyStartedAt > READY_TIMEOUT_MS) {
-            destroyView()
-            publishError("连接 Fantastic 播放器超时")
-            return
-        }
-        if (readyPoller != null) return
-        val task = object : Runnable {
-            override fun run() {
-                if (readyPoller !== this) return
-                readyPoller = null
-                if (!closed.get() && serial == requestSerial && view === webView && waitingToPlay) {
-                    runWhenReady(serial, action)
-                }
-            }
-        }
-        readyPoller = task
-        main.postDelayed(task, READY_POLL_MS)
     }
 
-    private fun ensureCurrentServer(normalized: String) {
-        if (normalized == baseUrl && webView != null) return
-        destroyView()
-        baseUrl = normalized
-        _state.value = _state.value.copy(connected = false)
-        recordStartup(StartupStage.Page)
-        val view = newWebView(appContext, normalized)
-        webView = view
-        view.loadUrl("$normalized/")
-    }
-
-    private fun failPage(message: String) {
-        destroyView()
-        if (waitingToPlay || hostedRun != null) publishError(message)
-    }
-
-    private fun destroyView() {
-        stopStatePolling()
-        stopReadyPolling()
-        val view = webView
-        webView = null
-        view?.onPause()
-        view?.stopLoading()
-        view?.destroy()
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun newWebView(context: Context, server: String): WebView = WebView(context).apply {
-        visibility = View.INVISIBLE
-        alpha = 0f
-        isFocusable = false
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.mediaPlaybackRequiresUserGesture = false
-        settings.allowFileAccess = false
-        settings.allowContentAccess = false
-        settings.javaScriptCanOpenWindowsAutomatically = false
-        settings.setSupportMultipleWindows(false)
-        webViewClient = object : WebViewClient() {
-            private var pageFinishedLogged = false
-
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                !request.isForMainFrame || !sameOrigin(Uri.parse(server), request.url)
-
-            @Deprecated("Deprecated in Android API")
-            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean =
-                !sameOrigin(Uri.parse(server), Uri.parse(url))
-
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                if (view === webView && !sameOrigin(Uri.parse(server), Uri.parse(url))) {
-                    failPage("已阻止跳转到其他播放服务器")
-                }
-            }
-
-            override fun onPageFinished(view: WebView, url: String) {
-                super.onPageFinished(view, url)
-                if (view !== webView || !sameOrigin(Uri.parse(server), Uri.parse(url))) return
-                if (!pageFinishedLogged) {
-                    pageFinishedLogged = true
-                    if (startupRequestSerial == requestSerial && startupStartedAt != 0L) {
-                        Log.d("FantasticApple", "event=page-finished request=$requestSerial " +
-                            "elapsedMs=${SystemClock.elapsedRealtime() - startupStartedAt}")
+    private suspend fun playAlac(track: AppleResolvedTrack, decrypt: AppleNativeDecrypt, serial: Long, startAtMs: Long) {
+        val cookie = track.alacCookie ?: throw IOException("该曲目没有所选音质")
+        val handle = AlacDecoder.openSafe(cookie)
+        if (handle == 0L) throw IOException("该曲目没有所选音质")
+        val channels = AlacDecoder.channels(handle)
+        val sampleRate = AlacDecoder.sampleRate(handle)
+        val bits = AlacDecoder.bits(handle)
+        if (channels !in 1..8 || sampleRate <= 0 || bits !in setOf(16, 20, 24, 32)) {
+            AlacDecoder.closeSafe(handle)
+            throw IOException("ALAC 解码器初始化失败")
+        }
+        val built = buildAlacOutput(sampleRate, channels, bits)
+            ?: run { AlacDecoder.closeSafe(handle); throw IOException("ALAC AudioTrack 创建失败") }
+        val output = built.first
+        val floatOutput = built.second
+        if (!isCurrent(serial)) {
+            runCatching { output.release() }
+            AlacDecoder.closeSafe(handle)
+            throw CancellationException()
+        }
+        alacOutput = output
+        alacHandle = handle
+        alacSampleRate = sampleRate
+        alacChannels = channels
+        alacStartFrame = output.playbackHeadPosition.toLong() and 0xffff_ffffL
+        alacSubmittedSerial = -1L
+        val bytesPerOutputSample = if (floatOutput) 4 else 2
+        val maximumBlock = track.alacConfig?.maxBlock ?: 65535
+        val direct = ByteBuffer.allocateDirect(maximumBlock * channels * bytesPerOutputSample).order(ByteOrder.LITTLE_ENDIAN)
+        try {
+            while (!_state.value.playWhenReady) awaitPlayWhenReady(serial)
+            output.play()
+            val segments = track.media.segments
+            val startIndex = segments.indexOfLast { it.startMs <= startAtMs }.coerceAtLeast(0)
+            var skipFrames = ((startAtMs - segments[startIndex].startMs).coerceAtLeast(0L) * sampleRate / 1000L)
+            supervisorScope {
+                var upcoming: Deferred<ByteArray>? = null
+                try {
+                    var index = startIndex
+                    var current = decrypt.fetchSegment(track, index)
+                    while (index < segments.size) {
+                        if (!isCurrent(serial)) throw CancellationException()
+                        if (upcoming == null && index + 1 < segments.size) {
+                            val nextIndex = index + 1
+                            upcoming = async(Dispatchers.IO) { decrypt.fetchSegment(track, nextIndex) }
+                        }
+                        val ranges = decrypt.sampleRanges(current)
+                        for (range in ranges) {
+                            awaitPlayWhenReady(serial)
+                            val packet = current.copyOfRange(range.start, range.end)
+                            val pcm = withContext(Dispatchers.Default) { AlacDecoder.decodeSafe(handle, packet) }
+                            if (pcm.isEmpty()) throw IOException("ALAC 分片解码失败")
+                            val frameBytes = channels * if (bits == 16) 2 else 4
+                            val frames = pcm.size / frameBytes
+                            if (frames <= 0) throw IOException("ALAC 分片解码失败")
+                            val skipped = minOf(skipFrames, frames.toLong()).toInt()
+                            skipFrames -= skipped
+                            if (skipped < frames) {
+                                val written = withContext(Dispatchers.IO) {
+                                    writeAlacPcm(output, pcm, skipped, frames - skipped, channels, bits, floatOutput, direct)
+                                }
+                                if (written > 0 && alacSubmittedSerial != serial) {
+                                    alacSubmittedSerial = serial
+                                    withContext(Dispatchers.Main.immediate) {
+                                        if (isCurrent(serial)) publishOutputStarted(serial, "alac")
+                                    }
+                                }
+                            }
+                        }
+                        val next = upcoming ?: break
+                        current = next.await()
+                        upcoming = null
+                        index++
                     }
-                }
-                if (shouldPollState()) pollState()
-            }
-            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-                super.onReceivedError(view, request, error)
-                if (view === webView && request.isForMainFrame) {
-                    failPage("Fantastic 播放页加载失败：${error.description}")
+                } finally {
+                    upcoming?.cancel()
                 }
             }
-
-            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
-                super.onReceivedHttpError(view, request, response)
-                if (view === webView && request.isForMainFrame) {
-                    failPage("Fantastic 播放页加载失败：HTTP ${response.statusCode}")
-                }
-            }
-        }
-    }
-
-    private fun pollState() {
-        val view = webView ?: return
-        val serial = requestSerial
-        val qualityRevision = qualitySerial
-        evaluate("""(function(){
-          const p=window.AmApp?.player;if(!p)return null;
-          const c=p.current,q=p.queue,t=p.transport();
-          const position=Number(t.currentTime||0),duration=c?p.duration():0;
-          let buffered=position;
-          let mediaBuffering=false;
-          if(c&&t===p.clock&&p.audio){
-            mediaBuffering=!t.paused&&t.readyState<3;
-            const time=p.audio.currentTime,ranges=p.audio.buffered;
-            for(let i=0;i<ranges.length;i++)if(time>=ranges.start(i)&&time<=ranges.end(i)){
-              buffered=position+ranges.end(i)-time;break;
-            }
-          }
-          return JSON.stringify({serial:p.fantasticRequest,track:c?.track,duration,position,buffered,
-            seek:p.fantasticSeek,index:q?.entries[q.pos]?.fantasticIndex,
-            occurrence:c?.fantasticIndex,loops:p.fantasticLoops,loopOccurrence:p.fantasticLoopOccurrence,
-            qualityRevision:p.fantasticQuality,qualityGroup:p.fantasticQualityGroup,
-            playing:!!(c&&!t.paused),ended:!!(c&&(t.ended||(t===p.clock&&p.audio?.ended)||
-              (t.paused&&duration>0&&position>=duration))),
-            buffering:!!(p.loading||p.attempting||p.pendingKey||t.seeking||mediaBuffering),
-            group:c?.variant?.group_id,badge:c?.badge,
-            resolving:!!p.pendingKey,preparing:!!(p.loading||p.attempting),mode:c?.mode,
-            format:c?.variant?{codecs:c.variant.codecs,sampleRate:c.variant.sample_rate,
-              bitDepth:c.variant.bit_depth,channels:c.variant.channels,bandwidth:c.variant.bandwidth}:null,
-            error:typeof p.errorMsg==='function'?p.errorMsg():p.errorMsg});
-        })()""") { json ->
-            if (view !== webView || serial != requestSerial || json == null) return@evaluate
-            val data = runCatching { JSONObject(json) }.getOrNull() ?: return@evaluate
-            val old = _state.value
-            if (data.optLong("serial", -1L) != serial || songs.isEmpty()) {
-                if (!old.connected) _state.value = old.copy(connected = true)
-                return@evaluate
-            }
-            if (data.optLong("seek", 0L) != seekSerial || qualityRevision != qualitySerial) return@evaluate
-            val issue = data.optString("error").takeIf { it.isNotBlank() && it != "null" }?.take(320)
-            val playing = data.optBoolean("playing")
-            val buffering = data.optBoolean("buffering")
-            val ended = data.optBoolean("ended") && !buffering
-            val uid = data.optInt("index", -1)
-            val index = songs.indexOfFirst { it.uid == uid }
-            val actualUid = data.optInt("occurrence", -1)
-            val song = songs.getOrNull(index)?.takeIf { actualUid == -1 || uid == actualUid }
-            val current = song?.track?.takeIf { it.id == data.optString("track") }
-            val mode = data.optString("mode").takeIf { it.isNotBlank() && it != "null" }
-            when {
-                data.optBoolean("resolving") -> recordStartup(StartupStage.Resolve)
-                data.optBoolean("preparing") -> recordStartup(StartupStage.Prepare, mode)
-            }
-            if (song == null || current == null || (waitingToPlay && buffering)) {
+            if (isCurrent(serial)) onMain {
                 activeCacheSource = null
-                if (issue != null && !buffering) {
-                    recordStartup(StartupStage.Failed, issue)
-                    stopStatePolling()
-                    stopReadyPolling()
-                    view.onPause()
-                    waitingToPlay = false
-                    pendingStartupSeek = false
-                    _state.value = old.copy(connected = true, buffering = false, playWhenReady = false, error = issue,
-                        isPlaying = false,
-                        audioDetails = null)
-                } else {
-                    _state.value = old.copy(connected = true, audioDetails = null)
-                }
-                return@evaluate
+                _state.value = _state.value.copy(isPlaying = false, buffering = false, ended = true,
+                    bufferedPositionMs = _state.value.durationMs)
             }
-            if (pendingStartupSeek && issue == null && !ended) {
-                activeCacheSource = null
-                pendingStartupSeek = false
-                hasHostedTrack = true
-                waitingToPlay = false
-                seekHosted()
-                return@evaluate
-            }
-            pendingStartupSeek = false
-            val positionMs = data.millis("position")
-            val loops = data.optLong("loops", 0L)
-            val looped = loops > lastHostedLoops && uid == actualUid && uid == data.optInt("loopOccurrence", -1)
-            if (looped) completedLoops += loops - lastHostedLoops
-            if (loops > lastHostedLoops) lastHostedLoops = loops
-            val jumped = looped || index != occurrence || kotlin.math.abs(positionMs - position()) > 750L
-            if (index != occurrence) qualityChange = null
-            hasHostedTrack = true
-            occurrence = index
-            waitingToPlay = false
-            lastPositionMs = positionMs
-            sampleTime = android.os.SystemClock.uptimeMillis()
-            val format = data.optJSONObject("format")
-            val audioDetails = variantAudioDetails(current.id, format)
-            val group = data.optString("group")
-            val quality = codecGroup(group)
-            val durationMs = data.millis("duration")
-            val playingNow = playing && !buffering && !ended && issue == null
-            val explicitQuality = song.quality
-            val change = qualityChange?.takeIf { it.occurrence == uid }
-            val confirmedQuality = explicitQuality == null || quality == explicitQuality && change != null &&
-                data.optLong("qualityRevision", -1L) == change.revision && data.optString("qualityGroup") == group
-            val run = hostedRun
-            val codecs = format?.optString("codecs")?.takeIf { it.isNotBlank() && it != "null" }
-            val source = if (playingNow && old.playWhenReady && uid == actualUid && confirmedQuality &&
-                run != null && quality != null && quality in CACHE_QUALITIES && CACHE_GROUP.matches(group) &&
-                codecs != null && mode != null && durationMs > 0L) {
-                captureSource(run, uid, serial, group, codecs, quality, mode, durationMs)
-            } else null
-            if (source == null || source.occurrence != activeCacheSource?.occurrence) activeCacheSource = null
-            _state.value = old.copy(connected = true, mediaId = "apple:${current.id}", title = current.title,
-                artist = current.artist, artworkUri = current.artwork(600), queueIndex = index,
-                isPlaying = playingNow, playWhenReady = old.playWhenReady && (issue == null || playing || buffering),
-                buffering = buffering, ended = ended, bufferedPositionMs = data.millis("buffered"),
-                durationMs = durationMs.takeIf { it > 0L } ?: current.durationMs,
-                hasPrevious = true,
-                hasNext = index < songs.lastIndex || old.repeatMode == Player.REPEAT_MODE_ALL,
-                error = issue, quality = quality, audioDetails = audioDetails,
-                qualityLabel = when (data.optString("badge")) {
-                    "hires" -> "Hi-Res 无损"
-                    "lossless" -> "无损"
-                    "atmos" -> "杜比全景声"
-                    "spatial" -> "空间音频"
-                    "lossy" -> "AAC"
-                    else -> null
-                }, seekGeneration = old.seekGeneration + if (jumped) 1 else 0)
-            if (serial != requestSerial || view !== webView || qualityRevision != qualitySerial) return@evaluate
-            if (issue != null) recordStartup(StartupStage.Failed, issue)
-            else if (playingNow) recordStartup(StartupStage.Playing, mode)
-            if (ended || issue != null) {
-                stopStatePolling()
-                stopReadyPolling()
-                view.onPause()
-                return@evaluate
-            }
-            if (playingNow && explicitQuality != null && change == null) switchQuality(uid, explicitQuality)
-            else if (source != null) activeCacheSource = source
+        } finally {
+            if (alacOutput === output) alacOutput = null
+            if (alacHandle == handle) alacHandle = 0L
+            alacSampleRate = 0
+            alacChannels = 0
+            runCatching { output.stop() }
+            runCatching { output.release() }
+            AlacDecoder.closeSafe(handle)
         }
     }
 
-    private fun captureSource(
-        run: HostedRun, uid: Int, serial: Long, group: String, codecs: String, quality: String, mode: String, durationMs: Long,
-    ): AppleCacheSource {
-        val previous = activeCacheSource
-        if (previous != null && previous.occurrence == uid && previous.requestSerial == serial &&
-            previous.group == group && previous.codecs == codecs && previous.mode == mode && previous.durationMs == durationMs) {
-            return previous
+    private suspend fun awaitPlayWhenReady(serial: Long) {
+        while (true) {
+            if (!isCurrent(serial)) throw CancellationException()
+            if (_state.value.playWhenReady) return
+            delay(40L)
         }
-        return AppleCacheSource(uid, serial, run.profile, group, codecs, quality, mode, durationMs, run.server, run.storefront)
     }
 
-    private fun variantAudioDetails(trackId: String, format: JSONObject?): String? {
-        if (format == null) {
-            variantDetailTrackId = null
-            variantDetailCodecs = null
-            variantDetailSampleRate = 0
-            variantDetailBitDepth = 0
-            variantDetailChannels = null
-            variantDetailBandwidth = 0L
-            variantDetailValue = null
-            return null
+    private fun buildAlacOutput(sampleRate: Int, channels: Int, bits: Int): Pair<AudioTrack, Boolean>? {
+        val channelMask = when (channels) {
+            1 -> AudioFormat.CHANNEL_OUT_MONO
+            2 -> AudioFormat.CHANNEL_OUT_STEREO
+            6 -> AudioFormat.CHANNEL_OUT_5POINT1
+            else -> return null
         }
-        val codecs = format.optString("codecs").takeIf { it.isNotBlank() && it != "null" }
-        val sampleRate = format.optInt("sampleRate")
-        val bitDepth = format.optInt("bitDepth")
-        val channels = format.optString("channels").takeIf { it.isNotBlank() && it != "null" }
-        val bandwidth = format.optLong("bandwidth")
-        if (trackId == variantDetailTrackId && codecs == variantDetailCodecs && sampleRate == variantDetailSampleRate &&
-            bitDepth == variantDetailBitDepth && channels == variantDetailChannels && bandwidth == variantDetailBandwidth) {
-            return variantDetailValue
+        fun build(encoding: Int, floating: Boolean): Pair<AudioTrack, Boolean>? {
+            val minimum = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
+            if (minimum == AudioTrack.ERROR_BAD_VALUE || minimum == AudioTrack.ERROR || minimum <= 0) return null
+            val track = runCatching {
+                AudioTrack.Builder()
+                    .setAudioAttributes(android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build())
+                    .setAudioFormat(AudioFormat.Builder().setEncoding(encoding).setSampleRate(sampleRate)
+                        .setChannelMask(channelMask).build())
+                    .setBufferSizeInBytes(minimum.coerceAtLeast(32 * 1024))
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            }.getOrNull() ?: return null
+            if (track.state != AudioTrack.STATE_INITIALIZED) {
+                runCatching { track.release() }
+                return null
+            }
+            return track to floating
         }
+        if (bits > 16) build(AudioFormat.ENCODING_PCM_FLOAT, true)?.let { return it }
+        return build(AudioFormat.ENCODING_PCM_16BIT, false)
+    }
+
+    private fun writeAlacPcm(
+        output: AudioTrack,
+        pcm: ByteArray,
+        skipFrames: Int,
+        frames: Int,
+        channels: Int,
+        bits: Int,
+        floatOutput: Boolean,
+        direct: ByteBuffer,
+    ): Int {
+        direct.clear()
+        if (floatOutput) {
+            val start = skipFrames * channels * 4
+            direct.put(pcm, start, frames * channels * 4)
+        } else if (bits == 16) {
+            val start = skipFrames * channels * 2
+            direct.put(pcm, start, frames * channels * 2)
+        } else {
+            val source = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
+            source.position(skipFrames * channels * 4)
+            repeat(frames * channels) {
+                val sample = (source.float.coerceIn(-1.0f, 1.0f) * 32768.0f).toInt()
+                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                direct.putShort(sample.toShort())
+            }
+        }
+        direct.flip()
+        var writtenBytes = 0
+        while (direct.hasRemaining()) {
+            val before = direct.position()
+            val result = output.write(direct, direct.remaining(), AudioTrack.WRITE_BLOCKING)
+            if (result < 0) throw IOException("ALAC AudioTrack 写入失败")
+            val advanced = direct.position() - before
+            if (advanced <= 0) throw IOException("ALAC AudioTrack 未提交 PCM")
+            writtenBytes += advanced
+        }
+        return writtenBytes
+    }
+
+    private fun publishOutputStarted(serial: Long, mode: String) {
+        if (!isCurrent(serial)) return
+        val track = activeTrack ?: return
+        val song = songs.getOrNull(occurrence) ?: return
+        if (_state.value.queueIndex != occurrence || _state.value.mediaId != "apple:${song.track.id}") return
+        val variant = track.variant
+        val group = variant.groupId
+        val quality = codecGroup(group)
+        val codecs = variant.codecs
+        val reportedCodec = if (group.contains("alac", true) && !codecs.contains("alac", true)) "alac" else codecs
+        val duration = track.media.durationMs.takeIf { it > 0L } ?: song.track.durationMs
         val details = reportedAudioDetails(
-            codec = codecs,
-            sampleRate = sampleRate,
-            bitDepth = bitDepth,
-            channels = channels,
-            bitrate = bandwidth,
+            codec = reportedCodec,
+            sampleRate = variant.sampleRate,
+            bitDepth = variant.bitDepth,
+            channels = variant.channels,
+            bitrate = variant.bandwidth,
             bitrateLabel = "变体带宽",
         )
-        variantDetailTrackId = trackId
-        variantDetailCodecs = codecs
-        variantDetailSampleRate = sampleRate
-        variantDetailBitDepth = bitDepth
-        variantDetailChannels = channels
-        variantDetailBandwidth = bandwidth
-        variantDetailValue = details
-        return details
+        val label = qualityLabel(group, variant.sampleRate)
+        _state.value = _state.value.copy(
+            connected = true,
+            mediaId = "apple:${song.track.id}",
+            title = song.track.title,
+            artist = song.track.artist,
+            artworkUri = song.track.artwork(600),
+            isPlaying = true,
+            playWhenReady = true,
+            buffering = false,
+            ended = false,
+            durationMs = duration,
+            quality = quality,
+            qualityLabel = label,
+            audioDetails = details,
+        )
+        val cache = if (duration > 0L && quality != null && quality in CACHE_QUALITIES && CACHE_GROUP.matches(group) && codecs.isNotBlank()) {
+            AppleCacheSource(occurrence, serial, activeProfile, group, codecs, quality, mode, duration, activeServer, activeStorefront)
+        } else null
+        activeCacheSource = cache
+        if (loggedOutputSerial != serial) {
+            loggedOutputSerial = serial
+            Log.i("FantasticPlayback", "native-apple id=${song.track.id} group=$group codecs=$codecs mode=$mode")
+        }
     }
 
-    private fun JSONObject.millis(key: String): Long =
-        (optDouble(key, 0.0).takeIf { it.isFinite() && it in 0.0..86_400.0 }?.times(1_000) ?: 0.0).toLong()
+    private fun qualityLabel(group: String, sampleRate: Int): String {
+        val name = group.lowercase()
+        return when {
+            "alac" in name -> if (sampleRate > 48_000) "Hi-Res 无损" else "无损"
+            "atmos" in name && "downmix" !in name && "binaural" in name -> "空间音频"
+            "atmos" in name && "downmix" !in name -> "杜比全景声"
+            else -> "AAC"
+        }
+    }
+
+    private fun startServerMonitor(serial: Long) {
+        serverMonitorJob?.cancel()
+        val initial = SourceStatus.normalizeBaseUrl(configuredServer)
+        serverMonitorJob = scope.launch {
+            while (isCurrent(serial)) {
+                delay(500L)
+                if (SourceStatus.normalizeBaseUrl(prefs.baseUrl) != initial) {
+                    if (isCurrent(serial)) {
+                        ++requestSerial
+                        activeServer = ""
+                        cancelActive(releasePlayer = true)
+                        _state.value = _state.value.copy(connected = false, isPlaying = false, playWhenReady = false,
+                            buffering = false, error = "服务器已更改，点按播放重新连接")
+                    }
+                    return@launch
+                }
+            }
+        }
+    }
+
+    private fun publishError(message: String) {
+        activeCacheSource = null
+        cancelActive(releasePlayer = true)
+        activeSerial = -1L
+        _state.value = _state.value.copy(connected = false, isPlaying = false, playWhenReady = false,
+            buffering = false, error = message)
+    }
+
+    private fun cancelActive(releasePlayer: Boolean) {
+        requestJob?.cancel()
+        requestJob = null
+        serverMonitorJob?.cancel()
+        serverMonitorJob = null
+        activeCacheSource = null
+        activeSerial = -1L
+        nativeDecrypt = null
+        activeTrack = null
+        timelineInstalled = false
+        pendingSeekBeforeTimeline = false
+        val player = mediaPlayer
+        if (player != null) {
+            runCatching { player.stop() }
+            runCatching { player.clearMediaItems() }
+            if (releasePlayer) {
+                player.removeListener(mediaListener)
+                player.release()
+                mediaPlayer = null
+            }
+        }
+        releaseAlacOutput()
+    }
+
+    private fun releaseMediaPlayer() {
+        val player = mediaPlayer ?: return
+        runCatching { player.stop() }
+        runCatching { player.clearMediaItems() }
+        player.removeListener(mediaListener)
+        player.release()
+        mediaPlayer = null
+    }
+
+    private fun releaseAlacOutput() {
+        val output = alacOutput
+        alacOutput = null
+        val handle = alacHandle
+        alacHandle = 0L
+        alacSampleRate = 0
+        alacChannels = 0
+        alacSubmittedSerial = -1L
+        if (output != null) {
+            runCatching { output.stop() }
+            runCatching { output.release() }
+        }
+        AlacDecoder.closeSafe(handle)
+    }
+
+    private fun isCurrent(serial: Long): Boolean = !closed && serial > 0L && serial == requestSerial && serial == activeSerial
+
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
+    }
 
     private fun codecGroup(group: String): String? {
         val name = group.lowercase()
@@ -741,103 +750,9 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs) {
         }
     }
 
-    private fun schedulePoll() {
-        if (poller != null || !shouldPollState()) return
-        val task = object : Runnable {
-            override fun run() {
-                if (poller !== this) return
-                poller = null
-                if (!shouldPollState()) return
-                val configuredServer = hostedScope?.configuredServer
-                val currentServer = prefs.baseUrl
-                if (configuredServer != null && currentServer != configuredServer &&
-                    SourceStatus.normalizeBaseUrl(currentServer) != SourceStatus.normalizeBaseUrl(configuredServer)) {
-                    destroyView()
-                    publishError("服务器已更改，点按播放重新连接")
-                    return
-                }
-                pollState()
-                if (shouldPollState()) {
-                    poller = this
-                    main.postDelayed(this, STATE_POLL_MS)
-                }
-            }
-        }
-        poller = task
-        main.postDelayed(task, STATE_POLL_MS)
-    }
-
-    private fun shouldPollState(): Boolean = webView != null && !closed.get() &&
-        (waitingToPlay || (_state.value.playWhenReady && !_state.value.ended))
-
-    private fun stopStatePolling() {
-        poller?.let(main::removeCallbacks)
-        poller = null
-    }
-
-    private fun stopReadyPolling() {
-        readyPoller?.let(main::removeCallbacks)
-        readyPoller = null
-    }
-
-    private fun evaluate(script: String, done: ((String?) -> Unit)? = null) {
-        val view = webView ?: return
-        if (!sameOrigin(Uri.parse(baseUrl), Uri.parse(view.url ?: return))) return
-        view.evaluateJavascript(script) { raw ->
-            if (view !== webView) return@evaluateJavascript
-            done?.invoke(runCatching { org.json.JSONTokener(raw.orEmpty()).nextValue() as? String }.getOrNull())
-        }
-    }
-
-    private fun recordStartup(stage: StartupStage, detail: String? = null) {
-        if (startupStartedAt == 0L || startupRequestSerial != requestSerial || startupStage == stage ||
-            startupStage == StartupStage.Failed || (startupStage == StartupStage.Playing && stage != StartupStage.Failed)) return
-        startupStage = stage
-        val suffix = if (detail.isNullOrBlank()) ""
-            else if (stage == StartupStage.Failed) " error=${detail.take(320)}"
-            else " mode=${detail.take(320)}"
-        Log.d("FantasticApple", "request=$requestSerial stage=$stage " +
-            "elapsedMs=${SystemClock.elapsedRealtime() - startupStartedAt} mediaId=${_state.value.mediaId ?: "-"}$suffix")
-    }
-
-    private fun publishError(message: String) {
-        recordStartup(StartupStage.Failed, message)
-        activeCacheSource = null
-        hostedRun = null
-        qualityChange = null
-        waitingToPlay = false
-        pendingStartupSeek = false
-        hasHostedTrack = false
-        stopStatePolling()
-        stopReadyPolling()
-        webView?.onPause()
-        _state.value = _state.value.copy(connected = false, isPlaying = false, playWhenReady = false,
-            buffering = false, error = message)
-    }
-
-    private fun onMain(block: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
-    }
-
-    private fun sameOrigin(expected: Uri, actual: Uri): Boolean =
-        expected.scheme.equals(actual.scheme, ignoreCase = true) &&
-            expected.host.equals(actual.host, ignoreCase = true) && effectivePort(expected) == effectivePort(actual)
-
-    private fun effectivePort(uri: Uri): Int = when {
-        uri.port >= 0 -> uri.port
-        uri.scheme.equals("https", ignoreCase = true) -> 443
-        else -> 80
-    }
-
     private companion object {
-        const val READY_TIMEOUT_MS = 20_000L
-        const val READY_POLL_MS = 100L
-        const val STATE_POLL_MS = 250L
         val STORE_FRONT = Regex("[a-z]{2}")
         val CACHE_GROUP = Regex("[A-Za-z0-9._-]{1,128}")
         val CACHE_QUALITIES = Prefs.APPLE_QUALITIES.mapTo(hashSetOf()) { it.first }
-        // Cancel both async stages: playAt/resolveEntry and start/format preparation.
-        const val RESET_HOSTED = "++p.playToken;p.pause();p.clearQueue();p.teardown();" +
-            "p.current=null;p.attempting=false;p.setLoading(false);p.showError('');p.updateMediaSession()"
     }
 }

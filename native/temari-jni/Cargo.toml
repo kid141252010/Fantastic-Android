@@ -1,0 +1,12 @@
+[package]
+name = "fantastic-temari"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fantastic_temari"
+crate-type = ["cdylib"]
+
+[dependencies]
+temari = { path = "../vendor/temari" }
+jni = "0.21"
