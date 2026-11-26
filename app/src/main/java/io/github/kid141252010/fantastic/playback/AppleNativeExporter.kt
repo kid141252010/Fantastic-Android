@@ -6,7 +6,6 @@ import androidx.media3.common.C
 import android.util.Base64
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.Prefs
-import io.github.kid141252010.fantastic.data.Source
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -42,7 +41,7 @@ internal class AppleNativeExporter(private val context: Context, private val api
         progress: (Int?) -> Unit,
     ): AudioFileInfo = withContext(Dispatchers.IO) {
         request.resolvedApple?.let { resolved ->
-            if (PlaybackCacheKey.from(request.server, request.storefront, Source.Apple, request.track.id) != resolved.key) {
+            if (PlaybackCacheKey.from(request.server, request.storefront, io.github.kid141252010.fantastic.data.Source.Apple, request.track.id) != resolved.key) {
                 throw IOException("Apple 缓存音源与请求国家不一致")
             }
             return@withContext exportResolvedAlac(request, resolved, target, reserve, progress)

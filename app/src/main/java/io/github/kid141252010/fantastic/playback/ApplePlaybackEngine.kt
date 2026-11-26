@@ -121,6 +121,7 @@ internal class ApplePlaybackEngine(
     private var activeServer = ""
     private var configuredServer = ""
     private var activeStorefront = ""
+    private var requestedQuality: String? = null
     private var pendingPositionMs = 0L
     private var timelineInstalled = false
     private var pendingSeekBeforeTimeline = false
