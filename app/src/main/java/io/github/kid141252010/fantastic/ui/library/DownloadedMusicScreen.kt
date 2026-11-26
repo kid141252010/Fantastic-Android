@@ -37,11 +37,11 @@ import io.github.kid141252010.fantastic.ui.Md3MediaRow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun DownloadedMusicScreen(app: FantasticApp, onBack: () -> Unit) {
+internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBack: () -> Unit) {
     val records by app.downloads.entries.collectAsStateWithLifecycle()
     val ready = remember(records) { records.filter { it.status == DownloadStatus.Ready } }
     val bottom = LocalBarsPadding.current.calculateBottomPadding()
-    BackHandler(onBack = onBack)
+    BackHandler(enabled = backEnabled, onBack = onBack)
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {

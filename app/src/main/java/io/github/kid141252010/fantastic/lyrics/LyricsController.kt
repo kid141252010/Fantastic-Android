@@ -16,6 +16,7 @@ import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.QqLyricsDocument
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.playback.PlaybackCacheKey
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
 import kotlinx.coroutines.CancellationException
@@ -64,6 +65,7 @@ class LyricsController(
     internal val currentLyricMediaId = _currentLyricMediaId.asStateFlow()
     private var loadJob: Job? = null
     private var loadedMediaId: String? = null
+    private var loadedCountry: String? = null
     private var pendingAppleRefreshId: String? = null
     private var syncJob: Job? = null
     private var lastSeekGeneration = -1
@@ -142,13 +144,16 @@ class LyricsController(
         val mediaId = state.mediaId
         if (pendingAppleRefreshId != mediaId) pendingAppleRefreshId = null
         val refresh = pendingAppleRefreshId != null
-        if (loadedMediaId == mediaId && loadedOccurrence == state.trackOccurrence &&
+        val country = if (mediaId?.startsWith("apple:") == true)
+            state.currentTrack?.country.normalizedAppleCountry() ?: prefs.storefront.normalizedAppleCountry() else null
+        if (loadedMediaId == mediaId && loadedOccurrence == state.trackOccurrence && loadedCountry == country &&
             loadedRepeatGeneration == state.repeatGeneration && !(refresh && state.isPlaying)) return
         loadedMediaId = mediaId
         loadedOccurrence = state.trackOccurrence
+        loadedCountry = country
         loadedRepeatGeneration = state.repeatGeneration
         pendingAppleRefreshId = null
-        load(mediaId, officialOnly = refresh)
+        load(mediaId, officialOnly = refresh, country = country)
     }
 
     private class LyricRequest(
@@ -176,7 +181,8 @@ class LyricsController(
     }
 
 
-    private fun load(mediaId: String?, officialOnly: Boolean) {
+    private fun load(mediaId: String?, officialOnly: Boolean, country: String?) {
+        val occurrence = loadedOccurrence
         loadJob?.cancel()
         _currentLyricMediaId.value = mediaId
         currentSong = null
@@ -192,14 +198,14 @@ class LyricsController(
         }
         val options = if (kind == "apple") prefs.appleLyricsOptions else AppleLyricsOptions.DEFAULT
         val preferAmll = kind == "apple" && !officialOnly && options == AppleLyricsOptions.DEFAULT
-        val cacheKey = lyricCacheKey(kind!!, id, options, preferAmll)
+        val cacheKey = lyricCacheKey(kind!!, id, options, preferAmll, country)
         _status.value = Status.Loading
         loadJob = scope.launch {
             val loadStartedAt = SystemClock.elapsedRealtime()
             var cachePublished = false
             val cached = cacheKey?.let { cache.find(it) }
-            if (!isActive || player.state.value.mediaId != mediaId) return@launch
-            if (cached != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll)) {
+            if (!isActive || !isCurrent(mediaId, occurrence, country)) return@launch
+            if (cached != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll, country)) {
                 publishSong(cached.song)
                 cachePublished = true
                 note(mediaId, "来源=${cached.source} 阶段=歌词缓存命中 ${cached.song.lines.size} 行，继续网络刷新")
@@ -211,7 +217,7 @@ class LyricsController(
             var source = if (preferAmll) "amll" else kind!!
             var fallback = ""
             val optionsNote = if (kind == "apple") " language=${options.language} script=${options.script}" else ""
-            if (preferAmll) note(mediaId, "来源=amll,apple 阶段=请求 模式=并行$optionsNote")
+            if (preferAmll && isCurrent(mediaId, occurrence, country)) note(mediaId, "来源=amll,apple 阶段=请求 模式=并行$optionsNote")
             val amllRequest = if (preferAmll) async { requestLyrics("amll", id, options) } else null
             val officialRequest = if (preferAmll) async { requestLyrics("apple", id, options) } else null
             try {
@@ -224,7 +230,7 @@ class LyricsController(
                     stage = "请求"
                     parseElapsedMs = 0L
                     val directOptions = if (source == "apple" && officialRequest == null) optionsNote else ""
-                    note(mediaId, "来源=$source 阶段=请求$directOptions$fallback")
+                    if (isCurrent(mediaId, occurrence, country)) note(mediaId, "来源=$source 阶段=请求$directOptions$fallback")
                     try {
                         val response = when (source) {
                             "amll" -> amllRequest!!.await()
@@ -236,7 +242,7 @@ class LyricsController(
                         payload = response.result.getOrThrow()
                         val qqDocument = response.qq
                         stage = "解析"
-                        if (payload != null) note(mediaId,
+                        if (payload != null && isCurrent(mediaId, occurrence, country)) note(mediaId,
                             "来源=$source 阶段=解析 请求耗时=${requestFinishedAt - requestStartedAt}ms$fallback")
                         parseStartedAt = SystemClock.elapsedRealtime()
                         song = payload?.let {
@@ -246,7 +252,7 @@ class LyricsController(
                                 else -> parser.parse(kind!!, it)
                             }
                         }
-                        parseElapsedMs = if (payload == null) 0L else SystemClock.elapsedRealtime() - parseStartedAt
+                        if (!isCurrent(mediaId, occurrence, country)) return@launch
                         if (source != "amll" || song != null) break
                         fallback = " AMLL回退=未收录或无有效歌词"
                     } catch (e: CancellationException) {
@@ -257,34 +263,36 @@ class LyricsController(
                         fallback = " AMLL回退=${stage}失败：${(e.message ?: e.javaClass.simpleName).take(320)}"
                     }
                     val requestElapsedMs = requestFinishedAt - requestStartedAt
-                    note(mediaId, "来源=amll 阶段=$stage 请求耗时=${requestElapsedMs}ms " +
+                    if (isCurrent(mediaId, occurrence, country)) note(mediaId, "来源=amll 阶段=$stage 请求耗时=${requestElapsedMs}ms " +
                         "解析耗时=${parseElapsedMs}ms$fallback")
                     source = "apple"
                 }
-                if (!isActive || player.state.value.mediaId != mediaId) return@launch
+                if (!isActive || !isCurrent(mediaId, occurrence, country)) return@launch
                 if (song == null) {
                     if (cachePublished) {
                         _status.value = Status.Ready
-                        note(mediaId, "来源=$source 阶段=完成 最新请求无歌词，保留缓存")
+                        if (isCurrent(mediaId, occurrence, country)) note(mediaId, "来源=$source 阶段=完成 最新请求无歌词，保留缓存")
                     } else {
                         publishSong(null)
-                        note(mediaId, "来源=$source 阶段=完成 最新请求无歌词")
+                        if (isCurrent(mediaId, occurrence, country)) note(mediaId, "来源=$source 阶段=完成 最新请求无歌词")
                     }
                 } else {
                     if (song != currentSong) publishSong(song) else _status.value = Status.Ready
-                    note(mediaId, "来源=$source 阶段=完成 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
+                    if (isCurrent(mediaId, occurrence, country)) note(mediaId,
+                        "来源=$source 阶段=完成 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
                         "解析耗时=${parseElapsedMs}ms 总耗时=${SystemClock.elapsedRealtime() - loadStartedAt}ms " +
                         "${song.lines.size} 行，${payload?.length ?: 0} 字符$fallback")
-                    if (cacheKey != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll)) {
+                    if (cacheKey != null && cacheKey == lyricCacheKey(kind, id, options, preferAmll, country) &&
+                        isCurrent(mediaId, occurrence, country)) {
                         val complete = CachedLyrics(source, song)
-                        scope.launch { cache.store(cacheKey, complete) }
+                        cache.store(cacheKey, complete)
                     }
                 }
             } catch (e: TimeoutCancellationException) {
-                if (!isActive || player.state.value.mediaId != mediaId) return@launch
+                if (!isActive || !isCurrent(mediaId, occurrence, country)) return@launch
                 if (cachePublished) {
                     _status.value = Status.Ready
-                    note(mediaId, "来源=$source 阶段=解析超时，保留缓存")
+                    if (isCurrent(mediaId, occurrence, country)) note(mediaId, "来源=$source 阶段=解析超时，保留缓存")
                 } else {
                     val failedAt = SystemClock.elapsedRealtime()
                     fail(mediaId, "歌词解析超时", "来源=$source 阶段=解析 请求耗时=${requestFinishedAt - requestStartedAt}ms " +
@@ -293,10 +301,11 @@ class LyricsController(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (!isActive || player.state.value.mediaId != mediaId) return@launch
+                if (!isActive || !isCurrent(mediaId, occurrence, country)) return@launch
                 if (cachePublished) {
                     _status.value = Status.Ready
-                    note(mediaId, "来源=$source 阶段=$stage 网络失败，保留缓存：${e.message ?: e.javaClass.simpleName}")
+                    if (isCurrent(mediaId, occurrence, country)) note(mediaId,
+                        "来源=$source 阶段=$stage 网络失败，保留缓存：${e.message ?: e.javaClass.simpleName}")
                 } else {
                     val failedAt = SystemClock.elapsedRealtime()
                     val message = "歌词加载失败（${stage}阶段）：${e.message ?: e.javaClass.simpleName}"
@@ -311,10 +320,19 @@ class LyricsController(
         }
     }
 
-    private fun lyricCacheKey(kind: String, id: String, options: AppleLyricsOptions, preferAmll: Boolean): String? {
+    private fun lyricCacheKey(kind: String, id: String, options: AppleLyricsOptions, preferAmll: Boolean, country: String?): String? {
         val source = Source.entries.firstOrNull { it.mediaPrefix == kind } ?: return null
-        val key = PlaybackCacheKey.from(prefs.baseUrl, prefs.storefront, source, id) ?: return null
+        val key = PlaybackCacheKey.from(prefs.baseUrl, country.orEmpty(), source, id) ?: return null
         return "${key.server}\u0000${key.storefront}\u0000$kind\u0000$id\u0000${options.language}\u0000${options.script}\u0000$preferAmll"
+    }
+
+    private fun isCurrent(mediaId: String?, occurrence: Int, country: String?): Boolean {
+        val state = player.state.value
+        val currentCountry = if (mediaId?.startsWith("apple:") == true)
+            state.currentTrack?.country.normalizedAppleCountry() ?: prefs.storefront.normalizedAppleCountry() else null
+        return loadedMediaId == mediaId && loadedOccurrence == occurrence && loadedCountry == country &&
+            state.mediaId == mediaId && state.trackOccurrence == occurrence &&
+            state.repeatGeneration == loadedRepeatGeneration && currentCountry == country
     }
 
     private fun publishSong(song: LyricSong?) {

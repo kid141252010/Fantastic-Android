@@ -15,6 +15,7 @@ import io.github.kid141252010.fantastic.data.PlaybackCacheLimit
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import java.io.DataInputStream
 import java.io.File
 import java.io.IOException
@@ -185,7 +186,8 @@ internal class PlaybackCache(context: Context, private val prefs: Prefs, private
     fun appleNetwork(key: PlaybackCacheKey): String? = synchronized(lock) { byKey[key]?.entry?.appleNetwork }
 
     fun audio(track: Track, requestedQuality: String, appleProfile: ApplePlaybackProfile? = null): OfflineAudio? {
-        val key = PlaybackCacheKey.from(prefs.baseUrl, prefs.storefront, track.source, track.id) ?: return null
+        val country = if (track.source == Source.Apple) track.country.normalizedAppleCountry() ?: prefs.storefront else prefs.storefront
+        val key = PlaybackCacheKey.from(prefs.baseUrl, country, track.source, track.id) ?: return null
         val entry = find(key, requestedQuality, appleProfile) ?: return null
         return OfflineAudio(file(entry.fileId), entry.actualQuality)
     }

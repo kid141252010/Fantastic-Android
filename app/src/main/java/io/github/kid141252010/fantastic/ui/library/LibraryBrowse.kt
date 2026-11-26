@@ -53,6 +53,8 @@ import io.github.kid141252010.fantastic.data.LibraryPlaylist
 import io.github.kid141252010.fantastic.data.MusicLibrarySnapshot
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.compatibleLibraryCountries
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
@@ -74,6 +76,10 @@ internal fun libraryAlbums(entries: List<LibraryEntry>): List<LibraryEntry> {
     val albums = LinkedHashMap<LibraryKey, LibraryEntry>()
     for (entry in entries) if (entry.hit.kind == "album") albums[entry.key] = entry
     val authoritativeArtists = HashSet<LibraryKey>()
+    val memberCountries = entries.asSequence().filter { it.hit.kind == "song" }.mapNotNull { it.hit.track }
+        .filter { it.source == Source.Apple && it.albumId.isNotBlank() && it.albumId != "0" }
+        .groupBy { LibraryKey(it.source, "album", it.albumId) }
+        .mapValues { (_, tracks) -> tracks.mapNotNull { it.country.normalizedAppleCountry() }.toSet().singleOrNull() }
     for (entry in entries) {
         if (entry.hit.kind != "song") continue
         val track = entry.hit.track ?: continue
@@ -84,12 +90,15 @@ internal fun libraryAlbums(entries: List<LibraryEntry>): List<LibraryEntry> {
         val artist = if (track.albumArtist.isNotBlank() && authoritativeArtists.add(key)) track.albumArtist
             else album?.hit?.subtitle?.ifBlank { track.artist } ?: track.artist
         albums[key] = if (album == null) {
-            LibraryEntry(CatalogHit(track.source, "album", track.albumId, track.album, artist, artwork), entry.addedAt)
+            LibraryEntry(CatalogHit(track.source, "album", track.albumId, track.album, artist, artwork, country = memberCountries[key]), entry.addedAt)
         } else {
             album.copy(hit = album.hit.copy(subtitle = artist, artwork = artwork), addedAt = maxOf(album.addedAt, entry.addedAt))
         }
     }
-    return albums.values.toList()
+    return albums.values.map { entry ->
+        if (entry.hit.source != Source.Apple || entry.hit.country != null) entry
+        else entry.copy(hit = entry.hit.copy(country = memberCountries[entry.key]))
+    }
 }
 
 internal fun libraryAlbumTracks(album: LibraryEntry, entries: List<LibraryEntry>): List<Track> {
@@ -104,16 +113,22 @@ internal fun orderLibraryAlbumTracks(savedTracks: List<Track>, referenceTracks: 
     referenceTracks.forEachIndexed { index, track -> sourceOrder.putIfAbsent(Triple(track.source, track.albumId, track.id), index) }
     val tracks = savedTracks.map { track ->
         val reference = sourceOrder[Triple(track.source, track.albumId, track.id)]?.let(referenceTracks::get)
+            ?.takeIf { compatibleLibraryCountries(track.country, it.country) }
         if (reference == null) track else track.copy(
             albumArtist = track.albumArtist.ifBlank { reference.albumArtist },
             discNumber = track.discNumber.takeIf { it > 0 } ?: reference.discNumber,
             trackNumber = track.trackNumber.takeIf { it > 0 } ?: reference.trackNumber,
+            country = track.country ?: reference.country,
         )
     }
-    if (tracks.none { it.discNumber > 0 || it.trackNumber > 0 || Triple(it.source, it.albumId, it.id) in sourceOrder }) return tracks
+    val compatibleOrder = tracks.associate { track ->
+        val key = Triple(track.source, track.albumId, track.id)
+        key to sourceOrder[key]?.takeIf { compatibleLibraryCountries(track.country, referenceTracks[it].country) }
+    }
+    if (tracks.none { it.discNumber > 0 || it.trackNumber > 0 || compatibleOrder[Triple(it.source, it.albumId, it.id)] != null }) return tracks
     return tracks.sortedWith(compareBy<Track> { it.discNumber <= 0 }.thenBy { it.discNumber }
         .thenBy { it.trackNumber <= 0 }.thenBy { it.trackNumber }
-        .thenBy { sourceOrder[Triple(it.source, it.albumId, it.id)] ?: Int.MAX_VALUE })
+        .thenBy { compatibleOrder[Triple(it.source, it.albumId, it.id)] ?: Int.MAX_VALUE })
 }
 
 internal val LibraryEntry.stableKey: String get() = "${hit.source.name}:${hit.kind}:${hit.id}"

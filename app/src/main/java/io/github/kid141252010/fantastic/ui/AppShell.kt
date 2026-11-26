@@ -116,6 +116,9 @@ fun AppShell(app: FantasticApp) {
     val appleMedia = catalog?.takeIf { it.source == Source.Apple && it.kind in setOf("music-video", "station", "post") }
     val glassSheetState = remember { mutableStateOf(false) }
     val glassSheetVisibility = remember { { visible: Boolean -> glassSheetState.value = visible } }
+    val playerBackOwnership = remember { mutableStateOf(false) }
+    val onPlayerBackOwnershipChange = remember { { ownsBack: Boolean -> playerBackOwnership.value = ownsBack } }
+    val libraryBackEnabled = !playerBackOwnership.value && catalog == null && !settings
     val player by playerConnection.state.collectAsStateWithLifecycle()
     remember { app.lyrics }
     val haze = remember { HazeState() }
@@ -148,16 +151,17 @@ fun AppShell(app: FantasticApp) {
                 ) {
                     when (tab) {
                         Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
-                        Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest, onOpen = { catalog = it })
+                        Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest,
+                            backEnabled = libraryBackEnabled, onOpen = { catalog = it })
                         Tab.New -> AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
                         Tab.Radio -> AppleDiscoveryScreen(app, radio = true, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
                         Tab.Home -> Placeholder(tab, onSettings = { settings = true })
                     }
                 }
                 catalog?.takeIf { appleMedia == null }?.let { hit ->
-                    CatalogDetails(app, hit.source, hit.kind, hit.id,
+                    CatalogDetails(app, hit.source, hit.kind, hit.id, hit.country,
                         modifier = Modifier.fillMaxSize().haze(haze),
-                        interactive = !playerExpanded && !settings && !glassSheetState.value,
+                        interactive = !playerBackOwnership.value && !playerExpanded && !settings && !glassSheetState.value,
                         onClose = { catalog = null })
                 }
 
@@ -183,6 +187,7 @@ fun AppShell(app: FantasticApp) {
                         if (!isExpanded) app.prefs.lastPlayerPane = playerPane.name
                     },
                     chromeVisible = !glassSheetState.value,
+                    onBackOwnershipChange = onPlayerBackOwnershipChange,
                     bottomBar = { frame, chromeInteractive ->
                         Box(
                             Modifier.fillMaxWidth().graphicsLayer {

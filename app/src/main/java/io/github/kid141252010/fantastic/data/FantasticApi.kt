@@ -71,11 +71,13 @@ class FantasticApi(private val prefs: Prefs) {
     suspend fun qqSearch(query: String): List<Track> =
         get("/qq/search?type=song&q=${enc(query)}", QqSearch.serializer()).songs.map { it.toTrack() }
 
-    suspend fun amSearch(query: String): List<Track> =
-        getAmp(
-            "/amp/v1/catalog/${prefs.storefront}/search?types=songs&limit=25&term=${enc(query)}",
+    suspend fun amSearch(query: String): List<Track> {
+        val storefront = prefs.storefront
+        return getAmp(
+            "/amp/v1/catalog/$storefront/search?types=songs&limit=25&term=${enc(query)}",
             AmSearch.serializer(),
-        ).results.songs?.data.orEmpty().map { it.toTrack() }
+        ).results.songs?.data.orEmpty().map { it.toTrack(storefront) }
+    }
 
     /** QQ 歌词候选（QRC / LRC 等，均已转成 TTML），保留原始请求地址供注释补充请求使用。 */
     internal suspend fun qqLyrics(mid: String): QqLyricsDocument = withContext(Dispatchers.IO) {

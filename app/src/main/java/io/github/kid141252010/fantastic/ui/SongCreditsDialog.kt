@@ -12,6 +12,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -20,6 +21,7 @@ import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.SongCreditSection
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 
@@ -31,10 +33,13 @@ private sealed interface SongCreditsState {
 
 @Composable
 internal fun SongCreditsDialog(app: FantasticApp, hit: CatalogHit, onDismiss: () -> Unit) {
-    val credits by produceState<SongCreditsState>(SongCreditsState.Loading, hit.source, hit.id) {
+    val country = remember(hit.source, hit.id, hit.country, hit.track?.country) {
+        hit.country.normalizedAppleCountry() ?: hit.track?.country.normalizedAppleCountry() ?: app.prefs.storefront
+    }
+    val credits by produceState<SongCreditsState>(SongCreditsState.Loading, hit.source, hit.id, country) {
         try {
             val sections = when (hit.source) {
-                Source.Apple -> app.apple.songCredits(hit.id)
+                Source.Apple -> app.apple.songCredits(hit.id, country)
                 Source.QQ -> app.qq.songCredits(hit.id)
                 Source.Netease -> app.netease.songCredits(hit.id)
             }

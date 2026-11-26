@@ -47,9 +47,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
+import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.librarySongHit
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.playback.validSongId
@@ -113,8 +115,7 @@ internal fun MediaActionContent(
         snapshot.playlists.forEach { playlist ->
             SheetAction(playlist.name, Icons.AutoMirrored.Outlined.PlaylistAdd, detail = "本地播放列表", onClick = {
                 if (hit.kind == "song" || hit.kind == "music-video") library.addToPlaylist(playlist.id, hit)
-                else tracks.forEach { track -> library.addToPlaylist(playlist.id, CatalogHit(
-                    track.source, "song", track.id, track.title, track.artist, track.artwork(500), track, detailOnly = false)) }
+                else tracks.forEach { track -> library.addToPlaylist(playlist.id, SearchCatalog.trackHit(track)) }
                 onDismiss()
             })
         }
@@ -161,7 +162,10 @@ internal fun MediaActionContent(
     }
     if (playable && hit.kind != "music-video") {
         val single = if (hit.kind == "song") tracks.singleOrNull() else null
-        val download = single?.let { track -> downloads.firstOrNull { it.key == track.mediaId } }
+        val download = single?.let { track -> downloads.firstOrNull {
+            it.key == track.mediaId && (track.source != Source.Apple || track.country.normalizedAppleCountry() == null ||
+                it.storefront == track.country.normalizedAppleCountry())
+        } }
         when (download?.status) {
             DownloadStatus.Ready -> SheetAction("移除下载", Icons.Outlined.Delete, onClick = {
                 app.downloads.remove(download.key); onDismiss()
@@ -243,7 +247,7 @@ internal fun catalogKindLabel(kind: String): String = when (kind) {
 internal fun catalogShareText(hit: CatalogHit): String {
     val id = Uri.encode(hit.id)
     val link = when (hit.source) {
-        Source.Apple -> "https://music.apple.com/${hit.kind}/$id"
+        Source.Apple -> "https://music.apple.com/${hit.country.normalizedAppleCountry()?.let { "$it/" }.orEmpty()}${hit.kind}/$id"
         Source.QQ -> "https://y.qq.com/n/ryqq/${when (hit.kind) {
             "song" -> "songDetail"; "artist" -> "singer"; "music-video" -> "mv"; else -> hit.kind
         }}/$id"

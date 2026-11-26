@@ -35,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -480,6 +481,7 @@ internal fun PlayerSheetHost(
     initiallyExpanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     chromeVisible: Boolean,
+    onBackOwnershipChange: (Boolean) -> Unit,
     bottomBar: @Composable (PlayerSheetFrame, Boolean) -> Unit,
 ) = BoxWithConstraints(Modifier.fillMaxSize()) {
     val context = LocalContext.current
@@ -677,9 +679,13 @@ internal fun PlayerSheetHost(
         targetDetent == PlayerSheetDetent.Collapsed &&
         activeDrag == null && settleJob?.isActive != true
     val chromeInteractive = chromeInteractiveNow()
-    BackHandler(enabled = trackPresent && chromeVisible &&
+    val playerOwnsBack = trackPresent && chromeVisible &&
         (!sheetAtDetent || activeDrag != null || settleJob?.isActive == true ||
-            targetDetent == PlayerSheetDetent.Expanded)) {
+            targetDetent == PlayerSheetDetent.Expanded)
+    val notifyBackOwnership by rememberUpdatedState(onBackOwnershipChange)
+    SideEffect { onBackOwnershipChange(playerOwnsBack) }
+    DisposableEffect(Unit) { onDispose { notifyBackOwnership(false) } }
+    BackHandler(enabled = playerOwnsBack) {
         animateToDetent(PlayerSheetDetent.Collapsed)
     }
 

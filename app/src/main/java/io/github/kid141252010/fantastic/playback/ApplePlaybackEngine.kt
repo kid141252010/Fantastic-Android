@@ -23,6 +23,7 @@ import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.reportedAudioDetails
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -119,8 +120,7 @@ internal class ApplePlaybackEngine(
     private var activeProfile = ApplePlaybackProfile("wifi", "hires", "auto")
     private var activeServer = ""
     private var configuredServer = ""
-    private var activeStorefront = "us"
-    private var requestedQuality: String? = null
+    private var activeStorefront = ""
     private var pendingPositionMs = 0L
     private var timelineInstalled = false
     private var pendingSeekBeforeTimeline = false
@@ -176,7 +176,7 @@ internal class ApplePlaybackEngine(
     fun playQueue(
         songs: List<QueuedSong>, index: Int, startPositionMs: Long = 0L,
         playWhenReady: Boolean = true, quality: String? = null,
-        server: String = prefs.baseUrl, storefront: String = prefs.storefront,
+        server: String, storefront: String?,
         skipCachedAlac: Boolean = false,
     ) = onMain {
         if (closed) return@onMain
@@ -189,7 +189,11 @@ internal class ApplePlaybackEngine(
             else songs.toMutableList().apply { this[index] = selected.copy(quality = quality) }
         occurrence = index
         requestedQuality = quality ?: selected.quality
-        activeStorefront = storefront.lowercase().takeIf(STORE_FRONT::matches) ?: "us"
+        activeStorefront = selected.track.country.normalizedAppleCountry() ?: storefront.normalizedAppleCountry().orEmpty()
+        if (activeStorefront.isEmpty()) {
+            publishError("Apple Music 国家无效")
+            return@onMain
+        }
         activeServer = server
         configuredServer = prefs.baseUrl
         pendingPositionMs = startPositionMs.coerceIn(0L, selected.track.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
@@ -254,8 +258,7 @@ internal class ApplePlaybackEngine(
                 startServerMonitor(serial)
                 if (resolved.variant.groupId.contains("alac", true) && !resolved.variant.widevine) {
                     releaseMediaPlayer()
-                    val source = AlacSource.Online(AppleResolvedSource(resolved, decrypt))
-                    activeAlacSource = source
+                    val source = AlacSource.Online(AppleResolvedSource(resolved, decrypt, checkNotNull(key)))
                     startAlac(source, serial)
                 } else {
                     startMedia3(resolved, decrypt, serial, normalized)

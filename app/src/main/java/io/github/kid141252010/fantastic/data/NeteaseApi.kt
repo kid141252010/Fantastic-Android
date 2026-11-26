@@ -362,7 +362,7 @@ data class NeteaseAlbum(
     val name: String = "",
     val cover: String = "",
     val publishTime: Long = 0,
-    val size: Long = 0,
+    val size: Long? = null,
     val subType: String = "",
     val language: String = "",
     val description: String = "",

@@ -41,7 +41,9 @@ import io.github.kid141252010.fantastic.data.AppleCatalogApi
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.MusicLibrary
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.librarySongHit
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.PlayerConnection
@@ -103,7 +105,9 @@ internal fun NowPlayingContent(
         if (!trackMenuOpen || rawTrack == null) return@LaunchedEffect
         val current = menuTrack ?: return@LaunchedEffect
         if (!current.artistId.isMissingCatalogId() && !current.albumId.isMissingCatalogId() &&
-            !current.artistArtworkTemplate.isNullOrBlank()) return@LaunchedEffect
+            !current.artistArtworkTemplate.isNullOrBlank() &&
+            (current.source != Source.Apple || current.country.normalizedAppleCountry() != null)) return@LaunchedEffect
+        val storefront = rawTrack.country.normalizedAppleCountry() ?: app.prefs.storefront
 
         suspend fun <T> lookup(action: suspend () -> T): T? = try {
             action()
@@ -116,7 +120,8 @@ internal fun NowPlayingContent(
 
         val details = lookup {
             when (rawTrack.source) {
-                Source.Apple -> apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id).toTrack()
+                Source.Apple -> apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id, storefront = storefront)
+                    .takeIf { it.id == rawTrack.id && it.type == "songs" }?.toTrack(storefront)
                 Source.QQ -> qq.songTrack(rawTrack.id)
                 Source.Netease -> netease.song(rawTrack.id).song.toTrack()
             }
@@ -136,26 +141,29 @@ internal fun NowPlayingContent(
             albumArtist = current.albumArtist.ifBlank { details?.albumArtist.orEmpty() },
             discNumber = current.discNumber.takeIf { it > 0 } ?: details?.discNumber ?: 0,
             trackNumber = current.trackNumber.takeIf { it > 0 } ?: details?.trackNumber ?: 0,
+            country = if (rawTrack.source == Source.Apple) details?.country ?: current.country else null,
         )
         ensureActive()
-        if (player.state.value.mediaId != rawTrack.mediaId) return@LaunchedEffect
+        if (player.state.value.currentTrack != rawTrack) return@LaunchedEffect
         menuTrack = updated
         if (artwork == null && !artistId.isMissingCatalogId()) {
             val avatar = lookup {
                 when (rawTrack.source) {
-                    Source.Apple -> apple.entity(AppleCatalogApi.Entity.Artist, artistId).artworkUrl(500)
+                    Source.Apple -> apple.entity(AppleCatalogApi.Entity.Artist, artistId,
+                        storefront = updated.country.normalizedAppleCountry() ?: storefront)
+                        .takeIf { it.id == artistId && it.type == "artists" }?.artworkUrl(500)
                     Source.QQ -> null
                     Source.Netease -> netease.artist(artistId).artist.takeIf { it.mid == artistId }?.avatar
                 }
             }?.takeIf { it.isNotBlank() }
             ensureActive()
-            if (avatar != null && player.state.value.mediaId == rawTrack.mediaId) {
+            if (avatar != null && player.state.value.currentTrack == rawTrack) {
                 menuTrack = updated.copy(artistArtworkTemplate = avatar)
             }
         }
     }
     val hit = remember(menuTrack) {
-        menuTrack?.let { CatalogHit(it.source, "song", it.id, it.title, it.artist, it.artwork(500), it, detailOnly = false) }
+        menuTrack?.let(SearchCatalog::trackHit)
     }
     val libraryEntry = hit?.let { song -> libraryState.items.firstOrNull {
         it.key.source == song.source && it.key.kind == song.kind && it.key.id == song.id
@@ -172,9 +180,11 @@ internal fun NowPlayingContent(
         buildList {
             menuTrack?.let { song ->
                 if (!song.artistId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "artist", song.artistId, song.artist, artwork = song.artistArtwork(500), detailOnly = true))
+                    song.source, "artist", song.artistId, song.artist, artwork = song.artistArtwork(500), detailOnly = true,
+                    country = song.country))
                 if (!song.albumId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "album", song.albumId, song.album, song.albumArtist, artwork = song.artwork(500), detailOnly = true))
+                    song.source, "album", song.albumId, song.album, song.albumArtist, artwork = song.artwork(500), detailOnly = true,
+                    country = song.country))
             }
         }
     }

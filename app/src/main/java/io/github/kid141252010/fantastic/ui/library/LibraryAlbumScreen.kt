@@ -58,6 +58,7 @@ import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.libraryAlbumMetadata
 import io.github.kid141252010.fantastic.data.librarySongHit
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.OfflineDownload
 import io.github.kid141252010.fantastic.playback.mediaId
@@ -70,6 +71,7 @@ import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.MediaActionContent
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,24 +80,40 @@ internal fun LibraryAlbumScreen(
     albumEntry: LibraryEntry,
     savedTracks: List<Track>,
     showLibrarySources: Boolean,
+    backEnabled: Boolean,
     onBack: () -> Unit,
     onOpenCatalog: (CatalogHit) -> Unit,
 ) {
     val album = albumEntry.hit
     val server = app.prefs.baseUrl
-    val storefront = app.prefs.storefront
+    val storefront = if (album.source == Source.Apple) album.country.normalizedAppleCountry() ?: app.prefs.storefront else null
+    val snapshot by app.library.snapshot.collectAsStateWithLifecycle()
+    val cachedMetadata = if (album.source == Source.Apple) null else snapshot.albumMetadata.firstOrNull { it.source == album.source && it.albumId == album.id }
     var retry by rememberSaveable(album.source, album.id, server, storefront) { mutableStateOf(0) }
-    var metadata by remember(album.source, album.id, server, storefront) { mutableStateOf<LibraryAlbumMetadata?>(null) }
-    var loadingMetadata by remember(album.source, album.id, server, storefront) { mutableStateOf(true) }
+    var metadata by remember(album.source, album.id, server, storefront) { mutableStateOf(cachedMetadata) }
+    var loadingMetadata by remember(album.source, album.id, server, storefront) { mutableStateOf(cachedMetadata == null) }
     var metadataError by remember(album.source, album.id, server, storefront) { mutableStateOf<Exception?>(null) }
     LaunchedEffect(album.source, album.id, server, storefront, retry) {
+        metadataError = null
+        val restored = app.library.snapshot.first { !it.loading }
+        val cached = if (album.source == Source.Apple) null else restored.albumMetadata.firstOrNull { it.source == album.source && it.albumId == album.id }
+        if (cached != null) {
+            metadata = cached
+            loadingMetadata = false
+            return@LaunchedEffect
+        }
         app.library.updateSongMetadata(albumEntry.albumTracks.map(SearchCatalog::trackHit))
         loadingMetadata = true
-        metadataError = null
         try {
-            val loaded = app.libraryAlbumMetadata(album.source, album.id)
+            val loaded = app.libraryAlbumMetadata(album.source, album.id, storefront)
             metadata = loaded
-            loadingMetadata = false
+            if (album.source == Source.Apple) {
+                loaded.country?.let { app.library.updateAppleCountry("album", album.id, it) }
+                val savedIds = savedTracks.filter { it.source == Source.Apple && it.albumId == album.id }.mapTo(HashSet()) { it.id }
+                loaded.tracks.filter { it.id in savedIds && it.albumId == album.id }.forEach { track ->
+                    track.country?.let { app.library.updateAppleCountry("song", track.id, it) }
+                }
+            }
             val patches = app.library.snapshot.value.items.asSequence()
                 .filter { it.hit.kind == "song" && it.hit.source == album.source }
                 .mapNotNull { it.hit.track }
@@ -116,11 +134,16 @@ internal fun LibraryAlbumScreen(
     val player by app.player.state.collectAsStateWithLifecycle()
     val downloads by app.downloads.entries.collectAsStateWithLifecycle()
     val downloadsByTrack = remember(downloads) { downloads.associateBy(OfflineDownload::key) }
-    val readyCount = savedTracks.count { downloadsByTrack[it.mediaId]?.status == DownloadStatus.Ready }
+    fun downloadFor(track: Track): OfflineDownload? {
+        val download = downloadsByTrack[track.mediaId] ?: return null
+        val country = if (track.source == Source.Apple) track.country.normalizedAppleCountry() else null
+        return download.takeIf { country == null || it.storefront == country }
+    }
+    val readyCount = displayTracks.count { downloadFor(it)?.status == DownloadStatus.Ready }
     val hasMultipleDiscs = remember(displayTracks) { displayTracks.any { it.discNumber > 1 } }
     var menuTrackId by remember { mutableStateOf<String?>(null) }
     val menuTrack = displayTracks.firstOrNull { it.id == menuTrackId }
-    BackHandler(enabled = menuTrack == null, onBack = onBack)
+    BackHandler(enabled = backEnabled && menuTrack == null, onBack = onBack)
     Column(Modifier.fillMaxSize()) {
         TopAppBar(title = { Text("专辑") }, navigationIcon = { Md3BackButton(onBack) }, windowInsets = WindowInsets(0, 0, 0, 0))
         LazyColumn(
@@ -152,9 +175,13 @@ internal fun LibraryAlbumScreen(
                     }
                 }
             }
+            if (snapshot.persistenceError) item("library_persistence_error") {
+                Text("本地资料库保存失败，重新启动后可能需要再次读取专辑信息。", Modifier.padding(horizontal = Dimens.Page, vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            }
             if (savedTracks.isEmpty()) item("empty") { Md3EmptyState("没有已保存的曲目", "", icon = Icons.Rounded.Album) }
             itemsIndexed(displayTracks, key = { _, track -> track.mediaId }) { index, track ->
-                val download = downloadsByTrack[track.mediaId]
+                val download = downloadFor(track)
                 val number = track.trackNumber.takeIf { it > 0 }?.let {
                     if (hasMultipleDiscs && track.discNumber > 0) "${track.discNumber}-$it" else it.toString()
                 }
@@ -206,7 +233,7 @@ internal fun LibraryAlbumScreen(
                 album.id.isNotBlank() && album.id != "0" && metadata!!.trackCount!! > savedTracks.size -> item("show_complete_album") {
                     Column(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page)) {
                         HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
-                        Text("显示完整专辑", Modifier.fillMaxWidth().clickable { onOpenCatalog(album) }.padding(vertical = 12.dp),
+                        Text("显示完整专辑", Modifier.fillMaxWidth().clickable { onOpenCatalog(album.copy(country = metadata?.country ?: album.country)) }.padding(vertical = 12.dp),
                             color = MaterialTheme.colorScheme.onSurface,
                             style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal))
                     }

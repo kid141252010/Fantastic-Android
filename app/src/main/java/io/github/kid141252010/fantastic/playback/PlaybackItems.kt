@@ -8,6 +8,7 @@ import androidx.media3.common.util.UnstableApi
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 
 internal const val KEY_ID = "fantastic.id"
 internal const val KEY_SOURCE = "fantastic.source"
@@ -23,6 +24,7 @@ internal const val KEY_QUALITY = "fantastic.quality"
 internal const val KEY_PLAYBACK_MESSAGE = "fantastic.playbackMessage"
 internal const val KEY_SHUFFLE_START = "fantastic.shuffleStart"
 internal const val KEY_OCCURRENCE = "fantastic.occurrence"
+internal const val KEY_COUNTRY = "fantastic.country"
 
 internal val Track.mediaId get() = "${source.mediaPrefix}:$id"
 
@@ -41,6 +43,7 @@ internal fun Track.toQueueItem(quality: String? = null, shuffleStart: Boolean? =
             putString(KEY_ALBUM_ARTIST, albumArtist)
             putInt(KEY_DISC_NUMBER, discNumber)
             putInt(KEY_TRACK_NUMBER, trackNumber)
+            if (source == Source.Apple) country.normalizedAppleCountry()?.let { putString(KEY_COUNTRY, it) }
             if (quality != null) putString(KEY_QUALITY, quality)
             if (shuffleStart != null) putBoolean(KEY_SHUFFLE_START, shuffleStart)
             if (occurrence != null) putInt(KEY_OCCURRENCE, occurrence)
@@ -67,6 +70,7 @@ internal fun MediaItem.toTrack(): Track? {
         albumArtist = extras?.getString(KEY_ALBUM_ARTIST).orEmpty(),
         discNumber = extras?.getInt(KEY_DISC_NUMBER, 0) ?: 0,
         trackNumber = extras?.getInt(KEY_TRACK_NUMBER, 0) ?: 0,
+        country = if (source == Source.Apple) extras?.getString(KEY_COUNTRY).normalizedAppleCountry() else null,
     )
 }
 
