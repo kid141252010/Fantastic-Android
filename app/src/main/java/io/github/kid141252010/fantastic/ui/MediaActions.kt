@@ -144,7 +144,8 @@ internal fun MediaActionContent(
     var relationAttempt by remember(relationIdentity) { mutableStateOf(0) }
     val latestSeed by rememberUpdatedState(relationSeed)
     val latestRelated by rememberUpdatedState(onOpenRelated)
-    val relations = relationResult ?: relationSeed?.songRelations(relationCountry) ?: SongRelations()
+    val seedRelations = remember(relationSeed, relationCountry) { relationSeed?.songRelations(relationCountry) ?: SongRelations() }
+    val relations = relationResult ?: seedRelations
     val canQueryRelations = relationSeed?.let { it.id.isNotBlank() && it.id != "0" && validCatalogId(it.source, "song", it.id) } == true
     fun relationContextCurrent(): Boolean = relationActive && !playlists && !showCredits && latestSeed == relationSeed &&
         latestRelated != null && app.prefs.baseUrl == relationServer &&

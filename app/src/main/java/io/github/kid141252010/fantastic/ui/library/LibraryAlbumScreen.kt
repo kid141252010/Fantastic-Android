@@ -155,7 +155,7 @@ internal fun LibraryAlbumScreen(
     }
     val readyCount = displayTracks.count { downloadFor(it)?.status == DownloadStatus.Ready }
     val hasMultipleDiscs = remember(displayTracks) { displayTracks.any { it.discNumber > 1 } }
-    var menuTrackId by remember { mutableStateOf<String?>(null) }
+    var menuTrackId by remember(albumEntry.stableKey) { mutableStateOf<String?>(null) }
     val menuTrack = displayTracks.firstOrNull { it.id == menuTrackId }
     val latestBackEnabled by rememberUpdatedState(backEnabled)
     val latestAlbum by rememberUpdatedState(album)
@@ -306,7 +306,7 @@ internal fun LibraryAlbumScreen(
     if (menuTrack != null) {
         val hit = SearchCatalog.trackHit(menuTrack)
         val dismiss = { menuTrackId = null }
-        val menuAlbumKey = albumEntry.stableKey
+        val menuAlbumKey = remember(menuTrack) { albumEntry.stableKey }
         GlassSheet(hit.title, onDismissRequest = dismiss, showHeader = false) {
             MediaActionContent(hit, app.library, listOf(menuTrack),
                 onView = { dismiss(); onOpenCatalog(hit) },

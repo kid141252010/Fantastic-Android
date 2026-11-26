@@ -129,7 +129,8 @@ internal fun NowPlayingContent(
     var relationAttempt by remember(identity) { mutableStateOf(0) }
     var artistArtwork by remember(identity) { mutableStateOf(emptyMap<CatalogHit, String>()) }
     val attemptedArtwork = remember(identity) { mutableSetOf<CatalogHit>() }
-    val relations = resolvedRelations ?: rawTrack?.songRelations(requestCountry) ?: SongRelations()
+    val seedRelations = remember(rawTrack, requestCountry) { rawTrack?.songRelations(requestCountry) ?: SongRelations() }
+    val relations = resolvedRelations ?: seedRelations
     val entities = remember(relations, artistArtwork) {
         listOfNotNull(relations.artist, relations.album).map { entity ->
             artistArtwork[entity]?.let { entity.copy(artwork = it) } ?: entity

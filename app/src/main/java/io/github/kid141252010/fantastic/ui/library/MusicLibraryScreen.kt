@@ -554,7 +554,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         }
         menuEntry != null -> {
             val entry = menuEntry!!
-            val menuRootRequest = rootNavigationRequest
+            val menuRootRequest = remember(entry) { rootNavigationRequest }
             val songs = when (entry.hit.kind) {
                 "song" -> listOf(asTrack(entry.hit))
                 "album" -> remember(entry, snapshot.items) { libraryAlbumTracks(entry, snapshot.items) }
