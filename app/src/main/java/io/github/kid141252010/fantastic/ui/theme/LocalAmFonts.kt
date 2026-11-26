@@ -20,11 +20,19 @@ import kotlin.math.roundToInt
 /** Optional assets supplied only by the developer's ignored local font directory. */
 internal object LocalAmFonts {
     private const val directory = "am-fonts"
-    private const val pingFangCollection = "pingfang_ui.ttc"
+    private val cjkCollections = arrayOf("pingfang.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc")
     private var availableFonts: Set<String>? = null
     private val typefaces = LongSparseArray<Typeface?>()
-    private var pingFangData: ByteBuffer? = null
-    private val pingFangFamilies = LongSparseArray<FontFamily>()
+    private val cjkData = arrayOfNulls<ByteBuffer>(cjkCollections.size)
+    private val cjkFamilies = arrayOfNulls<FontFamily>(5)
+    // Public faces only, in the order of the local collections (not the former PingFang UI TTC).
+    private val cjkFaceIndices = arrayOf(
+        intArrayOf(3, 7, 11, 15, 19, 23), // PingFang SC
+        intArrayOf(2, 6, 10, 14, 18, 22), // PingFang TC
+        intArrayOf(0, 4, 8, 12, 16, 20), // PingFang HK, also used for Macau
+        intArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), // Hiragino Sans W0–W9
+        intArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8), // Apple SD Gothic Neo 100–900
+    )
     private val fallbackFiles = arrayOf(
         "sf_armenian.ttf", "sf_georgian.ttf", "sf_hebrew.ttf", "sf_bangla.ttf",
         "sf_devanagari.ttf", "sf_gujarati.ttf", "sf_gurmukhi.ttf", "sf_kannada.ttf",
@@ -56,16 +64,16 @@ internal object LocalAmFonts {
         val resolvedWeight = resolvedWeight(weight)
         val locale = context.resources.configuration.locales[0]
         val nastaliq = locale.language == "ur"
-        val pingFangIndex = if (Build.VERSION.SDK_INT >= 29 && pingFangCollection in files) pingFangFaceIndex(locale) else -1
+        val cjkIndex = if (Build.VERSION.SDK_INT >= 29) cjkFamilyIndex(locale) else -1
         val key = (opticalSize.toLong() shl 15) or (resolvedWeight.toLong() shl 5) or
-            ((pingFangIndex + 1L) shl 2) or (if (rounded) 1L else 0L) or (if (nastaliq) 2L else 0L)
+            ((cjkIndex + 1L) shl 2) or (if (rounded) 1L else 0L) or (if (nastaliq) 2L else 0L)
         val cached = typefaces.indexOfKey(key)
         if (cached >= 0) return typefaces.valueAt(cached)
 
         val variations = "'wght' $resolvedWeight, 'opsz' $opticalSize"
         val typeface = try {
             if (Build.VERSION.SDK_INT >= 29) {
-                buildFallbackChain(assets, files, primary, variations, resolvedWeight, rounded, nastaliq, pingFangIndex)
+                buildFallbackChain(assets, files, primary, variations, resolvedWeight, rounded, nastaliq, cjkIndex)
             } else {
                 Typeface.Builder(assets, "$directory/$primary")
                     .setWeight(resolvedWeight)
@@ -84,38 +92,41 @@ internal object LocalAmFonts {
         return typeface
     }
 
-    // Faces in the locally supplied PingFang UI collection in TTC order.
-    private fun pingFangFaceIndex(locale: Locale): Int = when {
-        locale.language == "ja" -> 4
+    // Apple Pages' CJK recommendation: PingFang SC/TC/HK, Hiragino Sans and Apple SD Gothic Neo.
+    private fun cjkFamilyIndex(locale: Locale): Int = when {
+        locale.language == "ja" -> 3
+        locale.language == "ko" -> 4
         locale.language != "zh" || locale.script == "Hans" -> 0
-        locale.country == "HK" -> 2
-        locale.country == "MO" -> 3
+        locale.country == "HK" || locale.country == "MO" -> 2
         locale.country == "TW" || locale.script == "Hant" -> 1
         else -> 0
     }
 
     @TargetApi(29)
-    private fun pingFangFamily(assets: AssetManager, index: Int, weight: Int): FontFamily {
-        val cjkWeight = weight.coerceIn(100, 900)
-        val key = (index.toLong() shl 10) or cjkWeight.toLong()
-        pingFangFamilies[key]?.let { return it }
-        val buffer = pingFangData ?: assets.openFd("$directory/$pingFangCollection").use { descriptor ->
+    private fun cjkFamily(assets: AssetManager, index: Int): FontFamily {
+        cjkFamilies[index]?.let { return it }
+        val collectionIndex = when (index) {
+            3 -> 1
+            4 -> 2
+            else -> 0
+        }
+        val buffer = cjkData[collectionIndex] ?: assets.openFd("$directory/${cjkCollections[collectionIndex]}").use { descriptor ->
             descriptor.createInputStream().use { stream ->
                 stream.channel.map(FileChannel.MapMode.READ_ONLY, descriptor.startOffset, descriptor.length)
             }
-        }.also { pingFangData = it }
-        val font = Font.Builder(buffer)
-            .setTtcIndex(index)
-            .setWeight(cjkWeight)
-            .setFontVariationSettings("'wght' $cjkWeight")
-            .build()
-        return FontFamily.Builder(font).build().also { pingFangFamilies.put(key, it) }
+        }.also { cjkData[collectionIndex] = it }
+        val indices = cjkFaceIndices[index]
+        val builder = FontFamily.Builder(Font.Builder(buffer).setTtcIndex(indices[0]).build())
+        for (i in 1 until indices.size) {
+            builder.addFont(Font.Builder(buffer).setTtcIndex(indices[i]).build())
+        }
+        return builder.build().also { cjkFamilies[index] = it }
     }
 
     @TargetApi(29)
     private fun buildFallbackChain(
         assets: AssetManager, files: Set<String>, primary: String, variations: String,
-        weight: Int, rounded: Boolean, nastaliq: Boolean, pingFangIndex: Int,
+        weight: Int, rounded: Boolean, nastaliq: Boolean, cjkIndex: Int,
     ): Typeface {
         fun family(file: String, variable: Boolean = true): FontFamily {
             val builder = Font.Builder(assets, "$directory/$file")
@@ -124,7 +135,19 @@ internal object LocalAmFonts {
         }
 
         val builder = Typeface.CustomFallbackBuilder(family(primary))
-        if (pingFangIndex >= 0) builder.addCustomFallback(pingFangFamily(assets, pingFangIndex, weight))
+        fun addCjk(index: Int) {
+            val collectionIndex = when (index) {
+                3 -> 1
+                4 -> 2
+                else -> 0
+            }
+            if (cjkCollections[collectionIndex] in files) builder.addCustomFallback(cjkFamily(assets, index))
+        }
+        // The app locale determines Han glyph forms; Japanese and Korean remain in every local chain.
+        if (cjkIndex == 3 || cjkIndex == 4) addCjk(cjkIndex)
+        addCjk(if (cjkIndex in 0..2) cjkIndex else 0)
+        if (cjkIndex != 3) addCjk(3)
+        if (cjkIndex != 4) addCjk(4)
         for (file in fallbackFiles) {
             if (nastaliq && file == "sf_arabic.ttf") continue
             val selected = if (rounded) when (file) {

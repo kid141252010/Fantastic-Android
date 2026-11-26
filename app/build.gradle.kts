@@ -13,12 +13,20 @@ android {
     sourceSets.getByName("main").assets.srcDir(generatedLicenseAssets)
     // Optional private fonts exist only in this checkout; CI without them uses Android fonts.
     val localAmFontAssets = rootProject.file(".work/local-am-fonts/assets")
-    if (providers.gradleProperty("includeLocalAmFonts").orNull != "false" && localAmFontAssets.isDirectory) {
+    val includeLocalAmFonts = providers.gradleProperty("includeLocalAmFonts").orNull
+    if (includeLocalAmFonts == "true") {
+        require(localAmFontAssets.isDirectory) { "Local Apple font assets are missing: $localAmFontAssets" }
+    }
+    if (includeLocalAmFonts != "false" && localAmFontAssets.isDirectory) {
+        val requiredFonts = listOf(
+            "sf_pro_android_ui.ttf", "sf_pro_rounded_android_ui.ttf",
+            "pingfang.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc",
+        )
+        val missingFonts = requiredFonts.filterNot { localAmFontAssets.resolve("am-fonts/$it").isFile }
+        require(missingFonts.isEmpty()) { "Incomplete local Apple font assets: ${missingFonts.joinToString()}" }
         sourceSets.getByName("main").assets.srcDir(localAmFontAssets)
-        // Map the large font collection directly from the APK and share it across typefaces.
-        if (localAmFontAssets.resolve("am-fonts/pingfang_ui.ttc").isFile) {
-            androidResources.noCompress += "ttc"
-        }
+        // Map the CJK collections directly from the APK; share their buffers across text sizes.
+        androidResources.noCompress += "ttc"
     }
 
     defaultConfig {

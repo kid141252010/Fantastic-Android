@@ -31,6 +31,14 @@ Android 8.0 及以上可以安装。
 
 地址要是完整的 `http://` 或 `https://`，不要带账号和问号后面的参数。明文 HTTP 只建议在局域网里用。
 
+## 本地字体打包
+
+可选字体只从 Git 忽略的 `.work/local-am-fonts/assets/am-fonts/` 读取，不随源码或公开 CI 分发，也不在构建时下载。该目录需同时包含 `sf_pro_android_ui.ttf`、`sf_pro_rounded_android_ui.ttf`、`pingfang.ttc`、`hiragino_sans.ttc` 和 `apple_sd_gothic_neo.ttc`；现有其他语种字体可继续放在同一目录。
+
+按 [Apple 的 CJK 字体建议](https://support.apple.com/zh-cn/guide/pages/tanfbd4156e/mac)，Android 10 及以上的界面和歌词共用 SF Pro 与 CJK 回退链：简体中文用苹方-简、台湾繁体用苹方-繁、香港和澳门用苹方-港，日文用无衬线 Hiragino Sans，韩文用 Apple SD Gothic Neo。应用语言决定汉字字形与回退顺序，字体保留各自真实字重，不套用 SF Pro 的可变轴。Android 8–9 的 CJK 继续使用系统字体。
+
+本机构建显式传 `-PincludeLocalAmFonts=true`，缺少任一必需字体时停止构建；用 `-PincludeLocalAmFonts=false` 可构建纯系统字体包。TTC 在 APK 内不压缩，按集合共享只读映射和字体家族，避免按字号重复读取。
+
 ## 许可证
 
 本项目自己写的代码是 Apache-2.0。
