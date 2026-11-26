@@ -24,7 +24,7 @@ internal object LocalAmFonts {
     private var availableFonts: Set<String>? = null
     private val typefaces = LongSparseArray<Typeface?>()
     private val cjkData = arrayOfNulls<ByteBuffer>(cjkCollections.size)
-    private val cjkFamilies = arrayOfNulls<FontFamily>(5)
+    private val cjkFamilies = LongSparseArray<FontFamily>()
     // Public faces only, in the order of the local collections (not the former PingFang UI TTC).
     private val cjkFaceIndices = arrayOf(
         intArrayOf(3, 7, 11, 15, 19, 23), // PingFang SC
@@ -104,7 +104,7 @@ internal object LocalAmFonts {
 
     @TargetApi(29)
     private fun cjkFamily(assets: AssetManager, index: Int): FontFamily {
-        cjkFamilies[index]?.let { return it }
+        cjkFamilies[index.toLong()]?.let { return it }
         val collectionIndex = when (index) {
             3 -> 1
             4 -> 2
@@ -120,7 +120,7 @@ internal object LocalAmFonts {
         for (i in 1 until indices.size) {
             builder.addFont(Font.Builder(buffer).setTtcIndex(indices[i]).build())
         }
-        return builder.build().also { cjkFamilies[index] = it }
+        return builder.build().also { cjkFamilies.put(index.toLong(), it) }
     }
 
     @TargetApi(29)
