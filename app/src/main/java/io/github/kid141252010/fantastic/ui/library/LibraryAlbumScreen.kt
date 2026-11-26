@@ -83,7 +83,7 @@ internal fun LibraryAlbumScreen(
 ) {
     val album = albumEntry.hit
     val server = app.prefs.baseUrl
-    val storefront = app.prefs.storefront
+    val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
     var retry by rememberSaveable(album.source, album.id, server, storefront) { mutableStateOf(0) }
     var metadata by remember(album.source, album.id, server, storefront) { mutableStateOf<LibraryAlbumMetadata?>(null) }
     var loadingMetadata by remember(album.source, album.id, server, storefront) { mutableStateOf(true) }

@@ -42,7 +42,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.BuildConfig
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.AppleLyricsOptions
-import io.github.kid141252010.fantastic.data.AppleStorefront
 import io.github.kid141252010.fantastic.data.NeteaseCapabilities
 import io.github.kid141252010.fantastic.data.PlaybackCacheLimit
 import io.github.kid141252010.fantastic.data.Prefs
@@ -53,8 +52,6 @@ import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3PreferenceRow
 import io.github.kid141252010.fantastic.ui.Md3SectionHeader
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,10 +66,15 @@ fun SettingsScreen(
     val diag by lyrics.diag.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val initialBaseUrl = remember { prefs.baseUrl }
     var baseUrl by remember { mutableStateOf(prefs.baseUrl) }
-    val initialStorefront = remember { prefs.storefront }
-    var storefront by remember { mutableStateOf(prefs.storefront) }
+    val savedStorefront by prefs.storefrontState.collectAsStateWithLifecycle()
+    val regions by app.appleRegions.state.collectAsStateWithLifecycle()
+    var storefrontDraft by remember { mutableStateOf(prefs.storefront) }
+    var storefrontEdited by remember { mutableStateOf(false) }
+    val storefront = if (storefrontEdited) storefrontDraft else savedStorefront
+    val savedServer = SourceStatus.normalizeBaseUrl(prefs.baseUrl)
+    val regionEntry = regions.entries[savedServer]
+    val addressMatchesSaved = SourceStatus.normalizeBaseUrl(baseUrl) == savedServer
     var qqQuality by remember { mutableStateOf(prefs.qqQuality) }
     var neteaseQuality by remember { mutableStateOf(prefs.neteaseQuality) }
     var appleDownloadQuality by remember { mutableStateOf(prefs.appleQuality) }
@@ -93,13 +95,13 @@ fun SettingsScreen(
     var wrapperStatus by remember { mutableStateOf<SourceStatus.Wrapper?>(null) }
     var wrapperError by remember { mutableStateOf<String?>(null) }
     var checkedAddress by remember { mutableStateOf<String?>(null) }
-    var appleStorefronts by remember { mutableStateOf<List<AppleStorefront>>(emptyList()) }
-    var storefrontServer by remember { mutableStateOf<String?>(null) }
+    var refreshingRegions by remember { mutableStateOf(false) }
+    var refreshMessage by remember { mutableStateOf<String?>(null) }
     var storefrontError by remember { mutableStateOf<String?>(null) }
-    var storefrontNotice by remember { mutableStateOf<String?>(null) }
     var neteaseCapabilities by remember { mutableStateOf<NeteaseCapabilities?>(null) }
     var neteaseError by remember { mutableStateOf<String?>(null) }
     var choicePanel by remember { mutableStateOf<SettingsChoicePanel?>(null) }
+    val regionRequestBusy = checking || refreshingRegions || regions.refreshingServer != null
 
     fun persistPlaybackSettings() {
         prefs.qqQuality = qqQuality
@@ -113,6 +115,7 @@ fun SettingsScreen(
     }
 
     fun closeSettings() {
+        if (checking) return
         val language = appleLyricsLanguage.trim().ifEmpty { defaultLyricsOptions.language }
         val script = appleLyricsScript.trim().ifEmpty { defaultLyricsOptions.script }
         lyricsLanguageError = !isValidAppleLyricsTag(language)
@@ -124,26 +127,25 @@ fun SettingsScreen(
             saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
             return
         }
-        val original = SourceStatus.normalizeBaseUrl(initialBaseUrl)
         val selectedStorefront = storefront.trim().lowercase()
         if (!selectedStorefront.matches(Regex("[a-z]{2}"))) {
-            saveError = "Apple Music 店面必须是两位英文字母代码，例如 us、tr 或 jp。"
+            saveError = "Apple Music 地区必须是两位英文字母代码，例如 ca、tr 或 jp。"
             return
         }
-        val sourceChanged = normalized != original || selectedStorefront != initialStorefront
-        val storefrontWasVerified = storefrontServer == normalized && appleStorefronts.any { it.id == selectedStorefront }
-        if (sourceChanged && !storefrontWasVerified) {
-            saveError = "请先检查服务器；只保存该 Fantastic 服务器实际提供的 Apple Music 店面。"
-            return
-        }
-        if (normalized != original &&
-            (checkedAddress != normalized || wrapperStatus?.serverReachable != true)
+        val addressChanged = normalized != SourceStatus.normalizeBaseUrl(prefs.baseUrl)
+        val regionChanged = selectedStorefront != prefs.storefront
+        if ((addressChanged || regionChanged) &&
+            regions.entries[normalized]?.storefronts?.none { it.id == selectedStorefront } != false
         ) {
+            saveError = "地区不在此服务器的已缓存 AM 列表中；请检查服务器或刷新 AM 地区。"
+            return
+        }
+        if (addressChanged && (checkedAddress != normalized || wrapperStatus?.serverReachable != true)) {
             saveError = "请先检查新服务器并确认其返回有效的 Fantastic /status。"
             return
         }
-        prefs.baseUrl = normalized
-        if (storefrontWasVerified) prefs.storefront = selectedStorefront
+        if (addressChanged) prefs.baseUrl = normalized
+        if (regionChanged) prefs.storefront = selectedStorefront
         persistPlaybackSettings()
         val lyricsOptions = AppleLyricsOptions(language, script)
         if (lyricsOptions != prefs.appleLyricsOptions) {
@@ -153,79 +155,83 @@ fun SettingsScreen(
         onClose()
     }
 
+    fun refreshRegions() {
+        if (regionRequestBusy || !addressMatchesSaved) return
+        val server = SourceStatus.normalizeBaseUrl(prefs.baseUrl) ?: return
+        refreshingRegions = true
+        refreshMessage = null
+        scope.launch {
+            try {
+                val result = app.appleRegions.refresh(server)
+                val wrapper = result.wrapper.getOrNull()
+                val wrapperSucceeded = wrapper != null && wrapper.httpCode in 200..299 && wrapper.serverReachable && wrapper.available
+                refreshMessage = "AM 目录：${if (result.storefronts.isSuccess) "刷新成功" else "刷新失败"}；wrapper：${if (wrapperSucceeded) "刷新成功" else "刷新失败"}"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                refreshMessage = "刷新失败：${error.message ?: "无法获取地区"}"
+            } finally {
+                refreshingRegions = false
+            }
+        }
+    }
+
     fun checkServer() {
+        if (regionRequestBusy) return
         val normalized = SourceStatus.normalizeBaseUrl(baseUrl)
         if (normalized == null) {
             saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
             return
         }
-        val previousStorefront = prefs.storefront
         val requestedStorefront = storefront.trim().lowercase()
         if (!requestedStorefront.matches(Regex("[a-z]{2}"))) {
-            saveError = "Apple Music 店面必须是两位英文字母代码，例如 us、tr 或 jp。"
+            saveError = "Apple Music 地区必须是两位英文字母代码，例如 ca、tr 或 jp。"
             return
         }
-
         saveError = null
-        storefrontNotice = null
+        refreshMessage = null
         wrapperStatus = null
         wrapperError = null
         storefrontError = null
         neteaseCapabilities = null
         neteaseError = null
-        checkedAddress = normalized
+        checkedAddress = null
         checking = true
-        val previousBaseUrl = prefs.baseUrl
-        var serverAccepted = false
-
         scope.launch {
             try {
-                val statusResult = sourceResult { SourceStatus.wrapper(app.api.client, normalized) }
-                if (statusResult.isFailure) {
-                    wrapperError = statusResult.exceptionOrNull()?.message ?: "无法读取 /status"
+                val result = app.appleRegions.refresh(normalized)
+                val status = result.wrapper.getOrNull()
+                wrapperStatus = status
+                if (status == null) {
+                    wrapperError = result.wrapper.exceptionOrNull()?.message ?: "无法读取 /status"
                     return@launch
                 }
-                val status = statusResult.getOrThrow()
-                wrapperStatus = status
-                if (!status.serverReachable) {
+                if (!status.serverReachable || status.httpCode !in 200..299) {
                     wrapperError = "此地址未返回有效的 Fantastic /status。"
                     return@launch
                 }
-
-                prefs.baseUrl = normalized
-                coroutineScope {
-                    val storefrontRequest = async { sourceResult { app.apple.storefronts() } }
-                    val neteaseRequest = async { sourceResult { app.netease.capabilities() } }
-
-                    val storefrontResult = storefrontRequest.await()
-                    storefrontResult.fold(
-                        onSuccess = { available ->
-                            val selected = available.firstOrNull { it.id == requestedStorefront }
-                            val fallback = selected ?: available.firstOrNull { it.id == previousStorefront } ?: available.firstOrNull()
-                            if (fallback == null) {
-                                storefrontError = "服务器未返回可用 Apple Music 店面。"
-                            } else {
-                                appleStorefronts = available
-                                storefrontServer = normalized
-                                prefs.storefront = fallback.id
-                                storefront = fallback.id
-                                serverAccepted = true
-                                if (selected == null) {
-                                    storefrontNotice = "店面 $requestedStorefront 不在此服务器的可用列表中；已改用 ${fallback.id}（${fallback.name}）。"
-                                }
-                            }
-                        },
-                        onFailure = { storefrontError = it.message ?: "无法读取 Apple Music 店面列表" },
-                    )
-                    neteaseRequest.await().fold(
-                        onSuccess = { neteaseCapabilities = it },
-                        onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
-                    )
-                }
-                if (!serverAccepted) prefs.baseUrl = previousBaseUrl
-            } catch (e: CancellationException) {
-                if (!serverAccepted) prefs.baseUrl = previousBaseUrl
-                throw e
+                result.storefronts.fold(
+                    onSuccess = { available ->
+                        if (available.none { it.id == requestedStorefront }) {
+                            storefrontError = "地区 $requestedStorefront 不在此服务器的 AM 列表中；未保存服务器或地区。"
+                        } else {
+                            checkedAddress = normalized
+                            prefs.baseUrl = normalized
+                            prefs.storefront = requestedStorefront
+                            storefrontDraft = requestedStorefront
+                            storefrontEdited = false
+                        }
+                    },
+                    onFailure = { storefrontError = it.message ?: "无法读取 Apple Music 地区列表" },
+                )
+                sourceResult { app.netease.capabilities(normalized) }.fold(
+                    onSuccess = { neteaseCapabilities = it },
+                    onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                saveError = error.message ?: "服务器检查失败，未保存设置。"
             } finally {
                 checking = false
             }
@@ -238,7 +244,7 @@ fun SettingsScreen(
             topBar = {
                 TopAppBar(
                     title = { Text("设置") },
-                    actions = { TextButton(onClick = ::closeSettings) { Text("完成") } },
+                    actions = { TextButton(onClick = ::closeSettings, enabled = !checking) { Text("完成") } },
                 )
             },
         ) { innerPadding ->
@@ -253,23 +259,44 @@ fun SettingsScreen(
                         onValueChange = { baseUrl = it; saveError = null },
                         label = { Text("Fantastic 服务器地址") },
                         singleLine = true,
+                        enabled = !checking,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                         supportingText = if (baseUrl.trim().startsWith("http://", ignoreCase = true)) {
-                            { Text("HTTP 是明文传输，只建议在局域网内使用。状态检查只请求此地址的 /status。") }
+                            { Text("HTTP 是明文传输，只建议在局域网内使用。检查会请求此地址的 /status、AM 地区与网易能力。") }
                         } else null,
                     )
                     OutlinedTextField(
                         value = storefront,
-                        onValueChange = { storefront = it; saveError = null },
-                        label = { Text("Apple Music 店面（如 us、tr、jp）") },
+                        onValueChange = { storefrontDraft = it; storefrontEdited = true; saveError = null },
+                        label = { Text("Apple Music 地区（默认 ca）") },
                         singleLine = true,
+                        enabled = !checking,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                     )
+                    TextButton(
+                        onClick = ::refreshRegions,
+                        enabled = addressMatchesSaved && !regionRequestBusy,
+                        modifier = Modifier.padding(horizontal = 20.dp),
+                    ) { Text(if (refreshingRegions) "正在刷新…" else "刷新 AM 地区") }
+                    if (!addressMatchesSaved) StatusMessage("请先检查并保存服务器，再刷新地区")
+                    refreshMessage?.let { StatusMessage(it) }
+                    regions.persistenceError?.let { StatusMessage(it, isError = true) }
+                    val cachedStorefronts = regionEntry?.storefronts
+                    if (cachedStorefronts == null) StatusMessage(if (regions.loading) "正在读取地区…" else "地区信息尚未获取")
+                    else StatusMessage("当前服务器 AM 地区 (${cachedStorefronts.size})：${cachedStorefronts.joinToString { "${it.id} ${it.name}" }}")
+                    val cachedWrapper = regionEntry?.wrapperRegions
+                    StatusMessage("缓存的 wrapper 支持地区：${cachedWrapper?.joinToString()?.ifEmpty { "无" } ?: "未知"}")
+                    regionEntry?.storefrontError?.let { StatusMessage("AM 地区：$it", isError = true) }
+                    regionEntry?.wrapperError?.let { StatusMessage("wrapper 地区：$it", isError = true) }
+                    if (regionEntry?.storefrontError != null || regionEntry?.wrapperError != null) {
+                        StatusMessage(if (cachedStorefronts != null || cachedWrapper != null) "刷新失败，继续使用已缓存地区" else "地区信息尚未获取", isError = true)
+                        if (regionEntry?.wrapperError != null && cachedWrapper != null) StatusMessage("wrapper 支持信息来自上次成功获取")
+                    }
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        TextButton(onClick = ::checkServer, enabled = !checking) {
+                        TextButton(onClick = ::checkServer, enabled = !regionRequestBusy) {
                             Text(if (checking) "正在检查…" else "检查并保存服务器")
                         }
                         if (checking) CircularProgressIndicator(Modifier.size(20.dp))
@@ -281,18 +308,14 @@ fun SettingsScreen(
                     checkedAddress?.let { StatusMessage("检查地址：$it") }
                     wrapperStatus?.let { status ->
                         StatusMessage("Fantastic ${if (status.serverReachable) "可达" else "状态未知"}（HTTP ${status.httpCode}）；Apple wrapper ${if (status.available) "可用" else "不可用"}：${status.message}")
-                        StatusMessage("wrapper 报告的店面地区：${status.regions.joinToString().ifEmpty { "服务器未报告地区" }}")
+                        StatusMessage("本次 wrapper 报告地区：${status.regions.joinToString().ifEmpty { "服务器未报告地区" }}")
                     }
                     wrapperError?.let {
                         StatusMessage("无法读取此 Fantastic 服务器的 /status：$it。请确认地址、网络及服务器是否允许客户端访问。", isError = true)
                     }
-                    if (storefrontServer != null) {
-                        StatusMessage("Apple Music 店面 (${appleStorefronts.size})：${appleStorefronts.joinToString { "${it.id} ${it.name}" }}")
-                    }
                     storefrontError?.let {
-                        StatusMessage("无法验证 Apple 店面：$it。请确认该服务器提供 /amp/v1/storefronts。", isError = true)
+                        StatusMessage("无法验证 Apple 地区：$it。请确认该服务器提供 /amp/v1/storefronts。", isError = true)
                     }
-                    storefrontNotice?.let { StatusMessage(it, isError = true) }
                     neteaseCapabilities?.let { capabilities ->
                         StatusMessage(
                             if (capabilities.enabled) "NetEase adapter：服务器已启用；能力档位：${capabilities.qualities.joinToString { it.displayName.ifBlank { it.quality } }.ifEmpty { "服务器未报告" }}"

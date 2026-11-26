@@ -2,6 +2,9 @@ package io.github.kid141252010.fantastic.data
 
 import android.content.Context
 import androidx.core.content.edit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 internal enum class PlaybackCacheLimit(val id: String, val label: String, val bytes: Long) {
     Mb200("200mb", "200 MB", 200_000_000L),
@@ -13,15 +16,21 @@ internal enum class PlaybackCacheLimit(val id: String, val label: String, val by
 /** 简单的键值设置。服务器地址指向用户自己部署的 Fantastic。 */
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("fantastic", Context.MODE_PRIVATE)
+    private val _storefrontState = MutableStateFlow(sp.getString("storefront", DEFAULT_STOREFRONT)!!)
+    val storefrontState: StateFlow<String> = _storefrontState.asStateFlow()
 
     var baseUrl: String
         get() = sp.getString("baseUrl", DEFAULT_BASE_URL)!!.trimEnd('/')
         set(value) = sp.edit { putString("baseUrl", value.trim().trimEnd('/')) }
 
-    /** Apple Music 店面，如 us、tr、jp。 */
+    /** Apple Music 地区；未保存时使用 ca，保留已有选择。 */
     var storefront: String
-        get() = sp.getString("storefront", "us")!!
-        set(value) = sp.edit { putString("storefront", value.trim().lowercase()) }
+        get() = _storefrontState.value
+        set(value) {
+            val normalized = value.trim().lowercase()
+            sp.edit { putString("storefront", normalized) }
+            _storefrontState.value = normalized
+        }
 
     /** QQ 音乐首选音质，对应 /qq/song/:mid/play?quality=。 */
     var qqQuality: String
@@ -111,6 +120,7 @@ class Prefs(context: Context) {
 
     companion object {
         const val DEFAULT_BASE_URL = "https://music.1412.tech"
+        const val DEFAULT_STOREFRONT = "ca"
 
         val QQ_QUALITIES = listOf(
             "RS" to "Hi-Res 无损 · FLAC", "SQ" to "无损 · FLAC",

@@ -61,6 +61,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.CatalogHit
+import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -261,7 +262,7 @@ private fun appleMediaRoute(hit: CatalogHit, configuredStorefront: String): Appl
     val verifiedStorefront = attributeUrl?.let { validatedStorefront(it, kind, hit.id) }
     val storefront = verifiedStorefront
         ?: configuredStorefront.takeIf { it.matches(Regex("[a-z]{2}")) }
-        ?: "us"
+        ?: Prefs.DEFAULT_STOREFRONT
     return AppleMediaRoute(kind, storefront, hit.id)
 }
 

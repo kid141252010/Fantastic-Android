@@ -250,14 +250,14 @@ class AppleCatalogApi(
         ), language)
 
     /** All storefront pages, following Apple's next URLs as in upstream i18n.js. */
-    suspend fun storefronts(): List<AppleStorefront> {
+    suspend fun storefronts(baseUrl: String = prefs.baseUrl): List<AppleStorefront> {
         val result = linkedMapOf<String, AppleStorefront>()
         val seen = hashSetOf<String>()
         var next: String? = "/v1/storefronts"
         while (next != null) {
             val path = next
             if (!seen.add(path)) throw IOException("Repeated Apple storefront page")
-            val response = request(path)
+            val response = request(proxyUrl(path, emptyMap(), null, baseUrl = baseUrl))
             for (resource in response.data) {
                 val tags = resource.attributes.strings("supportedLanguageTags")
                 if (tags.isEmpty()) continue
@@ -739,6 +739,7 @@ data class AppleSearchSuggestion(
     val content: AppleCatalogResource? = null,
 )
 
+@Serializable
 data class AppleStorefront(
     val id: String,
     val name: String,
