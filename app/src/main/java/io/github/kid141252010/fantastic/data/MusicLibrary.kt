@@ -78,8 +78,18 @@ class MusicLibrary(context: Context) {
 
     init {
         scope.launch {
-            var current = readStoredSnapshot()
-            mutableSnapshot.value = current.copy(loading = false)
+            val stored = readStoredSnapshot()
+            var current = repairSongOrderFromAlbumTracks(stored)
+            if (current !== stored) {
+                try {
+                    atomicWrite(encodeSnapshot(current))
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    current = current.copy(persistenceError = true)
+                }
+            }
+            mutableSnapshot.value = current
             for (command in commands) {
                 val next = try {
                     command(current).copy(loading = false, persistenceError = false)
@@ -118,14 +128,105 @@ class MusicLibrary(context: Context) {
             val old = state.items.getOrNull(index)
             if (old == null && state.items.size >= MAX_ITEMS) return@trySend state
             val tracks = if (clean.kind == "album" && albumTracks.isNotEmpty()) {
-                albumTracks.asSequence().filter { it.source == clean.source && it.albumId == clean.id }
+                val incoming = albumTracks.asSequence().filter { it.source == clean.source && it.albumId == clean.id }
                     .distinctBy { it.id }.take(MAX_ITEMS).mapNotNull { normalizeHit(SearchCatalog.trackHit(it))?.track }.toList()
+                mergeAlbumTracks(incoming, old?.albumTracks.orEmpty())
             } else old?.albumTracks.orEmpty()
             val favoriteAt = if (toggleFavorite) {
                 if (old?.isFavorite == true) 0 else now()
             } else old?.favoriteAt ?: 0
-            val entry = LibraryEntry(clean, old?.addedAt ?: now(), favoriteAt, old?.folderId.orEmpty(), old?.metadata, tracks)
-            state.copy(items = if (index < 0) state.items + entry else state.items.toMutableList().apply { this[index] = entry })
+            var refreshed = mergeSongMetadata(if (hit.track == null && old != null) clean.copy(track = null) else clean, old?.hit)
+            if (refreshed.kind == "song") {
+                val track = refreshed.track
+                val reference = state.items.firstOrNull {
+                    it.hit.kind == "album" && it.hit.source == refreshed.source && it.hit.id == track?.albumId
+                }?.albumTracks?.firstOrNull { it.id == refreshed.id && it.source == refreshed.source && it.albumId == track?.albumId }
+                if (reference != null) refreshed = mergeSongMetadata(refreshed, SearchCatalog.trackHit(reference))
+            }
+            val entry = LibraryEntry(refreshed, old?.addedAt ?: now(), favoriteAt, old?.folderId.orEmpty(), old?.metadata, tracks)
+            val next = state.copy(items = if (index < 0) state.items + entry else state.items.toMutableList().apply { this[index] = entry })
+            if (clean.kind == "album") repairSongOrderFromReferences(next, tracks) else next
+        }
+    }
+
+    /** Incoming values win, except unknown fields never erase an existing song snapshot. */
+    private fun mergeSongMetadata(incoming: CatalogHit, existing: CatalogHit?): CatalogHit {
+        if (incoming.kind != "song" || existing?.kind != "song" || incoming.source != existing.source || incoming.id != existing.id) return incoming
+        val old = existing.track ?: return incoming
+        val track = incoming.track ?: return incoming.copy(track = old)
+        val albumChanged = track.albumId.isNotBlank() && track.albumId != "0" && old.albumId.isNotBlank() && old.albumId != "0" && track.albumId != old.albumId
+        val merged = track.copy(
+            title = track.title.ifBlank { old.title },
+            artist = track.artist.ifBlank { old.artist },
+            album = track.album.ifBlank { if (albumChanged) "" else old.album },
+            artworkTemplate = track.artworkTemplate?.takeIf { it.isNotBlank() } ?: old.artworkTemplate.takeUnless { albumChanged },
+            durationMs = track.durationMs.takeIf { it > 0 } ?: old.durationMs,
+            artistId = track.artistId.takeUnless { it.isBlank() || it == "0" } ?: old.artistId,
+            albumId = track.albumId.takeUnless { it.isBlank() || it == "0" } ?: old.albumId,
+            artistArtworkTemplate = track.artistArtworkTemplate?.takeIf { it.isNotBlank() } ?: old.artistArtworkTemplate,
+            albumArtist = track.albumArtist.ifBlank { if (albumChanged) "" else old.albumArtist },
+            discNumber = track.discNumber.takeIf { it > 0 } ?: if (albumChanged) 0 else old.discNumber,
+            trackNumber = track.trackNumber.takeIf { it > 0 } ?: if (albumChanged) 0 else old.trackNumber,
+        )
+        return incoming.copy(
+            subtitle = incoming.subtitle.ifBlank { existing.subtitle },
+            artwork = incoming.artwork ?: existing.artwork.takeUnless { albumChanged },
+            track = merged,
+        )
+    }
+
+    private fun mergeAlbumTracks(incoming: List<Track>, existing: List<Track>): List<Track> {
+        if (incoming.isEmpty()) return existing
+        if (existing.isEmpty()) return incoming
+        val references = existing.associateBy { Triple(it.source, it.albumId, it.id) }
+        return incoming.map { track ->
+            val old = references[Triple(track.source, track.albumId, track.id)] ?: return@map track
+            track.copy(
+                discNumber = track.discNumber.takeIf { it > 0 } ?: old.discNumber,
+                trackNumber = track.trackNumber.takeIf { it > 0 } ?: old.trackNumber,
+            )
+        }
+    }
+
+    private fun repairSongOrderFromAlbumTracks(state: MusicLibrarySnapshot): MusicLibrarySnapshot =
+        repairSongOrderFromReferences(state, state.items.asSequence().filter { it.hit.kind == "album" }
+            .flatMap { entry -> entry.albumTracks.asSequence().filter { it.source == entry.hit.source && it.albumId == entry.hit.id } }.toList())
+
+    private fun repairSongOrderFromReferences(state: MusicLibrarySnapshot, tracks: List<Track>): MusicLibrarySnapshot {
+        if (tracks.isEmpty()) return state
+        val references = tracks.filter { it.discNumber > 0 || it.trackNumber > 0 }
+            .associateBy { Triple(it.source, it.albumId, it.id) }
+        if (references.isEmpty()) return state
+        var changed = false
+        val items = state.items.map { entry ->
+            val track = entry.hit.track
+            val reference = if (entry.hit.kind == "song" && track != null && track.albumId.isNotBlank() && track.albumId != "0")
+                references[Triple(track.source, track.albumId, track.id)] else null
+            if (reference == null) entry else {
+                val hit = mergeSongMetadata(entry.hit, SearchCatalog.trackHit(reference))
+                if (hit == entry.hit) entry else entry.copy(hit = hit).also { changed = true }
+            }
+        }
+        return if (changed) state.copy(items = items) else state
+    }
+
+    /** Fill only existing members; queued execution rechecks current identity and album ownership. */
+    internal fun updateSongMetadata(hits: List<CatalogHit>) {
+        if (hits.isEmpty()) return
+        commands.trySend { state ->
+            val patches = hits.asSequence().filter { it.kind == "song" }.mapNotNull(::normalizeHit)
+                .associateBy { LibraryKey(it.source, it.kind, it.id) }
+            var changed = false
+            val items = state.items.map { entry ->
+                val patch = patches[entry.key]
+                val albumId = entry.hit.track?.albumId
+                val patchAlbumId = patch?.track?.albumId
+                if (patch == null || (!albumId.isNullOrBlank() && albumId != "0" && albumId != patchAlbumId)) entry else {
+                    val hit = mergeSongMetadata(entry.hit, patch)
+                    if (hit == entry.hit) entry else entry.copy(hit = hit).also { changed = true }
+                }
+            }
+            if (changed) state.copy(items = items) else state
         }
     }
 
@@ -329,6 +430,8 @@ class MusicLibrary(context: Context) {
         data.items.forEach { incoming ->
             val old = itemMap[incoming.key]
             itemMap[incoming.key] = if (old == null) incoming else incoming.copy(
+                hit = mergeSongMetadata(incoming.hit, old.hit),
+                albumTracks = if (incoming.hit.kind == "album") mergeAlbumTracks(incoming.albumTracks, old.albumTracks) else incoming.albumTracks,
                 addedAt = minOf(incoming.addedAt, old.addedAt),
                 favoriteAt = maxOf(incoming.favoriteAt, old.favoriteAt),
                 folderId = incoming.folderId.ifBlank { old.folderId },
@@ -346,7 +449,7 @@ class MusicLibrary(context: Context) {
         }
         require(itemMap.size <= MAX_ITEMS && folderMap.size <= MAX_FOLDERS && playlistMap.size <= MAX_PLAYLISTS &&
             playlistMap.values.sumOf { it.tracks.size } <= MAX_TOTAL_TRACKS) { "Merged library exceeds storage limits" }
-        return repairFolders(MusicLibrarySnapshot(itemMap.values.toList(), playlistMap.values.toList(), folderMap.values.toList(), loading = false))
+        return repairSongOrderFromAlbumTracks(repairFolders(MusicLibrarySnapshot(itemMap.values.toList(), playlistMap.values.toList(), folderMap.values.toList(), loading = false)))
     }
 
     private fun parseImport(text: String): Imported {

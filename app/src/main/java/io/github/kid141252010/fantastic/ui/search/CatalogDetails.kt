@@ -81,6 +81,7 @@ import io.github.kid141252010.fantastic.data.QqSong
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.toTrack
+import io.github.kid141252010.fantastic.data.toLibraryTracks
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.MediaActionContent
@@ -828,7 +829,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
             val neteaseAlbum = if (qqAlbum == null) app.netease.album(target.id) else null
             val album = neteaseAlbum?.album ?: json.decodeFromJsonElement<NeteaseAlbum>(qqAlbum!!.getValue("album"))
             val albumArtist = album.artists.joinToString(" / ") { it.name }
-            val tracks = neteaseAlbum?.songs?.map { it.toTrack() }
+            val tracks = neteaseAlbum?.toLibraryTracks(target.id)
                 ?: (qqAlbum?.get("songs") as? JsonArray).orEmpty().map { json.decodeFromJsonElement<QqSong>(it).toTrack() }
             DetailPage(album.name, albumArtist, artwork(album.cover), detailPlainText(JsonPrimitive(album.description)),
                 buildList {

@@ -46,7 +46,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -55,8 +54,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,7 +65,6 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.selected
@@ -105,16 +101,22 @@ import java.text.Collator
 /** Offline catalog library, favorites, local playlists and nested playlist folders. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
+fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit) {
     val snapshot by app.library.snapshot.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var category by rememberSaveable { mutableStateOf<LibraryCategory?>(null) }
     var favoritesOnly by rememberSaveable(category) { mutableStateOf(false) }
-    var newestFirst by rememberSaveable(category) { mutableStateOf(false) }
+    var newestFirst by rememberSaveable(category) {
+        mutableStateOf(when (category) {
+            LibraryCategory.Songs -> app.prefs.librarySongsNewestFirst
+            LibraryCategory.Albums -> app.prefs.libraryAlbumsNewestFirst
+            LibraryCategory.Artists -> app.prefs.libraryArtistsNewestFirst
+            else -> false
+        })
+    }
     var favoriteSongs by rememberSaveable { mutableStateOf(false) }
     val pageState = rememberSaveableStateHolder()
-    val homeBarState = rememberTopAppBarState()
     var folderId by rememberSaveable { mutableStateOf("") }
     var playlistId by rememberSaveable { mutableStateOf("") }
     var libraryAlbum by rememberSaveable { mutableStateOf<String?>(null) }
@@ -130,6 +132,25 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
     var deletingPlaylist by remember { mutableStateOf(false) }
     var menuEntry by remember { mutableStateOf<LibraryEntry?>(null) }
     var overflowOpen by remember { mutableStateOf(false) }
+    var handledRootNavigationRequest by rememberSaveable { mutableStateOf(rootNavigationRequest) }
+    LaunchedEffect(rootNavigationRequest) {
+        if (handledRootNavigationRequest != rootNavigationRequest) {
+            category = null
+            libraryAlbum = null
+            favoriteSongs = false
+            folderId = ""
+            playlistId = ""
+            overflowOpen = false
+            dialog = ""
+            nameInput = ""
+            importText = null
+            deletingFolder = false
+            deletingPlaylist = false
+            menuEntry = null
+            message = ""
+            handledRootNavigationRequest = rootNavigationRequest
+        }
+    }
     val currentCategory = category
     if (currentCategory == LibraryCategory.Downloads) {
         DownloadedMusicScreen(app, onBack = { category = null })
@@ -140,7 +161,7 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
     if (albumEntry != null) {
         val savedTracks = remember(albumEntry, snapshot.items) { libraryAlbumTracks(albumEntry, snapshot.items) }
         pageState.SaveableStateProvider(albumEntry.stableKey) {
-            LibraryAlbumScreen(app, albumEntry, savedTracks, onBack = { libraryAlbum = null }, onOpenSong = onOpen)
+            LibraryAlbumScreen(app, albumEntry, savedTracks, showLibrarySources, onBack = { libraryAlbum = null }, onOpenCatalog = onOpen)
         }
         return
     }
@@ -230,7 +251,6 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
     }
     val playlistBrowser = currentCategory == LibraryCategory.Playlists && selectedPlaylist == null && !favoriteSongs
     val showSort = currentCategory != null && selectedPlaylist == null && !favoriteSongs
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(homeBarState)
     val routeKey = when {
         selectedPlaylist != null -> "playlist:${selectedPlaylist.id}"
         currentFolder != null -> "folder:${currentFolder.id}"
@@ -259,79 +279,84 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
         else filtered.sortedWith { left, right -> collator.compare(left.hit.title, right.hit.title) }
     }
 
-    Scaffold(
-        modifier = if (isHome) Modifier.nestedScroll(scrollBehavior.nestedScrollConnection) else Modifier,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            val barTitle: @Composable () -> Unit = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-            val actions: @Composable RowScope.() -> Unit = {
-                if (showSort) LibrarySortMenu(favoritesOnly, newestFirst,
-                    onFavorites = { favoritesOnly = !favoritesOnly }, onSort = { newestFirst = it })
-                if (isHome || playlistBrowser) {
-                    IconButton(onClick = { dialog = "playlist" }, enabled = !snapshot.loading) {
-                        Icon(Icons.Rounded.Add, contentDescription = "新建歌单")
-                    }
+    val actions: @Composable RowScope.() -> Unit = {
+        if (showSort) LibrarySortMenu(favoritesOnly, newestFirst,
+            onFavorites = { favoritesOnly = !favoritesOnly }, onSort = {
+                newestFirst = it
+                when (currentCategory) {
+                    LibraryCategory.Songs -> app.prefs.librarySongsNewestFirst = it
+                    LibraryCategory.Albums -> app.prefs.libraryAlbumsNewestFirst = it
+                    LibraryCategory.Artists -> app.prefs.libraryArtistsNewestFirst = it
+                    else -> Unit
                 }
-                if (selectedPlaylist != null) {
-                    val favorite = selectedPlaylist.favoriteAt > 0
-                    IconButton(onClick = { app.library.togglePlaylistFavorite(selectedPlaylist.id) }) {
-                        Icon(if (favorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                            contentDescription = if (favorite) "取消收藏歌单" else "收藏歌单")
-                    }
+            })
+        if (isHome || playlistBrowser) {
+            IconButton(onClick = { dialog = "playlist" }, enabled = !snapshot.loading) {
+                Icon(Icons.Rounded.Add, contentDescription = "新建歌单")
+            }
+        }
+        if (selectedPlaylist != null) {
+            val favorite = selectedPlaylist.favoriteAt > 0
+            IconButton(onClick = { app.library.togglePlaylistFavorite(selectedPlaylist.id) }) {
+                Icon(if (favorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    contentDescription = if (favorite) "取消收藏歌单" else "收藏歌单")
+            }
+        }
+        if (isHome || playlistBrowser || selectedPlaylist != null) Box {
+            IconButton(onClick = { overflowOpen = true }, enabled = !snapshot.loading) {
+                Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作")
+            }
+            DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
+                if (isHome) {
+                    DropdownMenuItem(
+                        text = { Text("导入资料库") },
+                        leadingIcon = { Icon(Icons.Rounded.LibraryMusic, contentDescription = null) },
+                        onClick = { overflowOpen = false; importLauncher.launch(arrayOf("application/json", "text/json", "text/plain")) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("导出资料库") },
+                        leadingIcon = { Icon(Icons.Rounded.ImportExport, contentDescription = null) },
+                        onClick = { overflowOpen = false; exportLauncher.launch("fantastic-library.json") },
+                    )
                 }
-                if (isHome || playlistBrowser || selectedPlaylist != null) Box {
-                    IconButton(onClick = { overflowOpen = true }, enabled = !snapshot.loading) {
-                        Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作")
-                    }
-                    DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
-                        if (isHome) {
-                            DropdownMenuItem(
-                                text = { Text("导入资料库") },
-                                leadingIcon = { Icon(Icons.Rounded.LibraryMusic, contentDescription = null) },
-                                onClick = { overflowOpen = false; importLauncher.launch(arrayOf("application/json", "text/json", "text/plain")) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("导出资料库") },
-                                leadingIcon = { Icon(Icons.Rounded.ImportExport, contentDescription = null) },
-                                onClick = { overflowOpen = false; exportLauncher.launch("fantastic-library.json") },
-                            )
-                        }
-                        if (isHome || playlistBrowser) DropdownMenuItem(
-                            text = { Text(if (currentFolder == null) "新建文件夹" else "新建子文件夹") },
-                            leadingIcon = { Icon(Icons.Rounded.Folder, contentDescription = null) },
-                            onClick = { overflowOpen = false; dialog = "folder" },
-                        )
-                        if (selectedPlaylist != null || currentFolder != null) {
-                            DropdownMenuItem(
-                                text = { Text("重命名") },
-                                onClick = {
-                                    overflowOpen = false
-                                    dialog = if (selectedPlaylist != null) "rename-playlist" else "rename-folder"
-                                    nameInput = selectedPlaylist?.name ?: currentFolder?.name.orEmpty()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("移动到文件夹") },
-                                onClick = {
-                                    overflowOpen = false
-                                    dialog = if (selectedPlaylist != null) "move-playlist" else "move-folder"
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (selectedPlaylist != null) "删除歌单" else "删除文件夹") },
-                                leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
-                                onClick = {
-                                    overflowOpen = false
-                                    if (selectedPlaylist != null) deletingPlaylist = true else deletingFolder = true
-                                },
-                            )
-                        }
-                    }
+                if (isHome || playlistBrowser) DropdownMenuItem(
+                    text = { Text(if (currentFolder == null) "新建文件夹" else "新建子文件夹") },
+                    leadingIcon = { Icon(Icons.Rounded.Folder, contentDescription = null) },
+                    onClick = { overflowOpen = false; dialog = "folder" },
+                )
+                if (selectedPlaylist != null || currentFolder != null) {
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        onClick = {
+                            overflowOpen = false
+                            dialog = if (selectedPlaylist != null) "rename-playlist" else "rename-folder"
+                            nameInput = selectedPlaylist?.name ?: currentFolder?.name.orEmpty()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("移动到文件夹") },
+                        onClick = {
+                            overflowOpen = false
+                            dialog = if (selectedPlaylist != null) "move-playlist" else "move-folder"
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (selectedPlaylist != null) "删除歌单" else "删除文件夹") },
+                        leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                        onClick = {
+                            overflowOpen = false
+                            if (selectedPlaylist != null) deletingPlaylist = true else deletingFolder = true
+                        },
+                    )
                 }
             }
-            val insets = WindowInsets(0, 0, 0, 0)
-            if (isHome) LargeTopAppBar(title = barTitle, actions = actions, windowInsets = insets, scrollBehavior = scrollBehavior)
-            else TopAppBar(title = barTitle, navigationIcon = { Md3BackButton(::goBack) }, actions = actions, windowInsets = insets)
+        }
+    }
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            if (!isHome) TopAppBar(title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                navigationIcon = { Md3BackButton(::goBack) }, actions = actions, windowInsets = WindowInsets(0, 0, 0, 0))
         },
     ) { innerPadding ->
         pageState.SaveableStateProvider(routeKey) {
@@ -340,11 +365,13 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
                 isHome -> LibraryHome(
                     snapshot, albums, body, onCategory = { category = it }, onCatalog = ::openLibraryHit,
                     onCatalogOptions = { menuEntry = it },
-                    onPlaylist = { playlistId = it.id }, notice = notice,
+                    onPlaylist = { playlistId = it.id }, notice = notice, actions = actions,
+                    showLibrarySources = showLibrarySources,
                 )
                 currentCategory == LibraryCategory.Albums -> LibraryAlbumsGrid(
                     visibleItems, favoritesOnly, snapshot.loading, body, ::openLibraryHit,
                     onCatalogOptions = { menuEntry = it }, notice = notice,
+                    showLibrarySources = showLibrarySources,
                 )
                 else -> {
                     val player by app.player.state.collectAsStateWithLifecycle()
@@ -406,6 +433,7 @@ fun MusicLibraryScreen(app: FantasticApp, onOpen: (CatalogHit) -> Unit) {
                             items(visibleItems, key = { it.stableKey }) { entry ->
                                 LibraryItemRow(
                                     entry = entry,
+                                    showLibrarySources = showLibrarySources,
                                     playing = entry.hit.kind == "song" && player.mediaId == "${entry.hit.source.mediaPrefix}:${entry.hit.id}",
                                     onClick = {
                                         if (entry.hit.kind == "song") playLibraryHit(app, entry, visibleItems)
@@ -586,11 +614,11 @@ private fun LibraryEmptyCategory(category: LibraryCategory?, favoritesOnly: Bool
 }
 
 @Composable
-private fun LibraryItemRow(entry: LibraryEntry, playing: Boolean, onClick: () -> Unit, onOptions: () -> Unit) {
+private fun LibraryItemRow(entry: LibraryEntry, playing: Boolean, showLibrarySources: Boolean, onClick: () -> Unit, onOptions: () -> Unit) {
     val hit = entry.hit
     Md3MediaRow(
         title = hit.title,
-        subtitle = hit.librarySubtitle(),
+        subtitle = hit.source.librarySubtitle(hit.subtitle, showSource = hit.kind != "song" || showLibrarySources),
         playing = playing,
         onClick = onClick,
         leading = {
@@ -678,7 +706,7 @@ private fun PlaylistTrackRow(
     var menuOpen by remember { mutableStateOf(false) }
     Md3MediaRow(
         title = track.hit.title,
-        subtitle = track.hit.librarySubtitle(),
+        subtitle = track.hit.source.librarySubtitle(track.hit.subtitle, showSource = true),
         playing = playing,
         onClick = if (track.hit.kind == "song") onPlay else onOpen,
         leading = { Md3MediaArtwork(track.hit.artwork ?: track.hit.track?.artwork(120), Modifier.size(48.dp), shape = MaterialTheme.shapes.small) },
@@ -716,7 +744,11 @@ private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: 
 private fun asTrack(hit: CatalogHit): Track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
     ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0)
 
-private fun CatalogHit.librarySubtitle(): String = if (subtitle.isBlank()) source.libraryName() else "$subtitle · ${source.libraryName()}"
+internal fun Source.librarySubtitle(subtitle: String, showSource: Boolean): String = when {
+    !showSource -> subtitle
+    subtitle.isBlank() -> libraryName()
+    else -> "$subtitle · ${libraryName()}"
+}
 
 internal fun Source.libraryName(): String = when (this) {
     Source.Apple -> "Apple Music"

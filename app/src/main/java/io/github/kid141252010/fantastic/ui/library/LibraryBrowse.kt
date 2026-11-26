@@ -1,9 +1,11 @@
 package io.github.kid141252010.fantastic.ui.library
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,6 +15,8 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Album
@@ -30,18 +34,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.LibraryEntry
 import io.github.kid141252010.fantastic.data.LibraryKey
 import io.github.kid141252010.fantastic.data.LibraryPlaylist
 import io.github.kid141252010.fantastic.data.MusicLibrarySnapshot
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
@@ -84,21 +95,25 @@ internal fun libraryAlbums(entries: List<LibraryEntry>): List<LibraryEntry> {
 internal fun libraryAlbumTracks(album: LibraryEntry, entries: List<LibraryEntry>): List<Track> {
     val saved = entries.asSequence().filter { it.hit.kind == "song" }.mapNotNull { it.hit.track }
         .filter { it.source == album.hit.source && it.albumId == album.hit.id }.toList()
-    if (saved.isEmpty()) return emptyList()
-    val sourceOrder = HashMap<String, Int>(album.albumTracks.size)
-    album.albumTracks.forEachIndexed { index, track -> sourceOrder[track.id] = index }
-    val tracks = saved.map { track ->
-        val reference = sourceOrder[track.id]?.let(album.albumTracks::get)
+    return orderLibraryAlbumTracks(saved, album.albumTracks)
+}
+
+internal fun orderLibraryAlbumTracks(savedTracks: List<Track>, referenceTracks: List<Track>): List<Track> {
+    if (savedTracks.isEmpty()) return savedTracks
+    val sourceOrder = HashMap<Triple<Source, String, String>, Int>(referenceTracks.size)
+    referenceTracks.forEachIndexed { index, track -> sourceOrder.putIfAbsent(Triple(track.source, track.albumId, track.id), index) }
+    val tracks = savedTracks.map { track ->
+        val reference = sourceOrder[Triple(track.source, track.albumId, track.id)]?.let(referenceTracks::get)
         if (reference == null) track else track.copy(
             albumArtist = track.albumArtist.ifBlank { reference.albumArtist },
             discNumber = track.discNumber.takeIf { it > 0 } ?: reference.discNumber,
             trackNumber = track.trackNumber.takeIf { it > 0 } ?: reference.trackNumber,
         )
     }
-    if (tracks.none { it.discNumber > 0 || it.trackNumber > 0 }) return tracks
+    if (tracks.none { it.discNumber > 0 || it.trackNumber > 0 || Triple(it.source, it.albumId, it.id) in sourceOrder }) return tracks
     return tracks.sortedWith(compareBy<Track> { it.discNumber <= 0 }.thenBy { it.discNumber }
         .thenBy { it.trackNumber <= 0 }.thenBy { it.trackNumber }
-        .thenBy { sourceOrder[it.id] ?: Int.MAX_VALUE })
+        .thenBy { sourceOrder[Triple(it.source, it.albumId, it.id)] ?: Int.MAX_VALUE })
 }
 
 internal val LibraryEntry.stableKey: String get() = "${hit.source.name}:${hit.kind}:${hit.id}"
@@ -134,6 +149,8 @@ internal fun LibraryHome(
     onCatalogOptions: (LibraryEntry) -> Unit,
     onPlaylist: (LibraryPlaylist) -> Unit,
     notice: (@Composable () -> Unit)?,
+    actions: @Composable RowScope.() -> Unit,
+    showLibrarySources: Boolean,
 ) {
     val showVideos = remember(snapshot.items) { snapshot.items.any { it.hit.kind == "music-video" } }
     val recent = remember(albums, snapshot.items, snapshot.playlists) {
@@ -143,41 +160,55 @@ internal fun LibraryHome(
             snapshot.playlists.forEach { add(RecentCollection.Local(it)) }
         }.sortedByDescending { it.time }
     }
-    LibraryCoverGrid(modifier) {
-        item(key = "categories", span = { GridItemSpan(maxLineSpan) }) {
-            Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                Column {
-                    for (category in LibraryCategory.entries) {
-                        if (category == LibraryCategory.Videos && !showVideos) continue
-                        Md3MediaRow(
-                            title = category.title,
-                            onClick = { onCategory(category) },
-                            leading = { Icon(category.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                            trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
-                        )
+    val gridState = rememberLazyGridState()
+    val floatingActions by remember(gridState) { derivedStateOf { gridState.firstVisibleItemIndex > 0 } }
+    val horizontalPadding = if (LocalConfiguration.current.screenWidthDp < 360) 16.dp else Dimens.Page
+    Box(modifier.fillMaxSize()) {
+        LibraryCoverGrid(Modifier, state = gridState, topPadding = 0.dp, horizontalPadding = horizontalPadding) {
+            item(key = "library_title_key", span = { GridItemSpan(maxLineSpan) }) {
+                Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("资料库", Modifier.weight(1f), style = MaterialTheme.typography.headlineLarge.copy(
+                        fontSize = 34.sp, lineHeight = 41.sp, fontWeight = FontWeight.Bold))
+                    if (!floatingActions) actions()
+                }
+            }
+            item(key = "categories", span = { GridItemSpan(maxLineSpan) }) {
+                Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Column {
+                        for (category in LibraryCategory.entries) {
+                            if (category == LibraryCategory.Videos && !showVideos) continue
+                            Md3MediaRow(
+                                title = category.title,
+                                onClick = { onCategory(category) },
+                                leading = { Icon(category.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
+                            )
+                        }
+                    }
+                }
+            }
+            if (notice != null) item(key = "notice", span = { GridItemSpan(maxLineSpan) }) { notice() }
+            item(key = "recent-title", span = { GridItemSpan(maxLineSpan) }) {
+                Md3MediaSectionHeader("最近添加", modifier = Modifier)
+            }
+            if (snapshot.loading) item(key = "loading", span = { GridItemSpan(maxLineSpan) }) { LibraryLoading() }
+            else if (recent.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                Md3EmptyState("还没有最近添加的专辑或歌单", "加入专辑或新建歌单后，就能从这里打开。")
+            }
+            items(recent, key = { it.key }) { collection ->
+                when (collection) {
+                    is RecentCollection.Catalog -> CatalogCoverCard(collection.entry, onCatalog, onCatalogOptions, showLibrarySources)
+                    is RecentCollection.Local -> {
+                        val playlist = collection.playlist
+                        LibraryCoverCard(playlist.name, playlist.caption(), playlist.coverUrl(), Icons.AutoMirrored.Rounded.QueueMusic) {
+                            onPlaylist(playlist)
+                        }
                     }
                 }
             }
         }
-        if (notice != null) item(key = "notice", span = { GridItemSpan(maxLineSpan) }) { notice() }
-        item(key = "recent-title", span = { GridItemSpan(maxLineSpan) }) {
-            Md3MediaSectionHeader("最近添加", modifier = Modifier)
-        }
-        if (snapshot.loading) item(key = "loading", span = { GridItemSpan(maxLineSpan) }) { LibraryLoading() }
-        else if (recent.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
-            Md3EmptyState("还没有最近添加的专辑或歌单", "加入专辑或新建歌单后，就能从这里打开。")
-        }
-        items(recent, key = { it.key }) { collection ->
-            when (collection) {
-                is RecentCollection.Catalog -> CatalogCoverCard(collection.entry, onCatalog, onCatalogOptions)
-                is RecentCollection.Local -> {
-                    val playlist = collection.playlist
-                    LibraryCoverCard(playlist.name, playlist.caption(), playlist.coverUrl(), Icons.AutoMirrored.Rounded.QueueMusic) {
-                        onPlaylist(playlist)
-                    }
-                }
-            }
-        }
+        if (floatingActions) Row(Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = horizontalPadding),
+            verticalAlignment = Alignment.CenterVertically, content = actions)
     }
 }
 
@@ -190,6 +221,7 @@ internal fun LibraryAlbumsGrid(
     onCatalog: (CatalogHit) -> Unit,
     onCatalogOptions: (LibraryEntry) -> Unit,
     notice: (@Composable () -> Unit)?,
+    showLibrarySources: Boolean,
 ) {
     LibraryCoverGrid(modifier) {
         if (notice != null) item(key = "notice", span = { GridItemSpan(maxLineSpan) }) { notice() }
@@ -198,16 +230,23 @@ internal fun LibraryAlbumsGrid(
             if (favoritesOnly) Md3EmptyState("没有收藏的专辑", "可以从专辑的更多菜单收藏。", icon = Icons.Rounded.Album)
             else Md3EmptyState("还没有专辑", "把喜欢的专辑加入资料库。", icon = Icons.Rounded.Album)
         }
-        items(albums, key = { it.stableKey }) { CatalogCoverCard(it, onCatalog, onCatalogOptions) }
+        items(albums, key = { it.stableKey }) { CatalogCoverCard(it, onCatalog, onCatalogOptions, showLibrarySources) }
     }
 }
 
 @Composable
-private fun LibraryCoverGrid(modifier: Modifier, content: LazyGridScope.() -> Unit) {
+private fun LibraryCoverGrid(
+    modifier: Modifier,
+    state: LazyGridState = rememberLazyGridState(),
+    topPadding: Dp = 8.dp,
+    horizontalPadding: Dp = Dimens.Page,
+    content: LazyGridScope.() -> Unit,
+) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(128.dp),
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = Dimens.Page, end = Dimens.Page, top = 8.dp,
+        state = state,
+        contentPadding = PaddingValues(start = horizontalPadding, end = horizontalPadding, top = topPadding,
             bottom = LocalBarsPadding.current.calculateBottomPadding() + 16.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -216,10 +255,11 @@ private fun LibraryCoverGrid(modifier: Modifier, content: LazyGridScope.() -> Un
 }
 
 @Composable
-private fun CatalogCoverCard(entry: LibraryEntry, onCatalog: (CatalogHit) -> Unit, onOptions: (LibraryEntry) -> Unit) {
+private fun CatalogCoverCard(entry: LibraryEntry, onCatalog: (CatalogHit) -> Unit, onOptions: (LibraryEntry) -> Unit, showLibrarySources: Boolean) {
     val hit = entry.hit
     val icon = if (hit.kind == "album") Icons.Rounded.Album else Icons.AutoMirrored.Rounded.QueueMusic
-    val subtitle = hit.subtitle.ifBlank { hit.source.libraryName() }
+    val subtitle = if (hit.kind == "album") hit.source.librarySubtitle(hit.subtitle, showLibrarySources)
+        else hit.subtitle.ifBlank { hit.source.libraryName() }
     LibraryCoverCard(hit.title, subtitle, hit.artwork, icon, onOptions = { onOptions(entry) }) { onCatalog(hit) }
 }
 
@@ -244,7 +284,7 @@ private fun LibraryCoverCard(
         ) {
             Column(Modifier.weight(1f).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (onOptions != null) IconButton(onClick = onOptions) {

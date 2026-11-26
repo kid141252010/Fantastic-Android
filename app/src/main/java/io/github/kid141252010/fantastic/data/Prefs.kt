@@ -79,6 +79,22 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("lyricPronunciation", false)
         set(value) = sp.edit { putBoolean("lyricPronunciation", value) }
 
+    internal var librarySongsNewestFirst: Boolean
+        get() = sp.getBoolean("librarySongsNewestFirst", false)
+        set(value) = sp.edit { putBoolean("librarySongsNewestFirst", value) }
+
+    internal var libraryAlbumsNewestFirst: Boolean
+        get() = sp.getBoolean("libraryAlbumsNewestFirst", false)
+        set(value) = sp.edit { putBoolean("libraryAlbumsNewestFirst", value) }
+
+    internal var libraryArtistsNewestFirst: Boolean
+        get() = sp.getBoolean("libraryArtistsNewestFirst", false)
+        set(value) = sp.edit { putBoolean("libraryArtistsNewestFirst", value) }
+
+    internal var showLibrarySources: Boolean
+        get() = sp.getBoolean("showLibrarySources", true)
+        set(value) = sp.edit { putBoolean("showLibrarySources", value) }
+
     internal var appleLyricsOptions: AppleLyricsOptions
         get() {
             val defaults = AppleLyricsOptions.DEFAULT

@@ -26,6 +26,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,7 +58,13 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> Unit) {
+fun SettingsScreen(
+    app: FantasticApp,
+    lyrics: LyricsController,
+    showLibrarySources: Boolean,
+    onShowLibrarySourcesChange: (Boolean) -> Unit,
+    onClose: () -> Unit,
+) {
     val prefs = app.prefs
     val diag by lyrics.diag.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
@@ -304,6 +311,13 @@ fun SettingsScreen(app: FantasticApp, lyrics: LyricsController, onClose: () -> U
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
+
+                    Md3SectionHeader("资料库")
+                    Md3PreferenceRow(
+                        title = "显示音源来源",
+                        summary = "在资料库专辑和歌曲中显示 Apple Music、QQ 音乐或网易云音乐",
+                        trailing = { Switch(checked = showLibrarySources, onCheckedChange = onShowLibrarySourcesChange) },
+                    )
 
                     Md3SectionHeader("播放")
                     QualityPreference(SettingsChoicePanel.QQ.title, Prefs.QQ_QUALITIES.firstOrNull { it.first == qqQuality }?.second.orEmpty()) {
