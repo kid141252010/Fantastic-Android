@@ -36,7 +36,7 @@
 ## Apple 完整 ALAC 预缓存与复用
 
 - 仅当前实际输出的原生 ALAC 变体，在首个非零 PCM 写入后加入既有整曲缓存 worker；首响不等整曲下载。解析结果和 decrypt 仅在进程内传递，不再 prepare 第二次，不将 URL、密钥、模板或 cookie 写入索引和 MediaSession。入队身份使用全局队列 uid，不使用 Apple 连续 run 的局部 index。
-- 从第 0 片到末片按顺序封装原始压缩 packet 为完整 M4A，不先生成整曲 PCM、不重编码、不额外请求另一份 ALAC。复用已有 `AUDIO_LANES=3` 上限，待消费与当前消费分片合计最多 8 MiB 声明 range；超大单片独占。decrypt 的完成 LRU 最多 4 片且不超过 8 MiB，在线播放与缓存共享在途结果，取消一个等待者不取消另一个消费者。
+- 从第 0 片到末片按顺序封装原始压缩 packet 为完整 M4A，不先生成整曲 PCM、不重编码、不额外请求另一份 ALAC。共用 Apple 有界分片窗口，后台待消费与当前消费分片合计最多 8 MiB 声明 range，超大单片独占；并发宽度及 Range 条件见下节。decrypt 的完成 LRU 最多 4 片且不超过 8 MiB，在线播放与缓存共享在途结果，取消一个等待者不取消另一个消费者。
 - 单文件 `.part` 直接写入 ftyp/64 位 mdat，追加样本表 moov 并同步关闭后，沿用 `.part → .audio` 原子移动及 AtomicFile 索引。逐次 reserve 计入该文件实际累计大小，没有未计预算的 ALAC payload spool。已知时长大于 10 秒且输出少于期望超过 5 秒的预览不得发布为整曲。
 - 沿用现有 200MB/500MB/1GB/5GB 容量与每曲一个当前变体、完整 profile 匹配、pin/lease 和 LRU 策略。只运行一个整曲 worker；最近播放的 pending 优先，同时间保留插入顺序。已启动任务切歌后继续，停止、清队列和服务释放仍取消；完成缓存只刷新 upcoming，不抢占当前声音或时钟。
 - 再次选歌、重播和恢复队列可优先读取匹配的完整 ALAC 缓存，包括原有完整条目；暂停恢复不打开文件或强制播放。Media3 1.5.1 `Mp4Extractor` 管理 MP4 样本表，用指定音轨的真实 seek point 定位，压缩 packet 交给现有 JNI 解码与 AudioTrack 输出。绝对时钟仍为目标位置加真实已播帧，保留请求/seek generation 隔离和曲尾排空。
@@ -44,6 +44,16 @@
 - `FantasticPlaybackCache` 的 `apple-cache-start/complete` 记录安全曲目 ID、uid、request、group、真实文件 UUID、字节、时长和耗时；`FantasticPlayback` 的 `path=cache-alac` 只证明已 acquire 本地文件，首输出记录实际 rate/bits/channels。日志本身不证明出声或零网络请求。
 - 依据：[Apple 无损说明（2026-11-12）](https://support.apple.com/en-us/118295) 确认 Android 流播/下载音质分别选择及无损的流量/存储成本；[Media3 1.5.1 Mp4Extractor](https://github.com/androidx/media/blob/1.5.1/libraries/extractor/src/main/java/androidx/media3/extractor/mp4/Mp4Extractor.java) 与 [TrackOutput](https://github.com/androidx/media/blob/1.5.1/libraries/extractor/src/main/java/androidx/media3/extractor/TrackOutput.java) 提供本地 packet/seek 契约。3 槽、8 MiB、4 片和完整性容差均为项目实现值，不是 Apple 公布的缓存参数；不承诺整曲完成时限。
 - 本轮 `adb devices -l` 无设备。首次生成耗时、首尾实际无损输出、同音质二次试听无 prepare/CDN/模板请求、断网重启、本地 90s/180s 歌词定位与暂停恢复、生成中快速定位/切歌、空间不足/断网失败、随机混源 uid 和音质/profile 隔离均未运行真实设备验收；构建或包体核验不能代替这些证据。
+
+## Apple 分片有界并发与缓存流水线
+
+- 仅优化 Apple 当前曲的分片获取与整曲缓存；不改全局 `AUDIO_LANES`、共享 OkHttp Dispatcher、QQ／网易云、整曲 worker 数或发布事务。进程共享准入先派 Playback，再派 Background；总 active 最多 4，后台 active 最多 3。已 active 的后台片不抢占；同片前台消费者提升原 queued flight，不另建 producer。4 槽来自原 reader 1 路加缓存 3 路组合峰值，不是 Apple 官方参数，也不保证绕过 Dispatcher、冷模板 mutex 或已运行同片请求。
+- 每个 resolver 按资源保存 Unknown／Verified／Serial／Failed 身份。首个成功媒体片只有精确 206、匹配的 Content-Range 起止及合法 total、精确 body 长度、strong ETag 才能 Verified；init 不探测。Verified 后发送 If-Range，并在读 body 前检查后续成功响应的相同 ETag／total／范围；200、身份缺失或变化使资源终态 Failed，沿既有 HTTP 502 与有限重试失败清理，不混合实体。Serial 不升格，保留原 200／缺头／弱 ETag 兼容能力。
+- `AppleSegmentWindow` 在 IO 获取／解密并按索引交付，Verified 时最多保留 3 个后续片。Unknown／Serial 时 reader 保留 1 个后续片；resolved ALAC 缓存保留原三片总窗口（含正在 mux 的片），generic 导出保留单路网络并与当前片解析／写盘重叠。首片／seek 目标不等待预取完成；旧窗口取消并在 NonCancellable 中 join 后才读取新目标，独立缓存 worker 可继续。
+- 后台 8 MiB 包含当前片和所有在途／待消费片，当前片到下一次 read／reset／close 才释放；前台 8 MiB 只限制后续队列，当前解码片另计。前台空后续队列允许一个大于 8 MiB 的片独占，后台超大片独占整个窗口。声明长度使用防溢出加法；数组只传引用。此预算不是全应用 RSS 上限，完成 LRU、前台当前片和旧 HTTP 200 整对象临时响应另计。
+- 两条 exporter 都用一个 writer，Widevine DRM 操作仍串行；每个非空 trun/chunk 只写一次连续 sample 数据，逐 sample 保留 size／duration／index 和递增输出偏移，spool copy 的 64 KiB buffer 循环外复用。reserve、进度、时长／长度校验、payload 清理、part 原子发布、engine 首 PCM 条件与会话去重保持原契约。
+- DEBUG `FantasticPlayback` 增加 `apple-segment-start/end`（job、过滤后的 id/group、index、priority、active/background、queueMs/elapsedMs、bytes、结束状态）、每 read 一条 `apple-window`（role、index、queued、heldBytes、queuedBytes、waitMs、Range 模式）。仅 tagged media 请求的 `apple-segment-http` 记录 headers/status/end/failed、job/index/code/bytes；不记录 URL、资源名、ETag 原值、模板、cookie 或 token。只有 wire headers→body-end 区间重叠才证明实际 HTTP 并发，producer 开始时间不替代它；发布耗时沿用 `FantasticPlaybackCache` 的 `apple-cache-complete elapsedMs`。
+- 本次设备前提检查 `adb devices -l` 无设备，未安装、未清缓存，未取得当前 server／storefront／真实变体与可比冷输入。连续播放、缓存忙时 seek／切歌／取消、实际 wire 并发、200／弱 ETag／变实体与超大片边界、AAC／Widevine／手动导出、完整缓存再播、真实播放头、可听输出及完成时长均未端上验收。静态核对、编译和包体核验不能证明卡顿修复或量化加速；构建与 APK 身份证据保存在根工作树忽略目录 `.work/apple-segment-concurrency-qa/`。
 
 ## MiniPlayer 材质、资料库与国家来源
 

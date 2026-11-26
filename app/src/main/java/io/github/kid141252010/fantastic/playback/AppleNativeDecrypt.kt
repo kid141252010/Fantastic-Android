@@ -7,11 +7,13 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import android.util.Base64
 import android.util.Log
+import android.os.SystemClock
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.SourceStatus
+import io.github.kid141252010.fantastic.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
@@ -23,6 +25,9 @@ import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
+import okhttp3.Call
+import okhttp3.EventListener
+import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -30,6 +35,8 @@ import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.LinkedHashMap
+import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.ceil
 
 internal data class AppleVariant(
@@ -98,6 +105,134 @@ private data class AppleSegmentKey(
     val keyUri: String?,
 )
 
+internal enum class AppleSegmentPriority { Playback, Background }
+
+private enum class AppleTicketState { Queued, Active, Finished }
+
+private class AppleSegmentTicket(var priority: AppleSegmentPriority, val job: Long) {
+    var state = AppleTicketState.Queued
+    var enqueued = false
+    val granted = CompletableDeferred<Unit>()
+    val queuedAt = if (BuildConfig.DEBUG) SystemClock.elapsedRealtime() else 0L
+    var admittedAt = 0L
+}
+
+/** Process-wide producer admission; an active background job never consumes the playback reserve. */
+private object AppleSegmentAdmission {
+    private val lock = Any()
+    private val playback = ArrayDeque<AppleSegmentTicket>()
+    private val background = ArrayDeque<AppleSegmentTicket>()
+    private val jobs = AtomicLong()
+    private var active = 0
+    private var backgroundActive = 0
+
+    fun ticket(priority: AppleSegmentPriority) = AppleSegmentTicket(priority, if (BuildConfig.DEBUG) jobs.incrementAndGet() else 0L)
+
+    suspend fun acquire(ticket: AppleSegmentTicket) {
+        currentCoroutineContext().ensureActive()
+        val grants = synchronized(lock) {
+            check(ticket.state == AppleTicketState.Queued && !ticket.enqueued)
+            ticket.enqueued = true
+            queue(ticket.priority).addLast(ticket)
+            drain()
+        }
+        notify(grants)
+        ticket.granted.await()
+        currentCoroutineContext().ensureActive()
+    }
+
+    fun promote(ticket: AppleSegmentTicket) {
+        val grants = synchronized(lock) {
+            if (ticket.state == AppleTicketState.Queued && ticket.priority == AppleSegmentPriority.Background) {
+                if (ticket.enqueued) background.remove(ticket)
+                ticket.priority = AppleSegmentPriority.Playback
+                if (ticket.enqueued) playback.addLast(ticket)
+            }
+            drain()
+        }
+        notify(grants)
+    }
+
+    fun release(ticket: AppleSegmentTicket) {
+        val grants = synchronized(lock) {
+            when (ticket.state) {
+                AppleTicketState.Queued -> if (ticket.enqueued) queue(ticket.priority).remove(ticket)
+                AppleTicketState.Active -> {
+                    active--
+                    if (ticket.priority == AppleSegmentPriority.Background) backgroundActive--
+                }
+                AppleTicketState.Finished -> return
+            }
+            ticket.state = AppleTicketState.Finished
+            ticket.enqueued = false
+            drain()
+        }
+        notify(grants)
+    }
+
+    fun trace(ticket: AppleSegmentTicket, track: AppleResolvedTrack, index: Int, event: String, bytes: Int, status: String?) {
+        if (!BuildConfig.DEBUG) return
+        val now = SystemClock.elapsedRealtime()
+        val state = synchronized(lock) { Triple(ticket.priority, active, backgroundActive) }
+        val queueMs = (ticket.admittedAt.takeIf { it > 0L } ?: now) - ticket.queuedAt
+        val elapsedMs = if (ticket.admittedAt > 0L) now - ticket.admittedAt else 0L
+        Log.d("FantasticPlayback", "apple-segment-$event job=${ticket.job} id=${track.media.adamId.appleLogToken()} " +
+            "group=${track.variant.groupId.appleLogToken()} index=$index priority=${state.first} " +
+            "active=${state.second} background=${state.third} queueMs=$queueMs elapsedMs=$elapsedMs bytes=$bytes" +
+            (if (status == null) "" else " status=$status"))
+    }
+
+    private fun queue(priority: AppleSegmentPriority) = if (priority == AppleSegmentPriority.Playback) playback else background
+
+    // All callers hold lock. Complete notifications only after leaving it.
+    private fun drain(): List<AppleSegmentTicket> {
+        var grants: MutableList<AppleSegmentTicket>? = null
+        while (active < AUDIO_LANES + 1) {
+            val ticket = when {
+                playback.isNotEmpty() -> playback.removeFirst()
+                backgroundActive < AUDIO_LANES && background.isNotEmpty() -> background.removeFirst()
+                else -> break
+            }
+            ticket.enqueued = false
+            ticket.state = AppleTicketState.Active
+            active++
+            if (ticket.priority == AppleSegmentPriority.Background) backgroundActive++
+            if (grants == null) grants = ArrayList()
+            grants.add(ticket)
+        }
+        return grants ?: emptyList()
+    }
+
+    private fun notify(grants: List<AppleSegmentTicket>) {
+        for (ticket in grants) {
+            if (BuildConfig.DEBUG) ticket.admittedAt = SystemClock.elapsedRealtime()
+            ticket.granted.complete(Unit)
+        }
+    }
+}
+
+private class AppleSegmentFlight(val ticket: AppleSegmentTicket) {
+    val result = CompletableDeferred<ByteArray>()
+}
+
+private enum class AppleRangeMode { Unknown, Verified, Serial, Failed }
+private data class AppleRangeIdentity(val mode: AppleRangeMode, val total: Long = 0L, val etag: String? = null)
+private data class AppleRangeReply(val code: Int, val body: ByteArray, val contentRange: String?, val etag: String?)
+private val appleStrongTag = Regex("\"[\\x21\\x23-\\x7e\\x80-\\xff]*\"")
+private val appleContentRange = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)", RegexOption.IGNORE_CASE)
+
+/** Only tagged media requests emit wire events; never log URLs, headers or exception messages. */
+private class AppleSegmentHttpTrace(private val job: Long, private val index: Int) : EventListener() {
+    private var code = 0
+    private fun trace(event: String, bytes: Long = 0L) {
+        if (BuildConfig.DEBUG) Log.d("FantasticPlayback", "apple-segment-http event=$event job=$job index=$index code=$code bytes=$bytes")
+    }
+    override fun requestHeadersEnd(call: Call, request: Request) { code = 0; trace("headers") }
+    override fun responseHeadersEnd(call: Call, response: Response) { code = response.code; trace("status") }
+    override fun responseBodyEnd(call: Call, byteCount: Long) { trace("end", byteCount) }
+    override fun callFailed(call: Call, ioe: IOException) { trace("failed") }
+}
+
 /** Resolves Apple HLS and performs length-preserving FairPlay sample decryption in-process. */
 @UnstableApi
 internal class AppleNativeDecrypt(
@@ -112,9 +247,17 @@ internal class AppleNativeDecrypt(
         .callTimeout(0, TimeUnit.MILLISECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
+        .apply {
+            if (BuildConfig.DEBUG) eventListenerFactory { call ->
+                call.request().tag(AppleSegmentHttpTrace::class.java) ?: EventListener.NONE
+            }
+        }
         .build()
     private val segmentLock = Any()
-    private val inFlight = mutableMapOf<AppleSegmentKey, CompletableDeferred<ByteArray>>()
+    private val inFlight = mutableMapOf<AppleSegmentKey, AppleSegmentFlight>()
+    private val urgentSegments = mutableSetOf<AppleSegmentKey>()
+    private val rangeLock = Any()
+    private val rangeIdentities = mutableMapOf<HttpUrl, AppleRangeIdentity>()
     private val completedSegments = LinkedHashMap<AppleSegmentKey, ByteArray>(4, 0.75f, true)
     private var completedSegmentBytes = 0L
     private var retainSegments = true
@@ -122,6 +265,7 @@ internal class AppleNativeDecrypt(
     internal fun clearSegmentCache() = synchronized(segmentLock) {
         completedSegments.clear()
         completedSegmentBytes = 0L
+        urgentSegments.clear()
         // Detached sources can finish their cache transfer, but no longer retain playback fragments.
         retainSegments = false
     }
@@ -260,32 +404,47 @@ internal class AppleNativeDecrypt(
 
     suspend fun fetchInit(track: AppleResolvedTrack): ByteArray = track.initBytes.copyOf()
 
-    suspend fun fetchSegment(track: AppleResolvedTrack, index: Int): ByteArray {
+    suspend fun fetchSegment(
+        track: AppleResolvedTrack,
+        index: Int,
+        priority: AppleSegmentPriority = AppleSegmentPriority.Playback,
+    ): ByteArray {
+        if (index !in track.media.segments.indices) throw IOException("Apple 分片获取失败：HTTP 416")
+        ensureRangeHealthy(track.media.resourceUrl)
         if (!track.variant.groupId.contains("alac", true) || track.variant.widevine) {
-            return fetchSegmentUncached(track, index)
+            return produceSegment(track, index, AppleSegmentAdmission.ticket(priority))
         }
-        val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
-        val key = AppleSegmentKey(track.media.resourceUrl, track.media.adamId, track.variant.groupId,
-            segment.range, segment.keyKind, segment.keyUri)
+        val key = segmentKey(track, index)
         while (true) {
             currentCoroutineContext().ensureActive()
+            ensureRangeHealthy(track.media.resourceUrl)
             var producer = false
-            val result = synchronized(segmentLock) {
-                completedSegments[key]?.let { return it }
-                inFlight[key] ?: CompletableDeferred<ByteArray>().also {
-                    inFlight[key] = it
-                    producer = true
+            var cached: ByteArray? = null
+            val flight = synchronized(segmentLock) {
+                cached = completedSegments[key]
+                if (cached != null) null else inFlight[key] ?: run {
+                    val selected = if (key in urgentSegments) AppleSegmentPriority.Playback else priority
+                    AppleSegmentFlight(AppleSegmentAdmission.ticket(selected)).also {
+                        inFlight[key] = it
+                        producer = true
+                    }
                 }
             }
+            cached?.let { ensureRangeHealthy(track.media.resourceUrl); return it }
+            val pending = checkNotNull(flight)
             if (!producer) {
-                try { return result.await() }
-                catch (cancelled: CancellationException) {
+                if (priority == AppleSegmentPriority.Playback) AppleSegmentAdmission.promote(pending.ticket)
+                try {
+                    val bytes = pending.result.await()
+                    ensureRangeHealthy(track.media.resourceUrl)
+                    return bytes
+                } catch (cancelled: CancellationException) {
                     currentCoroutineContext().ensureActive()
                     continue
                 }
             }
             try {
-                val bytes = fetchSegmentUncached(track, index)
+                val bytes = produceSegment(track, index, pending.ticket)
                 synchronized(segmentLock) {
                     if (retainSegments && bytes.size <= APPLE_ALAC_SEGMENT_BUFFER_BYTES) {
                         completedSegments[key] = bytes
@@ -297,22 +456,79 @@ internal class AppleNativeDecrypt(
                         }
                     }
                 }
-                result.complete(bytes)
+                pending.result.complete(bytes)
                 return bytes
             } catch (error: Throwable) {
-                // Remove the cancelled producer before waking live waiters to compete again.
-                synchronized(segmentLock) { if (inFlight[key] === result) inFlight.remove(key) }
-                result.completeExceptionally(error)
+                // Detach this producer before waking surviving consumers; they may register a replacement.
+                synchronized(segmentLock) { if (inFlight[key] === pending) inFlight.remove(key) }
+                pending.result.completeExceptionally(error)
                 throw error
             } finally {
-                synchronized(segmentLock) { if (inFlight[key] === result) inFlight.remove(key) }
+                synchronized(segmentLock) { if (inFlight[key] === pending) inFlight.remove(key) }
             }
         }
     }
 
-    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int): ByteArray {
+    internal fun prioritizeSegment(track: AppleResolvedTrack, index: Int) {
+        val key = segmentKey(track, index)
+        val flight = synchronized(segmentLock) {
+            urgentSegments.add(key)
+            inFlight[key]
+        }
+        // Never nest segmentLock with the admission lock.
+        flight?.let { AppleSegmentAdmission.promote(it.ticket) }
+    }
+
+    internal fun releaseSegmentPriority(track: AppleResolvedTrack, index: Int) {
+        val key = segmentKey(track, index)
+        synchronized(segmentLock) { urgentSegments.remove(key) }
+    }
+
+    private fun segmentKey(track: AppleResolvedTrack, index: Int): AppleSegmentKey {
         val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
-        val bytes = fetchRange(track.media, segment.range, "Apple 分片获取失败")
+        return AppleSegmentKey(track.media.resourceUrl, track.media.adamId, track.variant.groupId,
+            segment.range, segment.keyKind, segment.keyUri)
+    }
+
+    private suspend fun produceSegment(track: AppleResolvedTrack, index: Int, ticket: AppleSegmentTicket): ByteArray {
+        var status = "failed"
+        var size = 0
+        try {
+            AppleSegmentAdmission.acquire(ticket)
+            AppleSegmentAdmission.trace(ticket, track, index, "start", 0, null)
+            val bytes = fetchSegmentUncached(track, index, ticket.job)
+            ensureRangeHealthy(track.media.resourceUrl)
+            size = bytes.size
+            status = "ready"
+            return bytes
+        } catch (cancelled: CancellationException) {
+            status = "cancelled"
+            throw cancelled
+        } finally {
+            AppleSegmentAdmission.release(ticket)
+            AppleSegmentAdmission.trace(ticket, track, index, "end", size, status)
+        }
+    }
+
+    internal fun segmentLookahead(track: AppleResolvedTrack, legacyLookahead: Int): Int = synchronized(rangeLock) {
+        when (rangeIdentities[track.media.resourceUrl]?.mode ?: AppleRangeMode.Unknown) {
+            AppleRangeMode.Verified -> AUDIO_LANES
+            AppleRangeMode.Unknown, AppleRangeMode.Serial -> legacyLookahead
+            AppleRangeMode.Failed -> throw IOException("Apple 分片获取失败：HTTP 502")
+        }
+    }
+
+    internal fun segmentRangeMode(track: AppleResolvedTrack): String = synchronized(rangeLock) {
+        (rangeIdentities[track.media.resourceUrl]?.mode ?: AppleRangeMode.Unknown).name
+    }
+
+    private fun ensureRangeHealthy(resource: HttpUrl) = synchronized(rangeLock) {
+        if (rangeIdentities[resource]?.mode == AppleRangeMode.Failed) throw IOException("Apple 分片获取失败：HTTP 502")
+    }
+
+    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int, job: Long): ByteArray {
+        val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
+        val bytes = fetchRange(track.media, segment.range, "Apple 分片获取失败", segment = true, job = job, index = index)
         if (segment.keyKind == KeyKind.WIDEVINE) return bytes
         val handle = when (segment.keyKind) {
             KeyKind.PREFETCH -> prefetchHandle()
@@ -537,26 +753,43 @@ internal class AppleNativeDecrypt(
         }
     }
 
-    private suspend fun fetchRange(playlist: AppleMediaPlaylist, range: AppleByteRange, errorPrefix: String): ByteArray {
+    private suspend fun fetchRange(
+        playlist: AppleMediaPlaylist,
+        range: AppleByteRange,
+        errorPrefix: String,
+        segment: Boolean = false,
+        job: Long = 0L,
+        index: Int = -1,
+    ): ByteArray {
         val length = range.length
         if (length <= 0 || length > Int.MAX_VALUE || range.start < 0) throw IOException("$errorPrefix：HTTP 416")
         var last: IOException? = null
         repeat(4) { attempt ->
             try {
-                val req = Request.Builder().url(playlist.resourceUrl)
-                    .header("Range", "bytes=${range.start}-${range.end}").get().build()
-                val first = requestBytes(req)
-                val (code, body) = if (first.first == 403) requestBytes(req.newBuilder().header("User-Agent", APPLE_USER_AGENT).build()) else first
-                if (code !in setOf(200, 206)) throw IOException("$errorPrefix：HTTP $code")
+                val builder = Request.Builder().url(playlist.resourceUrl)
+                    .header("Range", "bytes=${range.start}-${range.end}").get()
+                if (segment) {
+                    val identity = synchronized(rangeLock) { rangeIdentities[playlist.resourceUrl] }
+                    if (identity?.mode == AppleRangeMode.Failed) throw IOException("$errorPrefix：HTTP 502")
+                    if (identity?.mode == AppleRangeMode.Verified) builder.header("If-Range", checkNotNull(identity.etag))
+                    if (BuildConfig.DEBUG) builder.tag(AppleSegmentHttpTrace::class.java, AppleSegmentHttpTrace(job, index))
+                }
+                val req = builder.build()
+                val first = requestBytes(req, range, segment)
+                val reply = if (first.code == 403) {
+                    requestBytes(req.newBuilder().header("User-Agent", APPLE_USER_AGENT).build(), range, segment)
+                } else first
+                if (reply.code != 200 && reply.code != 206) throw IOException("$errorPrefix：HTTP ${reply.code}")
                 val result = when {
-                    code == 200 && body.size.toLong() > length -> {
+                    reply.code == 200 && reply.body.size.toLong() > length -> {
                         val end = range.end + 1
-                        if (end > body.size) throw IOException("$errorPrefix：HTTP 502")
-                        body.copyOfRange(range.start.toInt(), end.toInt())
+                        if (end > reply.body.size) throw IOException("$errorPrefix：HTTP 502")
+                        reply.body.copyOfRange(range.start.toInt(), end.toInt())
                     }
-                    else -> body
+                    else -> reply.body
                 }
                 if (result.size.toLong() != length) throw IOException("$errorPrefix：HTTP 502")
+                if (segment) acceptRangeIdentity(playlist.resourceUrl, rangeIdentity(range, reply.code, reply.contentRange, reply.etag))
                 return result
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -568,25 +801,83 @@ internal class AppleNativeDecrypt(
         throw last ?: IOException("$errorPrefix：HTTP 502")
     }
 
-    private suspend fun requestBytes(request: Request): Pair<Int, ByteArray> = withContext(Dispatchers.IO) {
-        val client = client
+    private suspend fun requestBytes(request: Request, range: AppleByteRange, segment: Boolean): AppleRangeReply = withContext(Dispatchers.IO) {
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
             val call = client.newCall(request)
             cont.invokeOnCancellation { call.cancel() }
             call.enqueue(object : okhttp3.Callback {
-                override fun onFailure(call: okhttp3.Call, error: IOException) { if (cont.isActive) cont.resumeWith(Result.failure(error)) }
-                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                override fun onFailure(call: Call, error: IOException) { if (cont.isActive) cont.resumeWith(Result.failure(error)) }
+                override fun onResponse(call: Call, response: Response) {
                     response.use { value ->
                         if (!cont.isActive) return@use
-                        val url = value.request.url
-                        if (url.scheme != "https" || url.username.isNotEmpty() || url.password.isNotEmpty()) {
-                            cont.resumeWith(Result.failure(IOException("Apple 媒体地址无效")))
-                        } else try {
-                            cont.resumeWith(Result.success(value.code to (value.body?.bytes() ?: ByteArray(0))))
-                        } catch (error: Exception) { cont.resumeWith(Result.failure(error)) }
+                        try {
+                            val url = value.request.url
+                            if (url.scheme != "https" || url.username.isNotEmpty() || url.password.isNotEmpty()) {
+                                throw IOException("Apple 媒体地址无效")
+                            }
+                            val contentRange = value.header("Content-Range")
+                            val etag = value.header("ETag")
+                            val bytes = if (value.code == 200 || value.code == 206) {
+                                // Reject a changed verified entity before aggregating any response body.
+                                if (segment) validateRangeIdentity(request.url, rangeIdentity(range, value.code, contentRange, etag))
+                                val body = value.body ?: throw IOException("Apple 分片获取失败：HTTP 502")
+                                if (value.code == 206) {
+                                    val expected = range.length.toInt()
+                                    if (body.contentLength() >= 0 && body.contentLength() != range.length) {
+                                        throw IOException("Apple 分片获取失败：HTTP 502")
+                                    }
+                                    val bytes = ByteArray(expected)
+                                    val input = body.byteStream()
+                                    var offset = 0
+                                    while (offset < expected) {
+                                        if (!cont.isActive) return@use
+                                        val count = input.read(bytes, offset, expected - offset)
+                                        if (count <= 0) throw IOException("Apple 分片获取失败：HTTP 502")
+                                        offset += count
+                                    }
+                                    if (input.read() != -1) throw IOException("Apple 分片获取失败：HTTP 502")
+                                    bytes
+                                } else body.bytes() // Preserve the existing whole-object 200 compatibility path.
+                            } else ByteArray(0) // In particular, do not buffer 403/error bodies before retrying.
+                            if (cont.isActive) cont.resumeWith(Result.success(AppleRangeReply(value.code, bytes, contentRange, etag)))
+                        } catch (error: Exception) {
+                            if (cont.isActive) cont.resumeWith(Result.failure(error))
+                        }
                     }
                 }
             })
+        }
+    }
+
+    private fun rangeIdentity(range: AppleByteRange, code: Int, contentRange: String?, etag: String?): AppleRangeIdentity? {
+        if (code != 206 || etag == null || !appleStrongTag.matches(etag)) return null
+        val fields = appleContentRange.matchEntire(contentRange.orEmpty())?.groupValues ?: return null
+        val start = fields[1].toLongOrNull() ?: return null
+        val end = fields[2].toLongOrNull() ?: return null
+        val total = fields[3].toLongOrNull() ?: return null
+        if (start != range.start || end != range.end || total <= end) return null
+        return AppleRangeIdentity(AppleRangeMode.Verified, total, etag)
+    }
+
+    private fun validateRangeIdentity(resource: HttpUrl, reply: AppleRangeIdentity?) = synchronized(rangeLock) {
+        val current = rangeIdentities[resource] ?: return@synchronized
+        if (current.mode == AppleRangeMode.Failed) throw IOException("Apple 分片获取失败：HTTP 502")
+        if (current.mode == AppleRangeMode.Verified && current != reply) {
+            rangeIdentities[resource] = AppleRangeIdentity(AppleRangeMode.Failed)
+            throw IOException("Apple 分片获取失败：HTTP 502")
+        }
+    }
+
+    private fun acceptRangeIdentity(resource: HttpUrl, reply: AppleRangeIdentity?) = synchronized(rangeLock) {
+        val current = rangeIdentities[resource]
+        when (current?.mode ?: AppleRangeMode.Unknown) {
+            AppleRangeMode.Unknown -> rangeIdentities[resource] = reply ?: AppleRangeIdentity(AppleRangeMode.Serial)
+            AppleRangeMode.Serial -> Unit
+            AppleRangeMode.Failed -> throw IOException("Apple 分片获取失败：HTTP 502")
+            AppleRangeMode.Verified -> if (current != reply) {
+                rangeIdentities[resource] = AppleRangeIdentity(AppleRangeMode.Failed)
+                throw IOException("Apple 分片获取失败：HTTP 502")
+            }
         }
     }
 
