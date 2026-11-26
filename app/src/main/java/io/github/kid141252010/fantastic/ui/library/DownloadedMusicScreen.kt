@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -23,6 +24,17 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.key
+import io.github.kid141252010.fantastic.data.CatalogHit
+import io.github.kid141252010.fantastic.data.SearchCatalog
+import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.ui.GlassSheet
+import io.github.kid141252010.fantastic.ui.MediaActionContent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -37,17 +49,24 @@ import io.github.kid141252010.fantastic.ui.Md3MediaRow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBack: () -> Unit) {
+internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBack: () -> Unit,
+    onOpenCatalog: (CatalogHit) -> Unit) {
     val records by app.downloads.entries.collectAsStateWithLifecycle()
     val ready = remember(records) { records.filter { it.status == DownloadStatus.Ready } }
     val bottom = LocalBarsPadding.current.calculateBottomPadding()
-    BackHandler(enabled = backEnabled, onBack = onBack)
+    var menuFileId by remember { mutableStateOf<String?>(null) }
+    val menuRecord = records.firstOrNull { it.fileId == menuFileId && it.status == DownloadStatus.Ready }
+    val latestBackEnabled by rememberUpdatedState(backEnabled)
+    val latestOnOpenCatalog by rememberUpdatedState(onOpenCatalog)
+    LaunchedEffect(menuFileId, menuRecord) { if (menuRecord == null) menuFileId = null }
+    fun handleBack() { if (menuFileId != null) menuFileId = null else onBack() }
+    BackHandler(enabled = backEnabled, onBack = ::handleBack)
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = { Text("已下载") },
-                navigationIcon = { Md3BackButton(onBack) },
+                navigationIcon = { Md3BackButton(::handleBack) },
                 windowInsets = WindowInsets(0, 0, 0, 0),
             )
         },
@@ -78,8 +97,8 @@ internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBa
                     trailing = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             when (record.status) {
-                                DownloadStatus.Ready -> IconButton(onClick = { app.downloads.remove(record.key) }) {
-                                    Icon(Icons.Rounded.Delete, "移除下载")
+                                DownloadStatus.Ready -> IconButton(onClick = { menuFileId = record.fileId }) {
+                                    Icon(Icons.Rounded.MoreHoriz, "更多操作")
                                 }
                                 DownloadStatus.Queued, DownloadStatus.Downloading -> IconButton(onClick = { app.downloads.cancel(record.key) }) {
                                     Icon(Icons.Rounded.Close, "取消下载")
@@ -95,4 +114,23 @@ internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBa
             }
         }
     }
+    menuRecord?.let { record -> key(record.fileId) {
+        val song = record.track
+        val hit = SearchCatalog.trackHit(song).let { original ->
+            if (song.source == Source.Apple && song.country.normalizedAppleCountry() == null)
+                original.copy(country = record.storefront.normalizedAppleCountry()) else original
+        }
+        fun openFromRecord(target: CatalogHit) {
+            val current = app.downloads.entries.value.firstOrNull { it.fileId == record.fileId && it.status == DownloadStatus.Ready }
+            if (menuFileId == record.fileId && current?.track == song && latestBackEnabled) {
+                menuFileId = null
+                latestOnOpenCatalog(target)
+            }
+        }
+        GlassSheet(hit.title, onDismissRequest = { menuFileId = null }, showHeader = false) {
+            MediaActionContent(hit, app.library, listOf(song),
+                onView = { openFromRecord(hit) }, onOpenRelated = ::openFromRecord,
+                onDismiss = { menuFileId = null })
+        }
+    } }
 }

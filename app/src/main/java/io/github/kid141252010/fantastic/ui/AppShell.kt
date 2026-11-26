@@ -117,9 +117,11 @@ fun AppShell(app: FantasticApp) {
     val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
     var catalog by remember { mutableStateOf<CatalogHit?>(null) }
     var catalogStorefront by remember { mutableStateOf<String?>(null) }
+    var catalogOpenRequest by remember { mutableStateOf(0) }
     fun openCatalog(hit: CatalogHit) {
         catalogStorefront = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() ?: app.prefs.storefront else null
         catalog = hit
+        catalogOpenRequest++
     }
     fun closeCatalog() {
         catalog = null
@@ -186,6 +188,7 @@ fun AppShell(app: FantasticApp) {
                 }
                 visibleCatalog?.takeIf { appleMedia == null }?.let { hit ->
                     CatalogDetails(app, hit.source, hit.kind, hit.id, hit.country ?: catalogStorefront,
+                        openRequest = catalogOpenRequest,
                         modifier = Modifier.fillMaxSize().haze(haze),
                         interactive = !playerBackOwnership.value && !playerExpanded && !settings && !glassSheetState.value,
                         onClose = ::closeCatalog)
@@ -197,8 +200,6 @@ fun AppShell(app: FantasticApp) {
                     lyrics = app.lyrics,
                     library = app.library,
                     apple = app.apple,
-                    qq = app.qq,
-                    netease = app.netease,
                     pane = playerPane,
                     onPaneChange = { playerPane = it },
                     translation = lyricTranslation,
@@ -206,6 +207,10 @@ fun AppShell(app: FantasticApp) {
                     onTranslationChange = { lyricTranslation = it; app.prefs.lyricTranslation = it },
                     onPronunciationChange = { lyricPronunciation = it; app.prefs.lyricPronunciation = it },
                     onOpenCatalog = ::openCatalog,
+                    relationNavigationAllowed = {
+                        !settings && !(catalog?.let { it.source == Source.Apple &&
+                            (it.kind == "music-video" || it.kind == "station" || it.kind == "post") } ?: false)
+                    },
                     onOpenSettings = { settings = true },
                     initiallyExpanded = nowPlaying,
                     onExpandedChange = { isExpanded ->

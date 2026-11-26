@@ -46,6 +46,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -133,6 +134,7 @@ internal fun CatalogDetails(
     kind: String,
     id: String,
     country: String?,
+    openRequest: Int,
     modifier: Modifier = Modifier,
     interactive: Boolean = true,
     onClose: () -> Unit,
@@ -141,13 +143,19 @@ internal fun CatalogDetails(
         DetailTarget(source, normalizedKind(kind), id,
             if (source == Source.Apple) country.normalizedAppleCountry() ?: app.prefs.storefront.normalizedAppleCountry() else null)
     }
-    var history by remember(root) { mutableStateOf(listOf(root)) }
+    var history by remember { mutableStateOf(listOf(root)) }
+    var handledOpenRequest by remember { mutableStateOf(openRequest) }
+    if (handledOpenRequest != openRequest) {
+        handledOpenRequest = openRequest
+        if (root != history.last()) history = history + root
+    }
     val current = history.last()
     val player by app.player.state.collectAsStateWithLifecycle()
     var qualityTrack by remember(current, history.size) { mutableStateOf<Track?>(null) }
     var qualityExpanded by remember(current, history.size) { mutableStateOf(false) }
     var playbackError by remember(current, history.size) { mutableStateOf<String?>(null) }
-    var moreRequest by remember(current, history.size) { mutableStateOf(0) }
+    val moreActionState = remember(current, history.size) { mutableStateOf<(() -> Unit)?>(null) }
+    val registerMore = remember(moreActionState) { { action: (() -> Unit)? -> moreActionState.value = action } }
     val play: (List<Track>, Int, String?) -> Unit = { tracks, index, quality ->
         if (index in tracks.indices) {
             try {
@@ -185,7 +193,8 @@ internal fun CatalogDetails(
                     title = { Text(kindLabel(current.kind), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     navigationIcon = { Md3BackButton(back) },
                     actions = {
-                        IconButton(onClick = { moreRequest++ }) {
+                        IconButton(enabled = interactive && moreActionState.value != null,
+                            onClick = { if (interactive) moreActionState.value?.invoke() }) {
                             Icon(Icons.Rounded.MoreHoriz, "${kindLabel(current.kind)}更多操作")
                         }
                     },
@@ -193,7 +202,7 @@ internal fun CatalogDetails(
                     scrollBehavior = scrollBehavior,
                 )
                 key(current, history.size) {
-                    DetailBody(app, current, play, playOrdered, playbackError, moreRequest,
+                    DetailBody(app, current, play, playOrdered, playbackError, registerMore,
                         onQualityOpen = { track -> qualityTrack = track; qualityExpanded = true },
                         navigate = { target -> if (target != current) history = history + target })
                 }
@@ -247,11 +256,13 @@ private fun DetailBody(
     play: (List<Track>, Int, String?) -> Unit,
     playOrdered: (List<Track>, Int, String?, Boolean) -> Unit,
     playbackError: String?,
-    moreRequest: Int,
+    onMoreActionChange: ((() -> Unit)?) -> Unit,
     onQualityOpen: (Track) -> Unit,
     navigate: (DetailTarget) -> Unit,
 ) {
     val repository = remember(app, target) { DetailRepository(app, target) }
+    var frameActive by remember { mutableStateOf(true) }
+    DisposableEffect(Unit) { onDispose { frameActive = false } }
     var page by remember { mutableStateOf<DetailPage?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var retry by remember { mutableStateOf(0) }
@@ -275,6 +286,14 @@ private fun DetailBody(
         }
     }
     val loaded = page
+    DisposableEffect(target, loaded, onMoreActionChange) {
+        onMoreActionChange(loaded?.let { model -> {
+            moreSection = null
+            moreIndex = -1
+            moreEntry = DetailEntry(target, model.title, model.subtitle, model.artwork, model.song)
+        } })
+        onDispose { onMoreActionChange(null) }
+    }
     if (loaded == null) {
         val message = error
         if (message == null) Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
@@ -346,9 +365,6 @@ private fun DetailBody(
     }
     val artistPage = target.kind == "artist"
     val firstPlayable = playableSection?.entries?.indexOfFirst { it.track != null } ?: -1
-    LaunchedEffect(moreRequest) {
-        if (moreRequest > 0) moreEntry = DetailEntry(target, loaded.title, loaded.subtitle, loaded.artwork, loaded.song)
-    }
     Box(Modifier.fillMaxSize()) {
     LazyColumn(Modifier.fillMaxSize().then(if (moreEntry != null) Modifier.clearAndSetSemantics {} else Modifier),
         contentPadding = PaddingValues(bottom = LocalBarsPadding.current.calculateBottomPadding() + 24.dp)) {
@@ -535,6 +551,12 @@ private fun DetailBody(
                         app.library.add(album, repository.completeTracks(section))
                     }
                 },
+                onOpenRelated = if (entry.target.kind == "song") ({ related ->
+                    if (frameActive && moreEntry == entry) {
+                        closeMore()
+                        navigate(DetailTarget(related.source, related.kind, related.id, related.country))
+                    }
+                }) else null,
                 onDismiss = closeMore)
         }
     }
@@ -834,12 +856,15 @@ private class DetailRepository(private val app: FantasticApp, private val target
 
     private fun appleEntry(resource: AppleCatalogResource, album: AppleCatalogResource? = null, country: String? = resourceCountry): DetailEntry? {
         if (!isSupportedKind(resource.type)) return null
-        val entryCountry = resource.catalogCountry(country)
+        val entryCountry = if (resource.type == "artists" || resource.type == "albums")
+            resource.catalogCountry(null) ?: country.normalizedAppleCountry() else resource.catalogCountry(country)
         val track = resource.toTrack(entryCountry).takeIf { normalizedKind(resource.type) == "song" }?.let { song -> if (album == null) song else song.copy(
             album = song.album.ifBlank { album.name },
             artist = song.artist.ifBlank { album.artist },
             artworkTemplate = song.artworkTemplate ?: album.artwork?.detailString("url")?.replace("{c}", "bb"),
             albumId = album.id,
+            albumCountry = if (song.albumId == album.id && song.albumId != "0") song.albumCountry ?: album.catalogCountry(null)
+                else album.catalogCountry(null),
             albumArtist = song.albumArtist.ifBlank { album.artist },
         ) }
         return DetailEntry(DetailTarget(Source.Apple, normalizedKind(resource.type), resource.id, entryCountry),
@@ -852,6 +877,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
             val info = if (qqSong == null) app.netease.song(target.id)
                 else NeteaseSongInfo(json.decodeFromJsonElement<NeteaseSong>(qqSong), qqSong["meta"])
             val song = info.song
+            if (song.id != target.id) throw DetailUnavailable("服务器返回了其他歌曲。")
             val metadata = info.meta as? JsonObject
             val track = if (qqSong == null) song.toTrack() else json.decodeFromJsonElement<QqSong>(qqSong).toTrack()
             DetailPage(song.name, song.artists.joinToString(" / ") { it.name }, artwork(song.cover),
@@ -900,6 +926,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
         "artist" -> {
             val result = artist()
             val artist = result.artist
+            if (artist.mid != target.id) throw DetailUnavailable("服务器返回了其他艺人。")
             DetailPage(artist.name, artist.transNames.joinToString(" / "), artwork(artist.avatar.ifBlank { artist.cover }),
                 listOf(artist.briefDesc, artist.description).filter { it.isNotBlank() }.distinct()
                     .joinToString("\n\n").let { detailPlainText(JsonPrimitive(it)) },

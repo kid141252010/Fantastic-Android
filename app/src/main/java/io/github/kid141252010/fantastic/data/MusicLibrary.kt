@@ -201,20 +201,25 @@ class MusicLibrary(context: Context) {
         val old = existing.track ?: return result
         val track = incoming.track ?: return result.copy(track = old.copy(country = country))
         val albumChanged = track.albumId.isNotBlank() && track.albumId != "0" && old.albumId.isNotBlank() && old.albumId != "0" && track.albumId != old.albumId
+        val artistId = track.artistId.takeUnless { it.isBlank() || it == "0" } ?: old.artistId
+        val albumId = track.albumId.takeUnless { it.isBlank() || it == "0" } ?: old.albumId
         val merged = track.copy(
             title = track.title.ifBlank { old.title },
             artist = track.artist.ifBlank { old.artist },
             album = track.album.ifBlank { if (albumChanged) "" else old.album },
             artworkTemplate = track.artworkTemplate?.takeIf { it.isNotBlank() } ?: old.artworkTemplate.takeUnless { albumChanged },
             durationMs = track.durationMs.takeIf { it > 0 } ?: old.durationMs,
-            artistId = track.artistId.takeUnless { it.isBlank() || it == "0" } ?: old.artistId,
-            albumId = track.albumId.takeUnless { it.isBlank() || it == "0" } ?: old.albumId,
-            artistArtworkTemplate = track.artistArtworkTemplate?.takeIf { it.isNotBlank() } ?: old.artistArtworkTemplate,
+            artistId = artistId,
+            albumId = albumId,
+            artistCountry = if (artistId == track.artistId) track.artistCountry else old.artistCountry,
+            albumCountry = if (albumId == track.albumId) track.albumCountry else old.albumCountry,
+            artistArtworkTemplate = track.artistArtworkTemplate?.takeIf { it.isNotBlank() }
+                ?: old.artistArtworkTemplate.takeIf { artistId == old.artistId },
             albumArtist = track.albumArtist.ifBlank { if (albumChanged) "" else old.albumArtist },
             discNumber = track.discNumber.takeIf { it > 0 } ?: if (albumChanged) 0 else old.discNumber,
             trackNumber = track.trackNumber.takeIf { it > 0 } ?: if (albumChanged) 0 else old.trackNumber,
             country = country,
-        )
+        ).fillRelationCountriesFrom(old).fillRelationCountriesFrom(track)
         return result.copy(
             subtitle = incoming.subtitle.ifBlank { existing.subtitle },
             artwork = incoming.artwork ?: existing.artwork.takeUnless { albumChanged },
@@ -233,7 +238,7 @@ class MusicLibrary(context: Context) {
                 discNumber = track.discNumber.takeIf { it > 0 } ?: old.discNumber,
                 trackNumber = track.trackNumber.takeIf { it > 0 } ?: old.trackNumber,
                 country = track.country ?: old.country,
-            )
+            ).fillRelationCountriesFrom(old)
         }
     }
 
@@ -242,7 +247,7 @@ class MusicLibrary(context: Context) {
         tracks.forEach { track ->
             val key = Triple(track.source, track.albumId, track.id)
             val old = first[key]
-            first[key] = if (old == null) track else old.copy(country = old.country ?: track.country)
+            first[key] = if (old == null) track else old.copy(country = old.country ?: track.country).fillRelationCountriesFrom(track)
         }
         return first.values.toList()
     }
@@ -751,9 +756,13 @@ class MusicLibrary(context: Context) {
     }
 
     private fun fillHitCountry(hit: CatalogHit, reference: CatalogHit): CatalogHit {
-        if (hit.source != Source.Apple || hit.country != null || hit.source != reference.source || hit.kind != reference.kind || hit.id != reference.id) return hit
-        val country = reference.country ?: return hit
-        return hit.copy(country = country, track = hit.track?.copy(country = country))
+        if (hit.source != Source.Apple || hit.source != reference.source || hit.kind != reference.kind || hit.id != reference.id) return hit
+        val country = hit.country ?: reference.country
+        val track = hit.track?.let { song ->
+            val merged = reference.track?.let(song::fillRelationCountriesFrom) ?: song
+            if (hit.country == null && reference.country != null) merged.copy(country = reference.country) else merged
+        }
+        return if (country == hit.country && track == hit.track) hit else hit.copy(country = country, track = track)
     }
 
     private fun fillPlaylistCountries(winner: LibraryPlaylist, other: LibraryPlaylist?): LibraryPlaylist {
@@ -835,18 +844,22 @@ class MusicLibrary(context: Context) {
         val source = raw.string("source")?.let { value -> Source.entries.firstOrNull { it.mediaPrefix == value || it.name == value } ?: return null } ?: expectedSource
         val id = raw.string("id")?.clean(128)?.let { it.takeIf { it.matches(ID_REGEX) } ?: return null } ?: expectedId
         if (source != expectedSource || id != expectedId) return null
+        val artistId = raw.string("artistId").clean(128).takeIf { validCatalogId(source, "artist", it) }.orEmpty()
+        val albumId = raw.string("albumId").clean(128).takeIf { validCatalogId(source, "album", it) }.orEmpty()
         return Track(
             id = id, source = source, title = raw.string("title").clean(300).ifBlank { title },
             artist = raw.string("artist").clean(300).ifBlank { subtitle }, album = raw.string("album").clean(300),
             artworkTemplate = cleanArtwork(raw.string("artworkTemplate")) ?: artwork,
             durationMs = raw.long("durationMs")?.takeIf { it in 0..MAX_DURATION_MS } ?: 0,
-            artistId = raw.string("artistId").clean(128).takeIf { validCatalogId(source, "artist", it) }.orEmpty(),
-            albumId = raw.string("albumId").clean(128).takeIf { validCatalogId(source, "album", it) }.orEmpty(),
+            artistId = artistId,
+            albumId = albumId,
             artistArtworkTemplate = cleanArtwork(raw.string("artistArtworkTemplate")),
             albumArtist = raw.string("albumArtist").clean(300),
             discNumber = raw.int("discNumber")?.coerceAtLeast(0) ?: 0,
             trackNumber = raw.int("trackNumber")?.coerceAtLeast(0) ?: 0,
             country = if (source == Source.Apple) raw.string("country").normalizedAppleCountry() else null,
+            artistCountry = if (source == Source.Apple && artistId != "0" && validCatalogId(source, "artist", artistId)) raw.string("artistCountry").normalizedAppleCountry() else null,
+            albumCountry = if (source == Source.Apple && albumId != "0" && validCatalogId(source, "album", albumId)) raw.string("albumCountry").normalizedAppleCountry() else null,
         )
     }
 
@@ -856,15 +869,19 @@ class MusicLibrary(context: Context) {
         val subtitle = hit.subtitle.clean(300)
         val country = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() ?: hit.track?.takeIf { it.source == hit.source && it.id == hit.id }?.country.normalizedAppleCountry() else null
         val track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }?.let {
+            val artistId = it.artistId.clean(128).takeIf { id -> validCatalogId(it.source, "artist", id) }.orEmpty()
+            val albumId = it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty()
             Track(
                 id = it.id, source = it.source, title = it.title.clean(300).ifBlank { title }, artist = it.artist.clean(300),
                 album = it.album.clean(300), artworkTemplate = cleanArtwork(it.artworkTemplate),
                 durationMs = it.durationMs.coerceIn(0, MAX_DURATION_MS),
-                artistId = it.artistId.clean(128).takeIf { id -> validCatalogId(it.source, "artist", id) }.orEmpty(),
-                albumId = it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty(),
+                artistId = artistId,
+                albumId = albumId,
                 artistArtworkTemplate = cleanArtwork(it.artistArtworkTemplate), albumArtist = it.albumArtist.clean(300),
                 discNumber = it.discNumber.coerceAtLeast(0), trackNumber = it.trackNumber.coerceAtLeast(0),
                 country = country,
+                artistCountry = if (it.source == Source.Apple && artistId != "0" && validCatalogId(it.source, "artist", artistId)) it.artistCountry.normalizedAppleCountry() else null,
+                albumCountry = if (it.source == Source.Apple && albumId != "0" && validCatalogId(it.source, "album", albumId)) it.albumCountry.normalizedAppleCountry() else null,
             )
         }
         val attrs = hit.attributes?.takeIf { it.toString().length <= MAX_ATTRIBUTES_CHARS }
@@ -960,6 +977,10 @@ class MusicLibrary(context: Context) {
                 put("artistArtworkTemplate", track.artistArtworkTemplate ?: ""); put("albumArtist", track.albumArtist)
                 put("discNumber", track.discNumber); put("trackNumber", track.trackNumber)
                 if (country != null) put("country", country)
+                if (track.source == Source.Apple && track.artistId != "0" && validCatalogId(track.source, "artist", track.artistId))
+                    track.artistCountry.normalizedAppleCountry()?.let { put("artistCountry", it) }
+                if (track.source == Source.Apple && track.albumId != "0" && validCatalogId(track.source, "album", track.albumId))
+                    track.albumCountry.normalizedAppleCountry()?.let { put("albumCountry", it) }
             })
         }
         hit.attributes?.let { put("attributes", it) }

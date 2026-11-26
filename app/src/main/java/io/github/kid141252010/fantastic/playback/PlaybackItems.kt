@@ -9,6 +9,7 @@ import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.data.validCatalogId
 
 internal const val KEY_ID = "fantastic.id"
 internal const val KEY_SOURCE = "fantastic.source"
@@ -25,6 +26,8 @@ internal const val KEY_PLAYBACK_MESSAGE = "fantastic.playbackMessage"
 internal const val KEY_SHUFFLE_START = "fantastic.shuffleStart"
 internal const val KEY_OCCURRENCE = "fantastic.occurrence"
 internal const val KEY_COUNTRY = "fantastic.country"
+internal const val KEY_ARTIST_COUNTRY = "fantastic.artistCountry"
+internal const val KEY_ALBUM_COUNTRY = "fantastic.albumCountry"
 
 internal val Track.mediaId get() = "${source.mediaPrefix}:$id"
 
@@ -44,6 +47,10 @@ internal fun Track.toQueueItem(quality: String? = null, shuffleStart: Boolean? =
             putInt(KEY_DISC_NUMBER, discNumber)
             putInt(KEY_TRACK_NUMBER, trackNumber)
             if (source == Source.Apple) country.normalizedAppleCountry()?.let { putString(KEY_COUNTRY, it) }
+            if (source == Source.Apple && artistId != "0" && validCatalogId(source, "artist", artistId))
+                artistCountry.normalizedAppleCountry()?.let { putString(KEY_ARTIST_COUNTRY, it) }
+            if (source == Source.Apple && albumId != "0" && validCatalogId(source, "album", albumId))
+                albumCountry.normalizedAppleCountry()?.let { putString(KEY_ALBUM_COUNTRY, it) }
             if (quality != null) putString(KEY_QUALITY, quality)
             if (shuffleStart != null) putBoolean(KEY_SHUFFLE_START, shuffleStart)
             if (occurrence != null) putInt(KEY_OCCURRENCE, occurrence)
@@ -56,6 +63,8 @@ internal fun MediaItem.toTrack(): Track? {
     if (!source.validSongId(id)) return null
     val artwork = extras?.getString(KEY_ARTWORK_TEMPLATE)?.takeIf { it.isNotBlank() }
         ?: mediaMetadata.artworkUri?.toString()
+    val artistId = extras?.getString(KEY_ARTIST_ID).orEmpty()
+    val albumId = extras?.getString(KEY_ALBUM_ID).orEmpty()
     return Track(
         id = id,
         source = source,
@@ -64,13 +73,17 @@ internal fun MediaItem.toTrack(): Track? {
         album = mediaMetadata.albumTitle?.toString().orEmpty(),
         artworkTemplate = artwork,
         durationMs = extras?.getLong(KEY_DURATION_MS, 0)?.coerceAtLeast(0) ?: 0,
-        artistId = extras?.getString(KEY_ARTIST_ID).orEmpty(),
-        albumId = extras?.getString(KEY_ALBUM_ID).orEmpty(),
+        artistId = artistId,
+        albumId = albumId,
         artistArtworkTemplate = extras?.getString(KEY_ARTIST_ARTWORK_TEMPLATE)?.takeIf { it.isNotBlank() },
         albumArtist = extras?.getString(KEY_ALBUM_ARTIST).orEmpty(),
         discNumber = extras?.getInt(KEY_DISC_NUMBER, 0) ?: 0,
         trackNumber = extras?.getInt(KEY_TRACK_NUMBER, 0) ?: 0,
         country = if (source == Source.Apple) extras?.getString(KEY_COUNTRY).normalizedAppleCountry() else null,
+        artistCountry = if (source == Source.Apple && artistId != "0" && validCatalogId(source, "artist", artistId))
+            extras?.getString(KEY_ARTIST_COUNTRY).normalizedAppleCountry() else null,
+        albumCountry = if (source == Source.Apple && albumId != "0" && validCatalogId(source, "album", albumId))
+            extras?.getString(KEY_ALBUM_COUNTRY).normalizedAppleCountry() else null,
     )
 }
 

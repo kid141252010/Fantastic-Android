@@ -80,6 +80,8 @@ internal suspend fun FantasticApp.libraryAlbumMetadata(source: Source, albumId: 
             }
             val tracks = resources.mapNotNull { it.toTrack(albumCountry) }.filter { it.albumId.isBlank() || it.albumId == albumId }.map { song ->
                 song.copy(albumId = albumId, album = song.album.ifBlank { album.name },
+                    albumCountry = if (song.albumId == albumId && song.albumId != "0") song.albumCountry ?: album.catalogCountry(null)
+                        else album.catalogCountry(null),
                     artist = song.artist.ifBlank { album.artist }, albumArtist = song.albumArtist.ifBlank { album.artist },
                     artworkTemplate = song.artworkTemplate ?: (album.artwork?.get("url") as? JsonPrimitive)?.contentOrNull?.replace("{c}", "bb"))
             }
@@ -207,7 +209,7 @@ internal suspend fun FantasticApp.librarySongHit(hit: CatalogHit, albumMetadata:
             discNumber = track.discNumber.takeIf { it > 0 } ?: reference.discNumber,
             trackNumber = track.trackNumber.takeIf { it > 0 } ?: reference.trackNumber,
             country = track.country ?: reference.country,
-        )
+        ).fillRelationCountriesFrom(reference)
     }
 
     applyAlbum(albumMetadata)
@@ -231,11 +233,12 @@ internal suspend fun FantasticApp.librarySongHit(hit: CatalogHit, albumMetadata:
     track = track.copy(
         album = track.album.ifBlank { sameAlbum?.album.orEmpty() },
         albumId = albumId,
+        albumCountry = if (track.albumId == albumId) track.albumCountry else details?.albumCountry,
         albumArtist = track.albumArtist.ifBlank { sameAlbum?.albumArtist.orEmpty() },
         discNumber = track.discNumber.takeIf { it > 0 } ?: sameAlbum?.discNumber ?: 0,
         trackNumber = track.trackNumber.takeIf { it > 0 } ?: sameAlbum?.trackNumber ?: 0,
         country = details?.country ?: track.country,
-    )
+    ).let { merged -> details?.let(merged::fillRelationCountriesFrom) ?: merged }
     val metadata = albumMetadata?.takeIf { it.source == track.source && it.albumId == albumId }
         ?: if (albumId.isNotBlank() && (track.albumArtist.isBlank() || (track.source == Source.Netease && track.trackNumber <= 0))) {
             lookupLibraryMetadata(track) { libraryAlbumMetadata(track.source, albumId, track.country) }

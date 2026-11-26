@@ -468,8 +468,6 @@ internal fun PlayerSheetHost(
     lyrics: LyricsController,
     library: MusicLibrary,
     apple: AppleCatalogApi,
-    qq: io.github.kid141252010.fantastic.data.QqApi,
-    netease: io.github.kid141252010.fantastic.data.NeteaseApi,
     pane: PlayerPane,
     onPaneChange: (PlayerPane) -> Unit,
     translation: Boolean,
@@ -477,6 +475,7 @@ internal fun PlayerSheetHost(
     onTranslationChange: (Boolean) -> Unit,
     onPronunciationChange: (Boolean) -> Unit,
     onOpenCatalog: (CatalogHit) -> Unit,
+    relationNavigationAllowed: () -> Boolean,
     onOpenSettings: () -> Unit,
     initiallyExpanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
@@ -656,6 +655,12 @@ internal fun PlayerSheetHost(
         }
     }
     val currentOpenCatalog by rememberUpdatedState(onOpenCatalog)
+    val shellRelationNavigationAllowed by rememberUpdatedState(relationNavigationAllowed)
+    val canCommitRelationNavigation by rememberUpdatedState<() -> Boolean> {
+        shellRelationNavigationAllowed() && trackPresent &&
+            currentDetent == PlayerSheetDetent.Expanded && targetDetent == PlayerSheetDetent.Expanded &&
+            activeDrag == null && settleJob?.isActive != true
+    }
     val collapse by rememberUpdatedState { animateToDetent(PlayerSheetDetent.Collapsed) }
     val openCatalogFromPlayer: (CatalogHit) -> Unit = remember {
         { target ->
@@ -1051,9 +1056,6 @@ internal fun PlayerSheetHost(
                     player = player,
                     lyrics = lyrics,
                     library = library,
-                    apple = apple,
-                    qq = qq,
-                    netease = netease,
                     fullVisible = fullVisible,
                     contentFade = contentFade,
                     sheetDragModifier = fullDragModifier,
@@ -1067,6 +1069,7 @@ internal fun PlayerSheetHost(
                     onTranslationChange = onTranslationChange,
                     onPronunciationChange = onPronunciationChange,
                     onOpenCatalog = openCatalogFromPlayer,
+                    canCommitRelationNavigation = { canCommitRelationNavigation() },
                     onOpenSettings = onOpenSettings,
                     artworkSlot = fullArtworkSlot,
                     onArtworkUnobscuredChange = { artworkUnobscured = it },

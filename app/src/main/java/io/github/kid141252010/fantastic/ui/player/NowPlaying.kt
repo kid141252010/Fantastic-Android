@@ -28,6 +28,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import io.github.kid141252010.fantastic.data.SongRelations
+import io.github.kid141252010.fantastic.data.songRelations
+import io.github.kid141252010.fantastic.data.resolveSongRelations
+import io.github.kid141252010.fantastic.data.validCatalogId
+import io.github.kid141252010.fantastic.data.catalogCountry
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -44,7 +52,6 @@ import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.librarySongHit
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
-import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
@@ -64,17 +71,12 @@ internal sealed interface PlayerPanel {
     data object Quality : PlayerPanel
 }
 
-private fun String.isMissingCatalogId() = isBlank() || this == "0"
-
 @Composable
 internal fun NowPlayingContent(
     state: PlayerState,
     player: PlayerConnection,
     lyrics: LyricsController,
     library: MusicLibrary,
-    apple: AppleCatalogApi,
-    qq: io.github.kid141252010.fantastic.data.QqApi,
-    netease: io.github.kid141252010.fantastic.data.NeteaseApi,
     fullVisible: Boolean,
     contentFade: Modifier,
     sheetDragModifier: Modifier,
@@ -88,82 +90,99 @@ internal fun NowPlayingContent(
     onTranslationChange: (Boolean) -> Unit,
     onPronunciationChange: (Boolean) -> Unit,
     onOpenCatalog: (CatalogHit) -> Unit,
+    canCommitRelationNavigation: () -> Boolean,
     onOpenSettings: () -> Unit,
     artworkSlot: @Composable (PlayerPane, Modifier) -> Unit,
     onArtworkUnobscuredChange: (Boolean) -> Unit,
     onQueueAtTopChanged: (Boolean) -> Unit,
 ) {
-    var panel by remember(state.mediaId) { mutableStateOf<PlayerPanel?>(null) }
-    SideEffect { onArtworkUnobscuredChange(panel == null) }
-    val libraryState by library.snapshot.collectAsStateWithLifecycle()
-    val rawTrack = state.currentTrack
-    var menuTrack by remember(rawTrack) { mutableStateOf(rawTrack) }
     val context = LocalContext.current
     val app = context.applicationContext as FantasticApp
-    val trackMenuOpen = panel == PlayerPanel.Track || panel == PlayerPanel.Entities
-    LaunchedEffect(trackMenuOpen, rawTrack, apple, qq, netease) {
-        if (!trackMenuOpen || rawTrack == null) return@LaunchedEffect
-        val current = menuTrack ?: return@LaunchedEffect
-        if (!current.artistId.isMissingCatalogId() && !current.albumId.isMissingCatalogId() &&
-            !current.artistArtworkTemplate.isNullOrBlank() &&
-            (current.source != Source.Apple || current.country.normalizedAppleCountry() != null)) return@LaunchedEffect
-        val storefront = rawTrack.country.normalizedAppleCountry() ?: app.prefs.storefront
-
-        suspend fun <T> lookup(action: suspend () -> T): T? = try {
-            action()
-        } catch (cancel: CancellationException) {
-            throw cancel
-        } catch (error: Exception) {
-            Log.w("FantasticCatalog", "${rawTrack.source} entity lookup failed for ${rawTrack.id}", error)
-            null
-        }
-
-        val details = lookup {
-            when (rawTrack.source) {
-                Source.Apple -> apple.entity(AppleCatalogApi.Entity.Song, rawTrack.id, storefront = storefront)
-                    .takeIf { it.id == rawTrack.id && it.type == "songs" }?.toTrack(storefront)
-                Source.QQ -> qq.songTrack(rawTrack.id)
-                Source.Netease -> netease.song(rawTrack.id).song.toTrack()
-            }
-        }?.takeIf { it.source == rawTrack.source && it.id == rawTrack.id }
-        val artistId = current.artistId.takeUnless { it.isMissingCatalogId() }
-            ?: details?.artistId.orEmpty()
-        val artwork = current.artistArtworkTemplate?.takeIf { it.isNotBlank() }
-            ?: details?.takeIf { it.artistId == artistId }?.artistArtworkTemplate?.takeIf { it.isNotBlank() }
-        val updated = current.copy(
-            artist = current.artist.ifBlank { details?.artist.orEmpty() },
-            album = current.album.ifBlank { details?.album.orEmpty() },
-            artworkTemplate = current.artworkTemplate?.takeIf { it.isNotBlank() } ?: details?.artworkTemplate,
-            durationMs = current.durationMs.takeIf { it > 0 } ?: details?.durationMs ?: 0,
-            artistId = artistId,
-            albumId = current.albumId.takeUnless { it.isMissingCatalogId() } ?: details?.albumId.orEmpty(),
-            artistArtworkTemplate = artwork,
-            albumArtist = current.albumArtist.ifBlank { details?.albumArtist.orEmpty() },
-            discNumber = current.discNumber.takeIf { it > 0 } ?: details?.discNumber ?: 0,
-            trackNumber = current.trackNumber.takeIf { it > 0 } ?: details?.trackNumber ?: 0,
-            country = if (rawTrack.source == Source.Apple) details?.country ?: current.country else null,
-        )
-        ensureActive()
-        if (player.state.value.currentTrack != rawTrack) return@LaunchedEffect
-        menuTrack = updated
-        if (artwork == null && !artistId.isMissingCatalogId()) {
-            val avatar = lookup {
-                when (rawTrack.source) {
-                    Source.Apple -> apple.entity(AppleCatalogApi.Entity.Artist, artistId,
-                        storefront = updated.country.normalizedAppleCountry() ?: storefront)
-                        .takeIf { it.id == artistId && it.type == "artists" }?.artworkUrl(500)
-                    Source.QQ -> null
-                    Source.Netease -> netease.artist(artistId).artist.takeIf { it.mid == artistId }?.avatar
-                }
-            }?.takeIf { it.isNotBlank() }
-            ensureActive()
-            if (avatar != null && player.state.value.currentTrack == rawTrack) {
-                menuTrack = updated.copy(artistArtworkTemplate = avatar)
-            }
+    val rawTrack = state.currentTrack
+    val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
+    val server = app.prefs.baseUrl
+    val requestCountry = if (rawTrack?.source == Source.Apple) rawTrack.country.normalizedAppleCountry()
+        ?: storefront.normalizedAppleCountry() else null
+    val occurrence = state.trackOccurrence
+    val identity = remember(rawTrack, occurrence, server, requestCountry, pane) { Any() }
+    var panel by remember(identity) { mutableStateOf<PlayerPanel?>(null) }
+    var panelEpoch by remember(identity) { mutableStateOf(0) }
+    fun changePanel(next: PlayerPanel?) { panelEpoch++; panel = next }
+    val commitAllowed by rememberUpdatedState(canCommitRelationNavigation)
+    val latestPane by rememberUpdatedState(pane)
+    val latestOpenCatalog by rememberUpdatedState(onOpenCatalog)
+    fun identityCurrent(): Boolean = rawTrack != null && player.state.value.currentTrack == rawTrack &&
+        player.state.value.trackOccurrence == occurrence && app.prefs.baseUrl == server && latestPane == pane &&
+        (rawTrack.source != Source.Apple ||
+            (rawTrack.country.normalizedAppleCountry() ?: app.prefs.storefront.normalizedAppleCountry()) == requestCountry) && commitAllowed()
+    fun panelCurrent(epoch: Int): Boolean = panel == PlayerPanel.Entities && panelEpoch == epoch && identityCurrent()
+    fun commit(entity: CatalogHit, epoch: Int? = null) {
+        if (!identityCurrent() || epoch != null && !panelCurrent(epoch)) return
+        changePanel(null)
+        latestOpenCatalog(entity)
+    }
+    SideEffect { onArtworkUnobscuredChange(panel == null) }
+    val libraryState by library.snapshot.collectAsStateWithLifecycle()
+    val hit = remember(rawTrack) { rawTrack?.let(SearchCatalog::trackHit) }
+    var resolvedRelations by remember(identity) { mutableStateOf<SongRelations?>(null) }
+    var relationError by remember(identity) { mutableStateOf<String?>(null) }
+    var relationAttempt by remember(identity) { mutableStateOf(0) }
+    var artistArtwork by remember(identity) { mutableStateOf(emptyMap<CatalogHit, String>()) }
+    val attemptedArtwork = remember(identity) { mutableSetOf<CatalogHit>() }
+    val relations = resolvedRelations ?: rawTrack?.songRelations(requestCountry) ?: SongRelations()
+    val entities = remember(relations, artistArtwork) {
+        listOfNotNull(relations.artist, relations.album).map { entity ->
+            artistArtwork[entity]?.let { entity.copy(artwork = it) } ?: entity
         }
     }
-    val hit = remember(menuTrack) {
-        menuTrack?.let(SearchCatalog::trackHit)
+    val validSong = rawTrack?.let { it.id.isNotBlank() && it.id != "0" && validCatalogId(it.source, "song", it.id) } == true
+    val relationSurfaceActive = commitAllowed()
+    LaunchedEffect(relationSurfaceActive) {
+        if (!relationSurfaceActive && panel == PlayerPanel.Entities) changePanel(null)
+    }
+    LaunchedEffect(identity, panel, panelEpoch, relationAttempt, relationSurfaceActive) {
+        if (panel != PlayerPanel.Entities || !relationSurfaceActive || rawTrack == null || !validSong ||
+            resolvedRelations != null || relationError != null || entities.isNotEmpty()) return@LaunchedEffect
+        val epoch = panelEpoch
+        try {
+            val result = app.resolveSongRelations(rawTrack, requestCountry)
+            ensureActive()
+            if (!panelCurrent(epoch)) return@LaunchedEffect
+            resolvedRelations = result
+            val targets = listOfNotNull(result.artist, result.album)
+            if (targets.size == 1) commit(targets.single(), epoch)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            ensureActive()
+            if (panelCurrent(epoch)) relationError = failure.message ?: "读取失败"
+        }
+    }
+    LaunchedEffect(identity, panel, panelEpoch, relations, relationSurfaceActive) {
+        if (panel != PlayerPanel.Entities || !relationSurfaceActive) return@LaunchedEffect
+        val epoch = panelEpoch
+        val artist = relations.artist?.takeIf { it.artwork.isNullOrBlank() && attemptedArtwork.add(it) } ?: return@LaunchedEffect
+        try {
+            val avatar = when (artist.source) {
+                Source.Apple -> {
+                    val country = artist.country.normalizedAppleCountry() ?: return@LaunchedEffect
+                    val resource = app.apple.entity(AppleCatalogApi.Entity.Artist, artist.id, storefront = country)
+                    check(resource.id == artist.id && resource.type == "artists") { "服务器返回了其他艺人。" }
+                    check(resource.catalogCountry(null)?.let { it == country } != false) { "服务器返回了其他国家的艺人。" }
+                    resource.artworkUrl(500)
+                }
+                Source.Netease -> app.netease.artist(artist.id).artist.let {
+                    check(it.mid == artist.id) { "服务器返回了其他艺人。" }; it.avatar
+                }
+                Source.QQ -> null
+            }?.takeIf { it.isNotBlank() }
+            ensureActive()
+            if (avatar != null && panelCurrent(epoch)) artistArtwork = artistArtwork + (artist to avatar)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            Log.w("FantasticCatalog", "${artist.source} artist artwork failed for ${artist.id}", failure)
+        }
     }
     val libraryEntry = hit?.let { song -> libraryState.items.firstOrNull {
         it.key.source == song.source && it.key.kind == song.kind && it.key.id == song.id
@@ -176,21 +195,10 @@ internal fun NowPlayingContent(
             else scope.launch { library.toggleFavorite(app.librarySongHit(song)) }
         }
     }
-    val entities = remember(menuTrack) {
-        buildList {
-            menuTrack?.let { song ->
-                if (!song.artistId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "artist", song.artistId, song.artist, artwork = song.artistArtwork(500), detailOnly = true,
-                    country = song.country))
-                if (!song.albumId.isMissingCatalogId()) add(CatalogHit(
-                    song.source, "album", song.albumId, song.album, song.albumArtist, artwork = song.artwork(500), detailOnly = true,
-                    country = song.country))
-            }
-        }
-    }
     val openEntities: () -> Unit = {
-        if (entities.size == 1) { panel = null; onOpenCatalog(entities.single()) }
-        else if (entities.isNotEmpty()) panel = PlayerPanel.Entities
+        if (identityCurrent()) {
+            if (entities.size == 1) commit(entities.single()) else changePanel(PlayerPanel.Entities)
+        }
     }
     val lyricsStatus by lyrics.status.collectAsStateWithLifecycle()
     val lyricsError by lyrics.error.collectAsStateWithLifecycle()
@@ -209,7 +217,7 @@ internal fun NowPlayingContent(
             MediaRouter2.getInstance(context).showSystemOutputSwitcher()
         if (!shown) context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
     }
-    val showTrackMenu = { panel = PlayerPanel.Track }
+    val showTrackMenu = { changePanel(PlayerPanel.Track) }
 
 
     Box(Modifier.fillMaxSize().nestedScroll(sheetNestedScroll)) {
@@ -235,7 +243,7 @@ internal fun NowPlayingContent(
                                 state, player, target == PlayerPane.Lyrics, target == PlayerPane.Queue,
                                 toggleLyrics = { if (interactive) togglePane(PlayerPane.Lyrics) },
                                 toggleQueue = { if (interactive) togglePane(PlayerPane.Queue) },
-                                onQuality = { if (interactive) panel = PlayerPanel.Quality },
+                                onQuality = { if (interactive) changePanel(PlayerPanel.Quality) },
                                 onRoute = { if (interactive) route() },
                                 modifier = modifier.then(contentFade),
                             )
@@ -248,7 +256,7 @@ internal fun NowPlayingContent(
                                 favorite = favorite,
                                 onFavorite = toggleFavorite,
                                 onMore = showTrackMenu,
-                                onOpenEntities = openEntities.takeIf { interactive && entities.isNotEmpty() },
+                                onOpenEntities = openEntities.takeIf { interactive && rawTrack != null },
                                 modifier = Modifier.then(sheetDragModifier),
                                 contentFade = contentFade,
                             )
@@ -262,7 +270,7 @@ internal fun NowPlayingContent(
                                 favorite = favorite,
                                 onFavorite = toggleFavorite,
                                 onMore = showTrackMenu,
-                                onOpenEntities = openEntities.takeIf { interactive && entities.isNotEmpty() },
+                                onOpenEntities = openEntities.takeIf { interactive && rawTrack != null },
                                 controls = controls,
                                 contentFade = contentFade,
                             )
@@ -287,25 +295,38 @@ internal fun NowPlayingContent(
         }
         PlayerPanels(
             panel = panel,
-            onDismiss = { panel = null },
+            onDismiss = { changePanel(null) },
             trackPanel = { palette ->
                 state.error?.let { error -> androidx.compose.material3.Text(error, Modifier.padding(16.dp), color = palette.label) }
                 hit?.let { song ->
-                    io.github.kid141252010.fantastic.ui.MediaActionContent(song, library, listOfNotNull(menuTrack), nowPlaying = true,
+                    io.github.kid141252010.fantastic.ui.MediaActionContent(song, library, listOfNotNull(rawTrack), nowPlaying = true,
                         hasLyrics = lyricsStatus == LyricsController.Status.Ready,
-                        onQuality = { panel = PlayerPanel.Quality },
+                        onQuality = { changePanel(PlayerPanel.Quality) },
                         pronunciation = pronunciation,
-                        onPronunciation = if (pane == PlayerPane.Lyrics && annotations.pronunciation) ({ onPronunciationChange(!pronunciation); panel = null }) else null,
+                        onPronunciation = if (pane == PlayerPane.Lyrics && annotations.pronunciation) ({ onPronunciationChange(!pronunciation); changePanel(null) }) else null,
                         translation = translation,
-                        onTranslation = if (pane == PlayerPane.Lyrics && annotations.translation) ({ onTranslationChange(!translation); panel = null }) else null,
-                        onDismiss = { panel = null })
+                        onTranslation = if (pane == PlayerPane.Lyrics && annotations.translation) ({ onTranslationChange(!translation); changePanel(null) }) else null,
+                        onDismiss = { changePanel(null) })
                 }
             },
             entityPanel = { palette ->
-                CatalogActionContent(entities, palette, onOpen = { entity -> panel = null; onOpenCatalog(entity) })
+                when {
+                    entities.isNotEmpty() -> {
+                        val epoch = panelEpoch
+                        CatalogActionContent(entities, palette, onOpen = { entity -> commit(entity, epoch) })
+                    }
+                    relationError != null -> {
+                        Text("无法读取艺人和专辑：$relationError", Modifier.padding(16.dp), color = palette.label)
+                        TextButton(onClick = { if (identityCurrent()) { relationError = null; relationAttempt++ } }) {
+                            Text("重试", color = palette.label)
+                        }
+                    }
+                    resolvedRelations == null && validSong -> Text("正在读取艺人和专辑…", Modifier.padding(16.dp), color = palette.label)
+                    else -> Text("暂无可跳转的艺人或专辑", Modifier.padding(16.dp), color = palette.label)
+                }
             },
             qualityState = state,
-            onOpenSettings = { panel = null; onOpenSettings() }
+            onOpenSettings = { changePanel(null); onOpenSettings() }
         )
     }
 }
