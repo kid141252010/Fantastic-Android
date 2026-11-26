@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         setContent {
-            FantasticTheme {
+            FantasticTheme(app.prefs) {
                 // Surface 提供跟随深浅色的文字颜色，否则没指定颜色的 Text 在深色模式下是黑字
                 Surface(color = MaterialTheme.colorScheme.background) {
                     AppShell(app)

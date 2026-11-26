@@ -84,6 +84,7 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
     private object AnnotationChange
     private var translation = true
     private var pronunciation = false
+    private var lyricFontWeight = 0
     private var playing = false
     private var timeAt = 0L
     private var timeValue = 0L
@@ -216,6 +217,13 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
         layout.scrollToPositionWithOffset(0, 0)
         updatePosition(force = true)
         updateScrollBarVisibility()
+    }
+
+    fun setFontWeight(value: Int) {
+        if (lyricFontWeight == value) return
+        lyricFontWeight = value
+        prepareResize()
+        ink.notifyItemRangeChanged(0, displayed.size, AnnotationChange)
     }
 
     fun showAnnotations(translation: Boolean, pronunciation: Boolean) {
@@ -793,7 +801,7 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
             if (payloads.isNotEmpty() && payloads.all { it === AnnotationChange }) {
                 val row = displayed[position]
                 val view = holder.itemView as LyricInkView
-                view.bind(row.lyric, song?.timing ?: "None", row.credits, row.attribution, row.dots, translation, pronunciation)
+                view.bind(row.lyric, song?.timing ?: "None", row.credits, row.attribution, row.dots, translation, pronunciation, lyricFontWeight)
                 updateInk(view, row, snapScaleChanges, SystemClock.uptimeMillis())
                 return
             }
@@ -812,7 +820,7 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
                 topMargin = if (timing == "None" && position == 0) dp(30f) else 0
                 bottomMargin = if (position == itemCount - 1) 0 else dp(if (timing == "None") 40f else 20f)
             }
-            view.bind(row.lyric, timing, row.credits, row.attribution, row.dots, translation, pronunciation)
+            view.bind(row.lyric, timing, row.credits, row.attribution, row.dots, translation, pronunciation, lyricFontWeight)
             if (row.lyric != null) {
                 view.setOnClickListener {
                     if (view.rowActivationAllowed && serial == generation && timing != "None") {

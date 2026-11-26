@@ -27,6 +27,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +63,8 @@ import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3BackButton
 import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
@@ -204,7 +207,8 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
             )
         } else if (!showBricks) item(key = "discovery-heading") {
             Column(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 10.dp)) {
-                Text(title, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                Text(title, style = LocalTextStyle.current.copy(fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                    .withUserFontWeight(FontWeightRole.Title))
                 if (!radio && !searchLanding) {
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 12.dp),
@@ -234,7 +238,8 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
             item(key = "error") {
                 Column(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 28.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("暂时无法加载", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    Text("暂时无法加载", style = LocalTextStyle.current.copy(fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                        .withUserFontWeight(FontWeightRole.Title))
                     Text(error.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(onClick = { retry++ }) { Text("重试") }
                 }
@@ -364,7 +369,8 @@ private fun DiscoveryShelf(
             Modifier.fillMaxWidth().padding(start = Dimens.Page, end = Dimens.Page, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(section.title, Modifier.weight(1f), fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Text(section.title, Modifier.weight(1f),
+                style = LocalTextStyle.current.copy(fontSize = 20.sp, fontWeight = FontWeight.SemiBold).withUserFontWeight(FontWeightRole.Title))
             section.seeAll?.let { TextButton(onClick = onSeeAll) { Text("查看全部") } }
             section.chartKind?.let { TextButton(onClick = { onChart(it) }) { Text("查看全部") } }
         }
@@ -402,12 +408,12 @@ private fun DiscoveryCard(entry: DiscoveryEntry, index: Int, onClick: () -> Unit
                     entry.rank.toString(),
                     Modifier.align(Alignment.TopStart).padding(8.dp),
                     color = MaterialTheme.colorScheme.onPrimary,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold).withUserFontWeight(FontWeightRole.Title),
                 )
             }
         }
-        Text(entry.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+        Text(entry.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            style = LocalTextStyle.current.copy(fontWeight = FontWeight.Medium).withUserFontWeight(FontWeightRole.Title))
         if (entry.subtitle.isNotBlank()) {
             Text(entry.subtitle, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)

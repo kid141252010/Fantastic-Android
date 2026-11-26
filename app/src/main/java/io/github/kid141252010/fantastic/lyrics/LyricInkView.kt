@@ -146,6 +146,7 @@ internal class LyricInkView(context: Context) : View(context) {
     private var isStatic = false
     private var showTranslation = true
     private var showPronunciation = false
+    private var lyricFontWeight = 0
     private var scaleInitialized = false
     private var scaleFrom = LyricMotion.normalScale
     private var scaleTarget = LyricMotion.normalScale
@@ -183,12 +184,13 @@ internal class LyricInkView(context: Context) : View(context) {
         interlude: Boolean,
         translation: Boolean,
         pronunciation: Boolean,
+        fontWeight: Int,
     ) {
         val sameLine = this.line === line && this.credits == credits &&
             this.creditsAttribution == attribution && this.interlude == interlude
         val wordModeChanged = isWord != (timing == "Word")
         val layoutChanged = !sameLine || wordModeChanged || isStatic != (timing == "None") ||
-            showTranslation != translation || showPronunciation != pronunciation
+            showTranslation != translation || showPronunciation != pronunciation || lyricFontWeight != fontWeight
         if (!sameLine || wordModeChanged) resetWordLift()
         if (layoutChanged) builtWidth = -1
         this.line = line
@@ -199,6 +201,7 @@ internal class LyricInkView(context: Context) : View(context) {
         isStatic = timing == "None"
         showTranslation = translation
         showPronunciation = pronunciation
+        lyricFontWeight = fontWeight
         hasBackground = line?.background?.let { it.text.isNotBlank() || it.tokens.any { token -> token.text.isNotBlank() } } == true
         if (!sameLine) {
             lineMoveNotBefore = 0L
@@ -466,13 +469,17 @@ internal class LyricInkView(context: Context) : View(context) {
         alphaFrom + (alphaTarget - alphaFrom) * LyricMotion.retirement.getInterpolation(
             LyricMotion.fraction(now - alphaAt, alphaDuration))
 
-    private fun lyricPaint(size: Float, weight: Int) = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-        color = Color.WHITE
-        textSize = sp(size)
-        typeface = LocalAmFonts.typeface(context, size, weight)
-            ?: if (Build.VERSION.SDK_INT >= 28) Typeface.create(Typeface.DEFAULT, weight, false)
-        else Typeface.create(if (weight == 500) "sans-serif-medium" else "sans-serif",
-            if (weight >= 700) Typeface.BOLD else Typeface.NORMAL)
+    private fun lyricPaint(size: Float, weight: Int, customize: Boolean = true): TextPaint {
+        val custom = if (customize) lyricFontWeight else 0
+        val actualWeight = if (custom == 0) weight else custom
+        return TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+            color = Color.WHITE
+            textSize = sp(size)
+            typeface = LocalAmFonts.typeface(context, size, actualWeight, exactWeight = custom != 0)
+                ?: if (Build.VERSION.SDK_INT >= 28) Typeface.create(Typeface.DEFAULT, actualWeight, false)
+            else Typeface.create(if (actualWeight in 500..699) "sans-serif-medium" else "sans-serif",
+                if (actualWeight >= 700) Typeface.BOLD else Typeface.NORMAL)
+        }
     }
 
     private fun textLayout(
@@ -772,7 +779,7 @@ internal class LyricInkView(context: Context) : View(context) {
         ) {
             if (text.isBlank()) return
             val spaced = LyricTextAutospace.apply(text)
-            val paint = lyricPaint(size, weight).apply {
+            val paint = lyricPaint(size, weight, customize = !writerCredit && !attribution).apply {
                 if (translation || pronunciation) letterSpacing = when {
                     translation && isStatic -> LyricMotion.legacyTranslationTrackingEm
                     backing -> LyricMotion.backgroundAnnotationTrackingEm
@@ -877,7 +884,7 @@ internal class LyricInkView(context: Context) : View(context) {
         val prefixEnd = text.indexOf('：').takeIf { it >= 0 }?.plus(1) ?: 0
         if (prefixEnd > 0) styled.setSpan(android.text.style.StyleSpan(Typeface.BOLD), 0, prefixEnd,
             android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        val paint = lyricPaint(size, 400)
+        val paint = lyricPaint(size, 400, customize = false)
         val layout = textLayout(styled, paint, available)
         blocks += Block(text, paint, layout, x, y).apply { writerCredit = true }
         return layout.height

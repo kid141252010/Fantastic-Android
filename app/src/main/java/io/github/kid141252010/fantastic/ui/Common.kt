@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -17,6 +18,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 @Composable
 fun Artwork(url: String?, size: Dp, corner: Dp = 6.dp, modifier: Modifier = Modifier) {
@@ -43,8 +46,8 @@ fun LargeTitle(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
         modifier = modifier.padding(horizontal = Dimens.Page, vertical = 8.dp),
-        fontSize = 34.sp,
-        fontWeight = FontWeight.Bold,
+        style = LocalTextStyle.current.copy(fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            .withUserFontWeight(FontWeightRole.Title),
     )
 }
 

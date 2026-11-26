@@ -47,7 +47,9 @@ internal object LocalAmFonts {
     }
 
     @Synchronized
-    fun typeface(context: Context, sizeSp: Float, weight: Int, rounded: Boolean = false): Typeface? {
+    fun typeface(
+        context: Context, sizeSp: Float, weight: Int, rounded: Boolean = false, exactWeight: Boolean = false,
+    ): Typeface? {
         val assets = context.applicationContext.assets
         val files = availableFonts ?: try {
             (assets.list(directory)?.toSet() ?: emptySet()).also { availableFonts = it }
@@ -61,7 +63,7 @@ internal object LocalAmFonts {
         val metrics = context.resources.displayMetrics
         val opticalSize = (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sizeSp, metrics) /
             metrics.density).roundToInt().coerceAtLeast(1)
-        val resolvedWeight = resolvedWeight(weight)
+        val resolvedWeight = if (exactWeight) weight else resolvedWeight(weight)
         val locale = context.resources.configuration.locales[0]
         val nastaliq = locale.language == "ur"
         val cjkIndex = if (Build.VERSION.SDK_INT >= 29) cjkFamilyIndex(locale) else -1

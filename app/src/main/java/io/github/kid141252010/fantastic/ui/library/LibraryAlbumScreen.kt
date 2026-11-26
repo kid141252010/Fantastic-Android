@@ -75,6 +75,7 @@ import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.MediaActionContent
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -293,7 +294,7 @@ internal fun LibraryAlbumScreen(
                         HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
                         Text("显示完整专辑", Modifier.fillMaxWidth().clickable { onOpenCatalog(album.copy(country = metadata?.country ?: album.country)) }.padding(vertical = 12.dp),
                             color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal))
+                            style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal).withUserFontWeight())
                     }
                 }
             }

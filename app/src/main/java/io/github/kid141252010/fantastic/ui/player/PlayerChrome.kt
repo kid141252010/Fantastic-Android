@@ -3,6 +3,7 @@ package io.github.kid141252010.fantastic.ui.player
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Typeface
+import android.os.Build
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
@@ -34,8 +35,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil3.compose.AsyncImage
+import io.github.kid141252010.fantastic.data.FontWeights
 import io.github.kid141252010.fantastic.ui.CircularTouchScope
 import io.github.kid141252010.fantastic.ui.theme.LocalAmFonts
+import io.github.kid141252010.fantastic.ui.theme.LocalFontWeights
 
 internal val PlayerPrimary = Color(0xF0FFFFFF)
 internal val PlayerSecondary = Color(0x73FFFFFF)
@@ -118,10 +121,11 @@ internal fun PlayerMetadataText(
     modifier: Modifier = Modifier,
     onOpenEntities: (() -> Unit)? = null,
 ) {
+    val fontWeights = LocalFontWeights.current
     AndroidView(
         factory = ::MetadataRail,
         modifier = modifier,
-        update = { it.bind(title, artist, compact, marquee, onOpenEntities) },
+        update = { it.bind(title, artist, compact, marquee, onOpenEntities, fontWeights) },
     )
 }
 
@@ -154,7 +158,10 @@ private class MetadataRail(context: Context) : LinearLayout(context) {
         artist.onEndEdge = ::waitAtEdge
     }
 
-    fun bind(titleText: String, artistText: String, compact: Boolean, marquee: Boolean, onOpenEntities: (() -> Unit)?) {
+    fun bind(
+        titleText: String, artistText: String, compact: Boolean, marquee: Boolean,
+        onOpenEntities: (() -> Unit)?, fontWeights: FontWeights,
+    ) {
         titleAction = if (compact) null else onOpenEntities
         artistAction = onOpenEntities
         title.isClickable = titleAction != null
@@ -173,7 +180,7 @@ private class MetadataRail(context: Context) : LinearLayout(context) {
             artist.layoutParams = artistParams
         }
         val size = if (compact) 17 else 20
-        val changed = title.bind(titleText, size) or artist.bind(artistText, size)
+        val changed = title.bind(titleText, size, fontWeights.title) or artist.bind(artistText, size, fontWeights.body)
         if (allowMarquee != marquee) {
             allowMarquee = marquee
             title.ellipsize = if (marquee) TextUtils.TruncateAt.MARQUEE else TextUtils.TruncateAt.END
@@ -230,6 +237,7 @@ private class MetadataRail(context: Context) : LinearLayout(context) {
 private class MarqueeLabel(context: Context, medium: Boolean, color: Int) : TextView(context) {
     private var textSizeSp = 0
     private val fontWeight = if (medium) 500 else 400
+    private var customFontWeight = -1
     private var changingSelection = false
     var onEndEdge: () -> Unit = {}
     private val overflowing: Boolean get() = leftFadingEdgeStrength > 0f || rightFadingEdgeStrength > 0f
@@ -248,14 +256,20 @@ private class MarqueeLabel(context: Context, medium: Boolean, color: Int) : Text
         gravity = Gravity.START or Gravity.CENTER_VERTICAL
     }
 
-    fun bind(value: String, size: Int): Boolean {
+    fun bind(value: String, size: Int, customWeight: Int): Boolean {
         val changedText = !TextUtils.equals(text, value)
-        val changed = changedText || size != textSizeSp
+        val fontChanged = size != textSizeSp || customWeight != customFontWeight
+        val changed = changedText || fontChanged
         if (changedText) text = value
-        if (size != textSizeSp) {
+        if (fontChanged) {
             textSizeSp = size
+            customFontWeight = customWeight
             setTextSize(TypedValue.COMPLEX_UNIT_SP, size.toFloat())
-            LocalAmFonts.typeface(this.context, size.toFloat(), fontWeight)?.let { typeface = it }
+            val weight = if (customWeight == 0) fontWeight else customWeight
+            typeface = LocalAmFonts.typeface(context, size.toFloat(), weight, exactWeight = customWeight != 0)
+                ?: if (customWeight != 0 && Build.VERSION.SDK_INT >= 28) Typeface.create(Typeface.DEFAULT, weight, false)
+                else Typeface.create(if (weight in 500..699) "sans-serif-medium" else "sans-serif",
+                    if (weight >= 700) Typeface.BOLD else Typeface.NORMAL)
         }
         return changed
     }

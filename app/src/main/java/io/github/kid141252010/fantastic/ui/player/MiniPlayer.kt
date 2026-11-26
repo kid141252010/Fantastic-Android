@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,6 +35,8 @@ import io.github.kid141252010.fantastic.playback.PlayerConnection
 import io.github.kid141252010.fantastic.playback.PlayerState
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.Glass
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 /**
  * 常驻 48dp Apple material capsule；sheet host 通过同一 frame 驱动透明度与封面测量。
@@ -66,7 +69,8 @@ internal fun MiniPlayer(
             artworkSlot(Modifier.size(30.dp))
             CompositionLocalProvider(LocalDensity provides Density(density.density, density.fontScale.coerceAtMost(1.5f))) {
                 Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                    Text(state.title, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = primary,
+                    Text(state.title, color = primary,
+                        style = LocalTextStyle.current.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium).withUserFontWeight(FontWeightRole.Title),
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (state.error != null) {
                         Text("播放失败：${state.error}", fontSize = 12.sp, color = MaterialTheme.colorScheme.error,
