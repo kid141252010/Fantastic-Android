@@ -1,5 +1,11 @@
 # 更新日志
 
+## Fantastic Android 1.4.3
+
+本次为 Apple Music ALAC 原生播放的音频焦点缺陷修复，按 patch 从 1.4.2 升级到 1.4.3，本地版本号增至 12。
+
+- ALAC AudioTrack 获焦前不输出；支持延迟获焦、瞬时打断恢复和 duck，永久丢焦后保持暂停。Media3 焦点管理不变；实际跨应用音频切换尚未设备验收。
+
 ## Fantastic Android 1.4.2
 
 本次修复 Apple Music 首次播放定位，按 patch 从 1.4.1 升级到 1.4.2，本地版本号增至 11。
