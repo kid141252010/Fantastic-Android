@@ -647,7 +647,7 @@ internal class FantasticSessionPlayer(
             val ended = if (appleActive) appleState.ended else native.playbackState == Player.STATE_ENDED
             if (ended && requestedPosition == 0L) start(target, 0L, wantsPlay())
             else if (appleActive) apple.seekTo(requestedPosition) else native.seekTo(requestedPosition)
-            publishCurrentAudio()
+            if (appleActive) publish() else publishCurrentAudio()
             checkpoint()
             return Futures.immediateVoidFuture()
         }
