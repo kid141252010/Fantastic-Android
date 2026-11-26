@@ -55,7 +55,10 @@ For a local build with fonts, place the SF Pro assets and the complete `pingfang
 - `main` 与 `origin/main` 保持同步，保留正式应用 ID `io.github.kid141252010.fantastic` 和发行签名。`fix/debug-side-by-side` 不推远端、不反向合入 `main`；保留 Debug 的 `.debug` 应用 ID 后缀和现有调试签名，以便与正式版并存。两条线的功能源码保持一致，合入后核对差异只涉及 Debug 安装身份。
 - 用户明确只要求 Debug 验收时，可先将指定任务提交合入本地 `fix/debug-side-by-side`；不得因打 Debug 包而将该功能合入 `main`。必须从 `.work/debug-local` 的实际 Debug 分支构建，不在任务分支临时注入 `.debug` 后缀。
 - 双线交付使用上文固定的工具链和独立构建目录：从 `main` 构建并用既有发行密钥签署 Release APK，从本地 Debug 分支执行 `:app:compileDebugKotlin --offline --rerun-tasks --console=plain` 与 `:app:assembleDebug --offline --console=plain`。两边本机交付均显式传 `-PincludeLocalAmFonts=true`，缺少字体则停止交付；不提交私有字体和签名材料，公开 CI 继续使用系统字体。
-- 用户要求两条线同步版本时，在 `app/build.gradle.kts` 固化相同的 `versionName` 和本地基准 `versionCode`，不使用临时 init 脚本覆盖；CI 构建号不得低于源码基准。打包后用 `aapt2 dump badging` 核对最终版本值。
+- 每次将任务更新合入 `main`，必须在同一次合入中更新 `app/build.gradle.kts` 的 `versionName` 和本地基准 `versionCode`，无需用户另行提醒。依据合入前 `main` 的版本及本次全部改动判断升级级别，不按提交数量重复升级。
+- 小版本（patch，`X.Y.Z → X.Y.(Z+1)`）：缺陷修复、小范围界面或交互调整、常规性能优化、依赖维护及文档更新，且不增加显著新能力。中版本（minor，`X.Y.Z → X.(Y+1).0`）：新增功能或显著扩展现有能力；混合改动取较高级别。不要因普通合入自动升级主版本（major）。
+- 本地基准 `versionCode` 每次升级必须递增，并高于合入前 `main` 的基准及上次交付的本地正式版/Debug APK；保留 `GITHUB_RUN_NUMBER` 的 CI 构建号规则，但不得低于源码基准。版本直接固化在源码，不使用临时 init 脚本覆盖。
+- 将该 `main` 同步到本地 `fix/debug-side-by-side` 时使用相同的版本，不为同步、重建或重新签名再次升级；保留两线各自的应用 ID 和签名。打包后用 `aapt2 dump badging` 核对最终 `versionName`/`versionCode`，交付时说明本次采用 patch 或 minor 的依据。
 - 交付前核对两种应用 ID、APK 签名、字体资产和 SHA-256，分别给出 Release 和 Debug 路径。构建和静态检查通过不等于实机验收。
 
 ## Code Conventions & Common Patterns
