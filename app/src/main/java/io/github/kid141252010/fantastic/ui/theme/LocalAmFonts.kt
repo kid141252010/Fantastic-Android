@@ -20,16 +20,16 @@ import kotlin.math.roundToInt
 /** Optional assets supplied only by the developer's ignored local font directory. */
 internal object LocalAmFonts {
     private const val directory = "am-fonts"
-    private val cjkCollections = arrayOf("pingfang.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc")
+    private val cjkCollections = arrayOf("pingfang_ui_vf.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc")
     private var availableFonts: Set<String>? = null
     private val typefaces = LongSparseArray<Typeface?>()
     private val cjkData = arrayOfNulls<ByteBuffer>(cjkCollections.size)
     private val cjkFamilies = LongSparseArray<FontFamily>()
-    // Public faces only, in the order of the local collections (not the former PingFang UI TTC).
+    // PingFang UI variable faces, followed by the unchanged static Japanese and Korean families.
     private val cjkFaceIndices = arrayOf(
-        intArrayOf(3, 7, 11, 15, 19, 23), // PingFang SC
-        intArrayOf(2, 6, 10, 14, 18, 22), // PingFang TC
-        intArrayOf(0, 4, 8, 12, 16, 20), // PingFang HK, also used for Macau
+        intArrayOf(0), // PingFang UI SC
+        intArrayOf(1), // PingFang UI TC
+        intArrayOf(2), // PingFang UI HK, also used for Macau
         intArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), // Hiragino Sans W0–W9
         intArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8), // Apple SD Gothic Neo 100–900
     )
@@ -103,8 +103,10 @@ internal object LocalAmFonts {
     }
 
     @TargetApi(29)
-    private fun cjkFamily(assets: AssetManager, index: Int): FontFamily {
-        cjkFamilies[index.toLong()]?.let { return it }
+    private fun cjkFamily(assets: AssetManager, index: Int, weight: Int): FontFamily {
+        val cacheWeight = if (index in 0..2) weight.coerceIn(100, 900) else 0
+        val key = (index.toLong() shl 10) or cacheWeight.toLong()
+        cjkFamilies[key]?.let { return it }
         val collectionIndex = when (index) {
             3 -> 1
             4 -> 2
@@ -116,11 +118,31 @@ internal object LocalAmFonts {
             }
         }.also { cjkData[collectionIndex] = it }
         val indices = cjkFaceIndices[index]
-        val builder = FontFamily.Builder(Font.Builder(buffer).setTtcIndex(indices[0]).build())
-        for (i in 1 until indices.size) {
-            builder.addFont(Font.Builder(buffer).setTtcIndex(indices[i]).build())
+        val builder = if (index in 0..2) {
+            val cjkWeight = cacheWeight
+            val faceIndex = indices[0]
+            val family = FontFamily.Builder(Font.Builder(buffer).setTtcIndex(faceIndex)
+                .setWeight(cjkWeight)
+                .setFontVariationSettings("'wght' $cjkWeight, 'wdth' 100")
+                .build())
+            // StyleSpan normal/bold runs must select real VF instances rather than synthetic bold.
+            if (cjkWeight != 400) {
+                family.addFont(Font.Builder(buffer).setTtcIndex(faceIndex)
+                    .setWeight(400).setFontVariationSettings("'wght' 400, 'wdth' 100").build())
+            }
+            if (cjkWeight != 700) {
+                family.addFont(Font.Builder(buffer).setTtcIndex(faceIndex)
+                    .setWeight(700).setFontVariationSettings("'wght' 700, 'wdth' 100").build())
+            }
+            family
+        } else {
+            val family = FontFamily.Builder(Font.Builder(buffer).setTtcIndex(indices[0]).build())
+            for (i in 1 until indices.size) {
+                family.addFont(Font.Builder(buffer).setTtcIndex(indices[i]).build())
+            }
+            family
         }
-        return builder.build().also { cjkFamilies.put(index.toLong(), it) }
+        return builder.build().also { cjkFamilies.put(key, it) }
     }
 
     @TargetApi(29)
@@ -141,7 +163,7 @@ internal object LocalAmFonts {
                 4 -> 2
                 else -> 0
             }
-            if (cjkCollections[collectionIndex] in files) builder.addCustomFallback(cjkFamily(assets, index))
+            if (cjkCollections[collectionIndex] in files) builder.addCustomFallback(cjkFamily(assets, index, weight))
         }
         // The app locale determines Han glyph forms; Japanese and Korean remain in every local chain.
         if (cjkIndex == 3 || cjkIndex == 4) addCjk(cjkIndex)

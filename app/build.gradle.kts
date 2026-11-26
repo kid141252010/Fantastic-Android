@@ -20,10 +20,17 @@ android {
     if (includeLocalAmFonts != "false" && localAmFontAssets.isDirectory) {
         val requiredFonts = listOf(
             "sf_pro_android_ui.ttf", "sf_pro_rounded_android_ui.ttf",
-            "pingfang.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc",
+            "pingfang_ui_vf.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc",
         )
         val missingFonts = requiredFonts.filterNot { localAmFontAssets.resolve("am-fonts/$it").isFile }
         require(missingFonts.isEmpty()) { "Incomplete local Apple font assets: ${missingFonts.joinToString()}" }
+        require(localAmFontAssets.resolve("licenses/pingfang-ui-vf.txt").isFile) {
+            "PingFangUI-VF source README is missing: licenses/pingfang-ui-vf.txt"
+        }
+        require(!localAmFontAssets.resolve("am-fonts/pingfang.ttc").exists() &&
+            !localAmFontAssets.resolve("am-fonts/pingfang_ui.ttc").exists()) {
+            "Legacy PingFang assets must be moved outside assets before using PingFangUI-VF."
+        }
         sourceSets.getByName("main").assets.srcDir(localAmFontAssets)
         // Map the CJK collections directly from the APK; share their buffers across text sizes.
         androidResources.noCompress += "ttc"
