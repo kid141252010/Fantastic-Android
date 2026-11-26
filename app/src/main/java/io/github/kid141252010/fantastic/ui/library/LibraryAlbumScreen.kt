@@ -38,12 +38,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -59,6 +61,9 @@ import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.libraryAlbumMetadata
 import io.github.kid141252010.fantastic.data.librarySongHit
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.data.albumMetadataRevision
+import io.github.kid141252010.fantastic.data.matchesAlbum
+import io.github.kid141252010.fantastic.data.libraryAlbumArtists
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.OfflineDownload
 import io.github.kid141252010.fantastic.playback.mediaId
@@ -71,6 +76,7 @@ import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.MediaActionContent
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,21 +89,27 @@ internal fun LibraryAlbumScreen(
     backEnabled: Boolean,
     onBack: () -> Unit,
     onOpenCatalog: (CatalogHit) -> Unit,
+    onOpenArtist: (CatalogHit) -> Unit,
 ) {
     val album = albumEntry.hit
     val server = app.prefs.baseUrl
     val selectedStorefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
-    val storefront = if (album.source == Source.Apple) album.country.normalizedAppleCountry() ?: selectedStorefront else null
+    val storefront = if (album.source == Source.Apple) album.country.normalizedAppleCountry() ?: selectedStorefront.normalizedAppleCountry() else null
     val snapshot by app.library.snapshot.collectAsStateWithLifecycle()
-    val cachedMetadata = if (album.source == Source.Apple) null else snapshot.albumMetadata.firstOrNull { it.source == album.source && it.albumId == album.id }
-    var retry by rememberSaveable(album.source, album.id, server, storefront) { mutableStateOf(0) }
-    var metadata by remember(album.source, album.id, server, storefront) { mutableStateOf(cachedMetadata) }
-    var loadingMetadata by remember(album.source, album.id, server, storefront) { mutableStateOf(cachedMetadata == null) }
-    var metadataError by remember(album.source, album.id, server, storefront) { mutableStateOf<Exception?>(null) }
-    LaunchedEffect(album.source, album.id, server, storefront, retry) {
+    val revision = snapshot.albumMetadataRevision(album.source, album.id)
+    val cachedMetadata = snapshot.albumMetadata.firstOrNull { it.matchesAlbum(album.source, album.id, storefront) }
+    var retry by rememberSaveable(album.source, album.id, server, storefront, revision) { mutableStateOf(0) }
+    var metadata by remember(album.source, album.id, server, storefront, revision) { mutableStateOf(cachedMetadata) }
+    var loadingMetadata by remember(album.source, album.id, server, storefront, revision) { mutableStateOf(cachedMetadata == null) }
+    var metadataError by remember(album.source, album.id, server, storefront, revision) { mutableStateOf<Exception?>(null) }
+    var artistOpenCommit by remember(album.source, album.id, server, storefront, revision) { mutableStateOf<((CatalogHit) -> Unit)?>(null) }
+    var artistOpenError by remember(album.source, album.id, server, storefront, revision) { mutableStateOf<String?>(null) }
+    var resolvedArtists by remember(album.source, album.id, server, storefront, revision) { mutableStateOf<List<CatalogHit>?>(null) }
+    val artistOpening = artistOpenCommit != null
+    LaunchedEffect(album.source, album.id, server, storefront, revision, retry) {
         metadataError = null
         val restored = app.library.snapshot.first { !it.loading }
-        val cached = if (album.source == Source.Apple) null else restored.albumMetadata.firstOrNull { it.source == album.source && it.albumId == album.id }
+        val cached = restored.albumMetadata.firstOrNull { it.matchesAlbum(album.source, album.id, storefront) }
         if (cached != null) {
             metadata = cached
             loadingMetadata = false
@@ -144,6 +156,40 @@ internal fun LibraryAlbumScreen(
     val hasMultipleDiscs = remember(displayTracks) { displayTracks.any { it.discNumber > 1 } }
     var menuTrackId by remember { mutableStateOf<String?>(null) }
     val menuTrack = displayTracks.firstOrNull { it.id == menuTrackId }
+    val latestBackEnabled by rememberUpdatedState(backEnabled)
+    val latestAlbum by rememberUpdatedState(album)
+    val latestMenuTrackId by rememberUpdatedState(menuTrackId)
+    LaunchedEffect(album.source, album.id, server, storefront, revision, artistOpenCommit, loadingMetadata, backEnabled, menuTrackId) {
+        if (artistOpenCommit == null) return@LaunchedEffect
+        if (!backEnabled || menuTrackId != null) {
+            artistOpenCommit = null
+            return@LaunchedEffect
+        }
+        if (loadingMetadata) return@LaunchedEffect
+        try {
+            val artists = resolvedArtists ?: metadata?.artists ?: app.libraryAlbumArtists(album.source, album.id, storefront)
+            ensureActive()
+            val currentAlbum = latestAlbum
+            val currentCountry = if (currentAlbum.source == Source.Apple)
+                currentAlbum.country.normalizedAppleCountry() ?: app.prefs.storefront.normalizedAppleCountry() else null
+            if (!latestBackEnabled || latestMenuTrackId != null || currentAlbum.source != album.source || currentAlbum.id != album.id ||
+                app.prefs.baseUrl != server || currentCountry != storefront ||
+                app.library.snapshot.value.albumMetadataRevision(album.source, album.id) != revision) {
+                artistOpenCommit = null
+                return@LaunchedEffect
+            }
+            resolvedArtists = artists
+            val target = artists.firstOrNull()
+            val commit = artistOpenCommit
+            artistOpenCommit = null
+            if (target == null) artistOpenError = "暂无可跳转的艺人信息" else commit?.invoke(target)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            artistOpenCommit = null
+            artistOpenError = "无法读取艺人信息：${error.message.orEmpty()}"
+        }
+    }
     BackHandler(enabled = backEnabled && menuTrack == null, onBack = onBack)
     Column(Modifier.fillMaxSize()) {
         TopAppBar(title = { Text("专辑") }, navigationIcon = { Md3BackButton(onBack) }, windowInsets = WindowInsets(0, 0, 0, 0))
@@ -160,8 +206,19 @@ internal fun LibraryAlbumScreen(
                     Md3MediaArtwork(album.artwork, Modifier.widthIn(max = 260.dp).fillMaxWidth(.72f).aspectRatio(1f),
                         shape = MaterialTheme.shapes.large, icon = Icons.Rounded.Album)
                     Text(album.title, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
-                    val subtitle = album.source.librarySubtitle(album.subtitle, showLibrarySources)
-                    if (subtitle.isNotBlank()) Text(subtitle, textAlign = TextAlign.Center)
+                    val artistName = album.subtitle.ifBlank { metadata?.albumArtist.orEmpty() }
+                    val subtitle = album.source.librarySubtitle(artistName, showLibrarySources)
+                    if (subtitle.isNotBlank()) Text(subtitle, textAlign = TextAlign.Center,
+                        modifier = if (artistName.isNotBlank()) Modifier.clickable(
+                            enabled = backEnabled && menuTrackId == null && !artistOpening,
+                            role = Role.Button, onClickLabel = "查看艺人",
+                        ) {
+                            artistOpenError = null
+                            artistOpenCommit = onOpenArtist
+                        } else Modifier)
+                    val artistStatus = if (artistOpening) "正在读取艺人信息…" else artistOpenError
+                    if (artistStatus != null) Text(artistStatus, textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("${savedTracks.size} 首已保存 · $readyCount 首已下载", style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (savedTracks.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp),

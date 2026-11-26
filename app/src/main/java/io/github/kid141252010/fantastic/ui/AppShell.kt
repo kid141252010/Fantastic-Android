@@ -168,7 +168,13 @@ fun AppShell(app: FantasticApp) {
                     when (tab) {
                         Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest, onOpen = ::openCatalog)
                         Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest,
-                            backEnabled = libraryBackEnabled, onOpen = ::openCatalog)
+                            backEnabled = libraryBackEnabled, onOpen = ::openCatalog,
+                            onOpenAlbumArtist = { hit, expectedRequest ->
+                                if (tab == Tab.Library && rootNavigationRequest == expectedRequest && catalog == null && !settings &&
+                                    !(player.mediaId != null && nowPlaying) && !playerBackOwnership.value && !glassSheetState.value) {
+                                    openCatalog(hit)
+                                }
+                            })
                         Tab.New -> key(storefront) {
                             AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = ::openCatalog)
                         }
