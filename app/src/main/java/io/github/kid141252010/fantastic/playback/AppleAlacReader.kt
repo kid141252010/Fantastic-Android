@@ -25,11 +25,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -50,7 +47,7 @@ internal class AppleAlacCacheException(message: String, cause: Throwable? = null
 @UnstableApi
 internal class AppleAlacStreamReader(
     private val source: AppleResolvedSource,
-    private val scope: CoroutineScope,
+    scope: CoroutineScope,
 ) : AppleAlacReader {
     private val track = source.track
     override val cookie = track.alacCookie ?: throw IOException("该曲目没有所选音质")
@@ -60,28 +57,31 @@ internal class AppleAlacStreamReader(
     private var fragment: ByteArray? = null
     private var ranges = emptyList<AppleSampleRange>()
     private var packetIndex = 0
-    private var upcoming: Deferred<ByteArray>? = null
+    private val window = AppleSegmentWindow(source.decrypt, track, scope, AppleSegmentPriority.Playback)
 
     override suspend fun seekTo(positionMs: Long): Long {
-        upcoming?.cancelAndJoin()
-        upcoming = null
+        fragment = null
+        ranges = emptyList()
+        packetIndex = 0
+        index = -1
+        window.reset()
         if (track.media.segments.isEmpty()) throw IOException("ALAC 播放列表为空")
         index = track.media.segments.indexOfLast { it.startMs <= positionMs }.coerceAtLeast(0)
-        val raw = withContext(Dispatchers.IO) { source.decrypt.fetchSegment(track, index) }
-        install(raw)
-        prefetch()
+        install(window.read(index))
         return Math.multiplyExact(track.media.segments[index].startMs, 1000L)
     }
 
     override suspend fun readPacket(): ByteArray? {
         currentCoroutineContext().ensureActive()
         if (packetIndex == ranges.size) {
-            val next = upcoming ?: return null
-            val raw = next.await()
-            upcoming = null
-            index++
+            val next = index + 1
+            if (index < 0 || next >= track.media.segments.size) return null
+            fragment = null
+            ranges = emptyList()
+            packetIndex = 0
+            val raw = window.read(next)
+            index = next
             install(raw)
-            prefetch()
         }
         val range = ranges[packetIndex++]
         return checkNotNull(fragment).copyOfRange(range.start, range.end)
@@ -94,20 +94,12 @@ internal class AppleAlacStreamReader(
         packetIndex = 0
     }
 
-    private fun prefetch() {
-        if (index + 1 < track.media.segments.size) {
-            val next = index + 1
-            upcoming = scope.async(Dispatchers.IO) { source.decrypt.fetchSegment(track, next) }
-        }
-    }
-
     override suspend fun close() {
-        val pending = upcoming
-        upcoming = null
-        pending?.cancel()
-        withContext(NonCancellable) { pending?.cancelAndJoin() }
         fragment = null
         ranges = emptyList()
+        packetIndex = 0
+        index = -1
+        window.close()
     }
 }
 

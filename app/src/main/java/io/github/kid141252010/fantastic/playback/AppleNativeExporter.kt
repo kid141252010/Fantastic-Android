@@ -15,10 +15,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -68,26 +64,35 @@ internal class AppleNativeExporter(private val context: Context, private val api
             var totalDuration = 0L
             try {
                 FileOutputStream(payloadFile, false).use { spool ->
-                    for (index in track.media.segments.indices) {
-                        coroutineContext.ensureActive()
-                        val raw = decrypt.fetchSegment(track, index)
-                        val segment = track.media.segments[index]
-                        val parsed = parseFragment(raw, source.trackId, segment.keyKind == KeyKind.WIDEVINE, drm?.kid, source.ivSize)
-                        val bytes = if (drm != null) decryptWidevine(raw, parsed, drm) else raw
-                        for (chunk in parsed.chunks) {
-                            if (chunk.samples.isEmpty()) continue
-                            val spoolStart = spoolPosition
-                            for (sample in chunk.samples) {
-                                if (sample.offset < 0 || sample.size < 0 || sample.offset.toLong() + sample.size > bytes.size.toLong()) throw badMp4()
-                                spool.write(bytes, sample.offset, sample.size)
-                                spoolPosition = Math.addExact(spoolPosition, sample.size.toLong())
+                    supervisorScope {
+                        val window = AppleSegmentWindow(decrypt, track, this, AppleSegmentPriority.Background)
+                        try {
+                            for (index in track.media.segments.indices) {
+                                coroutineContext.ensureActive()
+                                val raw = window.read(index)
+                                val segment = track.media.segments[index]
+                                val parsed = parseFragment(raw, source.trackId, segment.keyKind == KeyKind.WIDEVINE, drm?.kid, source.ivSize)
+                                val bytes = if (drm != null) decryptWidevine(raw, parsed, drm) else raw
+                                for (chunk in parsed.chunks) {
+                                    if (chunk.samples.isEmpty()) continue
+                                    val written = ArrayList<Sample>(chunk.samples.size)
+                                    var totalSize = 0
+                                    for (sample in chunk.samples) {
+                                        if (sample.offset < 0 || sample.size < 0 || sample.offset.toLong() + sample.size > bytes.size.toLong()) throw badMp4()
+                                        written += Sample(sample.duration, sample.size, spoolPosition, sample.index)
+                                        spoolPosition = Math.addExact(spoolPosition, sample.size.toLong())
+                                        totalSize = Math.addExact(totalSize, sample.size)
+                                    }
+                                    // parseFragment emits contiguous offsets within each trun/chunk.
+                                    spool.write(bytes, chunk.samples.first().offset, totalSize)
+                                    chunks += Chunk(written)
+                                }
+                                totalDuration = Math.addExact(totalDuration, parsed.duration)
+                                progress((index + 1) * 70 / track.media.segments.size.coerceAtLeast(1))
                             }
-                            chunks += Chunk(chunk.samples.mapIndexed { i, sample ->
-                                Sample(sample.duration, sample.size, spoolStart + chunk.samples.take(i).sumOf { it.size.toLong() }, sample.index)
-                            })
+                        } finally {
+                            window.close()
                         }
-                        totalDuration = Math.addExact(totalDuration, parsed.duration)
-                        progress((index + 1) * 70 / track.media.segments.size.coerceAtLeast(1))
                     }
                 }
                 if (chunks.isEmpty() || totalDuration <= 0) throw IOException("Apple 音频轨道为空")
@@ -110,6 +115,7 @@ internal class AppleNativeExporter(private val context: Context, private val api
                     output.write(ftyp); output.write(moov)
                     var written = ftyp.size.toLong() + moov.size
                     RandomAccessFile(payloadFile, "r").use { spool ->
+                        val buffer = ByteArray(64 * 1024)
                         for ((groupIndex, group) in mdatPlan.groups.withIndex()) {
                             coroutineContext.ensureActive()
                             val groupSize = group.sumOf { c -> c.samples.sumOf { it.size.toLong() } }
@@ -117,7 +123,6 @@ internal class AppleNativeExporter(private val context: Context, private val api
                             for (chunk in group) for (sample in chunk.samples) {
                                 spool.seek(sample.dataOffset)
                                 var remaining = sample.size
-                                val buffer = ByteArray(64 * 1024)
                                 while (remaining > 0) {
                                     coroutineContext.ensureActive()
                                     val count = minOf(remaining, buffer.size)
@@ -182,27 +187,12 @@ internal class AppleNativeExporter(private val context: Context, private val api
                 file.write(box("ftyp", concat(bytes("M4A "), u32(1), bytes("M4A "), bytes("mp42"), bytes("isom"), bytes("iso5"))))
                 file.write(u32(1)); file.write(bytes("mdat")); file.write(u64(0))
                 supervisorScope {
-                    // The consuming fragment stays in the window until muxed, including its byte budget.
-                    val window = ArrayDeque<Pair<Int, Deferred<ByteArray>>>()
-                    var next = 0
-                    var buffered = 0L
-                    fun fill() {
-                        while (next < track.media.segments.size && window.size < AUDIO_LANES) {
-                            val length = track.media.segments[next].range.length
-                            if (length <= 0) throw badMp4()
-                            if (window.isNotEmpty() && (length > APPLE_ALAC_SEGMENT_BUFFER_BYTES ||
-                                    buffered > APPLE_ALAC_SEGMENT_BUFFER_BYTES - length)) break
-                            val index = next++
-                            buffered = Math.addExact(buffered, length)
-                            window.addLast(index to async(Dispatchers.IO) { source.decrypt.fetchSegment(track, index) })
-                        }
-                    }
+                    val window = AppleSegmentWindow(source.decrypt, track, this, AppleSegmentPriority.Background,
+                        legacyLookahead = AUDIO_LANES)
                     try {
-                        fill()
-                        while (window.isNotEmpty()) {
+                        for (index in track.media.segments.indices) {
                             coroutineContext.ensureActive()
-                            val (index, pending) = window.first()
-                            val raw = pending.await()
+                            val raw = window.read(index)
                             val fragment = parseFragment(raw, metadata.trackId, false, null, metadata.ivSize)
                             for (chunk in fragment.chunks) {
                                 if (chunk.samples.isEmpty()) continue
@@ -212,26 +202,25 @@ internal class AppleNativeExporter(private val context: Context, private val api
                                     end = Math.addExact(end, sample.size.toLong())
                                 }
                                 reserveEnd(end)
+                                val totalSize = Math.toIntExact(end - file.filePointer)
                                 offsets += file.filePointer
+                                var dataOffset = file.filePointer
                                 val written = ArrayList<Sample>(chunk.samples.size)
                                 for (sample in chunk.samples) {
                                     coroutineContext.ensureActive()
-                                    val saved = Sample(sample.duration, sample.size, file.filePointer, samples.size)
-                                    file.write(raw, sample.offset, sample.size)
+                                    val saved = Sample(sample.duration, sample.size, dataOffset, samples.size)
+                                    dataOffset = Math.addExact(dataOffset, sample.size.toLong())
                                     written += saved
                                     samples += saved
                                     durationTicks = Math.addExact(durationTicks, sample.duration.toLong())
                                 }
+                                file.write(raw, chunk.samples.first().offset, totalSize)
                                 chunks += Chunk(written)
                             }
-                            window.removeFirst()
-                            buffered -= track.media.segments[index].range.length
                             progress((index + 1) * 99 / track.media.segments.size)
-                            fill()
                         }
                     } finally {
-                        for ((_, pending) in window) pending.cancel()
-                        withContext(NonCancellable) { for ((_, pending) in window) pending.cancelAndJoin() }
+                        window.close()
                     }
                 }
                 if (samples.isEmpty() || durationTicks <= 0) throw IOException("Apple 音频轨道为空")

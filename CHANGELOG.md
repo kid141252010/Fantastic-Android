@@ -1,5 +1,13 @@
 # 更新日志
 
+## Fantastic Android 1.4.4
+
+本次优化 Apple 分片获取与整首缓存流水线，按 patch 从 1.4.3 升级到 1.4.4，本地版本号增至 13。
+
+- 为当前播放／定位保留分片准入位，共用有界预取窗口；仅在精确 206 与强 ETag 验证后扩大后续分片并发，保留原 single-flight、焦点和 seek 隔离。
+- 两条 Apple 导出路径重叠网络与单一 writer 的顺序封装，合并连续 chunk 写入并复用 spool buffer；缓存发布与完整性校验保持不变。
+- 增加 DEBUG 分片、窗口和真实 HTTP wire 诊断。实际并发、取消／seek、可听播放和缓存完成时长尚未设备验收，不据构建结果宣称卡顿修复或量化提速。
+
 ## Fantastic Android 1.4.3
 
 本次为 Apple Music ALAC 原生播放的音频焦点缺陷修复，按 patch 从 1.4.2 升级到 1.4.3，本地版本号增至 12。
