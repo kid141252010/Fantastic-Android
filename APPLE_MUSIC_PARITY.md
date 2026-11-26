@@ -69,6 +69,16 @@
 - 本任务验证：带私有字体的 fresh `compileDebugKotlin --offline --rerun-tasks` 13s 成功，17 项全部执行；`assembleDebug --offline` 8s 成功。验收 APK 沿用基线 `1.3.1 / 8`，正式 applicationId 加既有公开 Debug v2 签名（不是发行签名或 `.debug` 并存包）；25 字体逐项大小/SHA-256 匹配，三个 TTC 未压缩。未新增或运行自动化测试/断言。
 - 本机真实转发器以原 OkHttp UA 转发 `/status` 与 `/amp/v1/storefronts`，分别取得 HTTP 200、wrapper `[ca]` 及 172 个含 `ca/jp/us` 的目录条目；这不是 app 页面验收，也不是固定地区数。专用 API34 `emulator-5620` 于 32.5s 启动，新 APK 安装 Success 并启动；75.6s 观察到 app 创建 v1、单服务器条目的缓存文件，但两路仍未成功取得数据，列表均为 null。设备上游连通诊断 25s 超时，宿主 `screenLocked=true`；未操作页面、未取得本轮 UI 截图，菜单位置/滚动、切区请求/分页/建议、成功缓存重启复用、手动刷新及失败保留、草稿服务器隔离、旧详情销毁与音频连续性均未通过手动验收。日志位于任务树忽略目录 `.work/apple-search-region-qa/`；没有清理任何既有设备数据。
 
+## Apple ALAC 音频焦点
+
+- 此修复遵循 Android 官方[音频焦点生命周期](https://developer.android.com/media/optimize/audio-focus)，不声称已取得 Apple Music 官方客户端的焦点参数。仅在 `ApplePlaybackEngine` 内管理自建 ALAC `AudioTrack`；焦点请求与输出共用 `USAGE_MEDIA`／`CONTENT_TYPE_MUSIC` 属性，使用 `AUDIOFOCUS_GAIN` 和延迟获焦。未设置 `setWillPauseWhenDucked(true)`；系统自动 duck 保留，收到 duck 回调时按批准方案以 `0.2f` 兜底，gain 恢复 `1.0f`，此系数不是 Apple 官方参数。
+- 实现约定：登记当前输出后、首次 play／PCM 写入前请求焦点；延迟获焦等待且不报告源错误，失败沿现有错误通道显示“音频焦点不可用”。瞬时丢焦暂停并保留用户播放意图，gain 仅恢复仍有效且用户未暂停的播放；永久丢焦保存真实播放头、取消并清空输出，手动播放从保存位置重建解码器。在线 ALAC 在统一启动点登记 source，使位置保存及手动恢复使用真实 ALAC 播放头。
+- 用户暂停、停止、切歌、源错误、自然结束、服务释放及转入 Media3 时撤销 ALAC 焦点请求；每次撤销使回调 epoch 失效，回调另核对当前 request serial，不能启动已取消的输出。seek 保留同一有效请求并为重建输出保留 duck 音量；旧 generation 的 finally 不撤销新输出的焦点。`PlaybackService`、`FantasticSessionPlayer`、清单及两个既有 Media3 `setAudioAttributes(..., true)` 未改变。
+- 焦点等待期间引擎 `isPlaying=false`、`buffering=false`，真实网络等待仍由输出状态判断。既有会话适配器会把 `playWhenReady && !isPlaying` 映射为 `STATE_BUFFERING`；本任务遵照范围未改适配器，不能据此声称会话已单独呈现焦点抑制原因。
+- 构建证据：隔离分支 `fix/apple-audio-focus` 基于 `f7d6fae`，版本保留 `1.4.1 / 10`。Temurin 17.0.21.1+2、Gradle 8.11.1、SDK 35，显式 `includeLocalAmFonts=true`；fresh 离线 Kotlin 编译 19s 成功、17 项全部执行；独立 Debug 构建 10s 成功。未重编 JNI，未新增或运行自动化测试／断言／lint。
+- APK：任务树 `app/build/outputs/apk/debug/app-debug.apk`，197966928 字节，SHA-256 `850aef692d13219757f4c44893e9f71b644ae84c8c495bc2df38ccb669d83263`。正式 applicationId 加原公开 Debug v2 签名（非发行签名，非 `.debug` 并存包）；25 字体及 8 JNI 库逐项匹配，三个 TTC 未压缩，16KiB zipalign 通过。详细证据位于根工作树忽略目录 `.work/apple-audio-focus-qa/`。
+- 构建后 `adb devices -l` 无设备；未安装、未清缓存。实际 ALAC 出声前获焦、第二音频应用打断、瞬时恢复位置、永久丢焦保持暂停、duck／恢复音量、MediaSession 状态、Media3 `mode=mse` 回归以及停止／释放后无迟到恢复均未端上验收；源码和 APK 核验不能代替实际扬声器与日志证据。
+
 ## 设备验收
 
 多数原先列为待实机验收的项目已由项目维护者在实机验收。下表汇总有具体曲目或操作记录的场景。
