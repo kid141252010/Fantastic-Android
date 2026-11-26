@@ -13,21 +13,29 @@ android {
     sourceSets.getByName("main").assets.srcDir(generatedLicenseAssets)
     // Optional private fonts exist only in this checkout; CI without them uses Android fonts.
     val localAmFontAssets = rootProject.file(".work/local-am-fonts/assets")
-    if (providers.gradleProperty("includeLocalAmFonts").orNull != "false" && localAmFontAssets.isDirectory) {
+    val includeLocalAmFonts = providers.gradleProperty("includeLocalAmFonts").orNull
+    if (includeLocalAmFonts == "true") {
+        require(localAmFontAssets.isDirectory) { "Local Apple font assets are missing: $localAmFontAssets" }
+    }
+    if (includeLocalAmFonts != "false" && localAmFontAssets.isDirectory) {
+        val requiredFonts = listOf(
+            "sf_pro_android_ui.ttf", "sf_pro_rounded_android_ui.ttf",
+            "pingfang.ttc", "hiragino_sans.ttc", "apple_sd_gothic_neo.ttc",
+        )
+        val missingFonts = requiredFonts.filterNot { localAmFontAssets.resolve("am-fonts/$it").isFile }
+        require(missingFonts.isEmpty()) { "Incomplete local Apple font assets: ${missingFonts.joinToString()}" }
         sourceSets.getByName("main").assets.srcDir(localAmFontAssets)
-        // Map the large font collection directly from the APK and share it across typefaces.
-        if (localAmFontAssets.resolve("am-fonts/pingfang_ui.ttc").isFile) {
-            androidResources.noCompress += "ttc"
-        }
+        // Map the CJK collections directly from the APK; share their buffers across text sizes.
+        androidResources.noCompress += "ttc"
     }
 
     defaultConfig {
         applicationId = "io.github.kid141252010.fantastic"
         minSdk = 26
         targetSdk = 35
-        val releaseVersionCode = 7
+        val releaseVersionCode = 8
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt()?.coerceAtLeast(releaseVersionCode) ?: releaseVersionCode
-        versionName = "1.3.0"
+        versionName = "1.3.1"
         // 设置页「歌词诊断」显示构建对应的提交，便于确认手机上装的是哪个 nightly
         buildConfigField("String", "GIT_SHA", "\"${(System.getenv("GITHUB_SHA") ?: "local").take(7)}\"")
     }

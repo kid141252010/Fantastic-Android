@@ -1,5 +1,11 @@
 # 更新日志
 
+## Fantastic Android 1.3.1
+
+本次为字体与界面显示调整，按 patch 从 1.3.0 升级到 1.3.1，本地版本号增至 8。
+
+- 本地私有字体按 Apple 的 CJK 建议替换：中文使用苹方简／繁／港，日文使用 Hiragino Sans，韩文使用 Apple SD Gothic Neo；界面和歌词共用语言感知回退链与真实字重。字体仅参与本机打包，不进 Git；公开构建仍用系统字体。
+
 ## 未发布
 
 - 撤回 Apple Music 原生化播放。在线播放和下载重新使用 Fantastic 网页播放器。
