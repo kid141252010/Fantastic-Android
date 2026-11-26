@@ -389,7 +389,7 @@ internal suspend fun parseNativeTtml(xml: String, preferredLanguage: String, qrc
     )
 }
 
-private fun startsRtl(text: String): Boolean {
+internal fun startsRtl(text: String): Boolean {
     var index = 0
     while (index < text.length) {
         val point = text.codePointAt(index)

@@ -89,6 +89,15 @@
 - APK：任务树 `app/build/outputs/apk/debug/app-debug.apk`，197966928 字节，SHA-256 `850aef692d13219757f4c44893e9f71b644ae84c8c495bc2df38ccb669d83263`。正式 applicationId 加原公开 Debug v2 签名（非发行签名，非 `.debug` 并存包）；25 字体及 8 JNI 库逐项匹配，三个 TTC 未压缩，16KiB zipalign 通过。详细证据位于根工作树忽略目录 `.work/apple-audio-focus-qa/`。
 - 构建后 `adb devices -l` 无设备；未安装、未清缓存。实际 ALAC 出声前获焦、第二音频应用打断、瞬时恢复位置、永久丢焦保持暂停、duck／恢复音量、MediaSession 状态、Media3 `mode=mse` 回归以及停止／释放后无迟到恢复均未端上验收；源码和 APK 核验不能代替实际扬声器与日志证据。
 
+## 歌词三类行凸显变换修正
+
+- 原版固定为 Apple Music Android 7.0.0 / 1614，`applemusic.apk` SHA-256 为 `49e83b64fccff79310c7dff174e02228dd0455a3d87df4d9655d1e4f8cd2e351`。依据原版 `lyrics_line_karaoke.xml`、`C4022z.U` 与 `z.smali` 的实际 animator target／`end()`，不以 Java 的 `j0` 占位实现推导语义。
+- Word 前景主词、配对或既有回退音译及译文共用一次父组矩阵，轴取实际 Flexbox 外框的物理左／右底角。外框沿用文本 edge 与窄行宽度，再包含横向 12dp padding；底边包含已显示注释和全部折行，但不含行根底部 10dp 或伴唱。伴唱是兄弟组，只应用自身 `.9↔1`，不再乘前景 `.98↔1`；clip／alpha 层先回到原行坐标，最终恢复根 Canvas checkpoint。
+- 选轴复用 `NativeTtmlParser.startsRtl` 的首 letter U+0590…U+06FF 分类。Word 的 `duetRightAligned` 已是物理侧，非 null 时直接使用（含 false），否则只分类前景主词；伴唱跟随此前景物理侧，不再次 XOR。逐句主词、音译、译文仍为独立完整文本、各自底边，并共享本声部主词的选轴侧别；None、间奏、创作者以及原有 Bidi 排版和扫亮方向不变。
+- 行级真实状态改向使用固定端点：进入 scale `.98→1`／alpha `0→1`，退出反向；延迟期间保持新方向固定起点，不从打断瞬间采样值续接。保留既有 scale 进入 150ms＋500ms、退出 50ms＋350ms，alpha 进入 250ms＋250ms、退出 250ms＋350ms 及两套原曲线。同状态不重启，deferRetirement 仍提前返回，snap／低动态仍直接目标；注释 payload 只重建几何，不重置同行 emphasized、scaleAt／alphaAt 或播放位置，跨行绑定仍初始化。
+- 不改行级 native 集合事件时刻、列表位移、音频时钟、+100ms 扫亮、字级 −2dp 上浮／长音及退场回落。伴唱 22dp 间隔、高度与显现时序仍沿用现状；原版高度 ValueAnimator 的 q／r 回调未确认，不宣称其过渡 pivotY 已逐帧等价。仅覆盖现有主词主位模式，不把解析纯文本与 native HTML 的所有混排输入称为像素等价。
+- 静态几何手算：令前景轴 `(20,150)`，未缩放点 A `(32,40)`、B `(140,40)`、R `(32,80)`、T `(32,120)`；统一 `.98` 矩阵得到 `(31.76,42.2)`、`(137.6,42.2)`、`(31.76,81.4)`、`(31.76,120.6)`，s=1 恢复原点。这不是 Apple 实测参数或设备调用结果。固定端点中途改向、注释动画中重排、Word 兄弟组、Line 三类文本、窄行／RTL 和低动态均须另有真实设备输入及中间帧证据；编译与包体核验不等于视觉验收。
+
 ## 设备验收
 
 多数原先列为待实机验收的项目已由项目维护者在实机验收。下表汇总有具体曲目或操作记录的场景。
