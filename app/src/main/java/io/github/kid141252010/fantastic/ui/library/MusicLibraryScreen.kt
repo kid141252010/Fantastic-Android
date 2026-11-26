@@ -101,7 +101,8 @@ import java.text.Collator
 /** Offline catalog library, favorites, local playlists and nested playlist folders. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavigationRequest: Int, backEnabled: Boolean, onOpen: (CatalogHit) -> Unit) {
+fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavigationRequest: Int, backEnabled: Boolean,
+    onOpen: (CatalogHit) -> Unit, onOpenAlbumArtist: (CatalogHit, Int) -> Unit) {
     val snapshot by app.library.snapshot.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -160,9 +161,14 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     val albumEntry = libraryAlbum?.let { key -> albums.firstOrNull { it.stableKey == key } }
     if (albumEntry != null) {
         val savedTracks = remember(albumEntry, snapshot.items) { libraryAlbumTracks(albumEntry, snapshot.items) }
+        val artistAlbumKey = albumEntry.stableKey
+        val artistRootRequest = rootNavigationRequest
         pageState.SaveableStateProvider(albumEntry.stableKey) {
             LibraryAlbumScreen(app, albumEntry, savedTracks, showLibrarySources, backEnabled = backEnabled,
-                onBack = { libraryAlbum = null }, onOpenCatalog = onOpen)
+                onBack = { libraryAlbum = null }, onOpenCatalog = onOpen,
+                onOpenArtist = { hit ->
+                    if (libraryAlbum == artistAlbumKey) onOpenAlbumArtist(hit, artistRootRequest)
+                })
         }
         return
     }

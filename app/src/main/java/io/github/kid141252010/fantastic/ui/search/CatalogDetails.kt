@@ -84,6 +84,8 @@ import io.github.kid141252010.fantastic.data.QqSong
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
 import io.github.kid141252010.fantastic.data.catalogCountry
+import io.github.kid141252010.fantastic.data.albumMetadataRevision
+import io.github.kid141252010.fantastic.data.albumArtistHits
 import io.github.kid141252010.fantastic.data.libraryTrackCount
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.toTrack
@@ -867,6 +869,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
                 }, if (song.mv.isNotBlank()) "此歌曲有音乐视频；当前音频队列不支持视频播放。" else null)
         }
         "album" -> {
+            val expectedRevision = app.library.snapshot.value.albumMetadataRevision(target.source, target.id)
             val qqAlbum = if (target.source == Source.QQ) qq("album") else null
             val neteaseAlbum = if (qqAlbum == null) app.netease.album(target.id) else null
             val album = neteaseAlbum?.album ?: json.decodeFromJsonElement<NeteaseAlbum>(qqAlbum!!.getValue("album"))
@@ -880,7 +883,8 @@ private class DetailRepository(private val app: FantasticApp, private val target
                     artworkTemplate = song.artworkTemplate?.takeIf { it.isNotBlank() } ?: album.cover.ifBlank { null })
             }
             album.size.libraryTrackCount(tracks.size)?.let { count ->
-                app.library.recordAlbumMetadata(LibraryAlbumMetadata(target.source, target.id, albumArtist, albumTracks, count))
+                app.library.recordAlbumMetadata(LibraryAlbumMetadata(target.source, target.id, albumArtist, albumTracks, count,
+                    artists = albumArtistHits(target.source, album.artists)), expectedRevision)
             }
             DetailPage(album.name, albumArtist, artwork(album.cover), detailPlainText(JsonPrimitive(album.description)),
                 buildList {
