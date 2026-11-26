@@ -125,6 +125,8 @@ internal class LyricInkView(context: Context) : View(context) {
     private var backingScaleTarget = LyricMotion.backingScale
     private var backingScaleAt = 0L
     private var backingScaleDuration = 0L
+    private var foregroundPivotX = 0f
+    private var foregroundPivotY = 0f
     private var backingPivotX = 0f
     private var backingPivotY = 0f
     private val rowPressInsetPx = dp(KARAOKE_ROW_MARGIN_DP).roundToInt()
@@ -346,11 +348,11 @@ internal class LyricInkView(context: Context) : View(context) {
         } else if (emphasized != this.emphasized) {
             if (emphasized) resetWordLift()
             else if (wordLiftTime != Long.MIN_VALUE) wordLiftReturnAt = now
-            scaleFrom = currentScale(now)
+            scaleFrom = if (emphasized) LyricMotion.normalScale else 1f
             scaleTarget = target
             scaleAt = now + if (emphasized) LyricMotion.scaleEnterDelayMs else LyricMotion.scaleExitDelayMs
             scaleDuration = if (emphasized) LyricMotion.scaleEnterMs else LyricMotion.scaleExitMs
-            alphaFrom = currentAlpha(now)
+            alphaFrom = if (emphasized) 0f else 1f
             alphaTarget = if (emphasized) 1f else 0f
             alphaAt = now + if (emphasized) LyricMotion.lineAlphaEnterDelayMs else LyricMotion.lineAlphaExitDelayMs
             alphaDuration = if (emphasized) LyricMotion.lineAlphaEnterMs else LyricMotion.lineAlphaExitMs
@@ -744,16 +746,22 @@ internal class LyricInkView(context: Context) : View(context) {
         blocks.clear()
         groups.clear()
         sweepRows.clear()
+        foregroundPivotX = 0f
+        foregroundPivotY = 0f
         val model = line
         val edge = dp(if (isStatic && model != null) 16f else 32f)
         val usable = (width - 2 * edge).toInt().coerceAtLeast(1)
         val duetRightAligned = model?.duetRightAligned
+        val wordRightAligned = if (isWord && model != null) duetRightAligned ?: startsRtl(model.main.text) else false
         val available = if (model?.narrow == true && duetRightAligned != null) {
             // The width fraction applies inside the row margins, before text padding.
             val margin = dp(KARAOKE_ROW_MARGIN_DP)
             ((width - 2 * margin) * .85f - 2 * (edge - margin)).roundToInt().coerceAtLeast(1)
         } else usable
         val x = if (duetRightAligned == true) width - edge - available else edge
+        val padding = edge - dp(KARAOKE_ROW_MARGIN_DP)
+        val frameLeft = x - padding
+        val frameRight = x + available + padding
         var y = if (isStatic && model != null) 0f else dp(2f)
 
         fun addText(
@@ -793,7 +801,11 @@ internal class LyricInkView(context: Context) : View(context) {
             val tokens = voice.tokens
             val hasTimed = tokens.any { it.isTimed && it.text.isNotBlank() }
             val plain = voice.text
-            val rightAligned = duetRightAligned ?: (Bidi(plain, Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT).baseLevel == 1)
+            val rightAligned = when {
+                isWord -> wordRightAligned
+                !isStatic -> startsRtl(voice.text)
+                else -> duetRightAligned ?: (Bidi(plain, Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT).baseLevel == 1)
+            }
             val mainSize = if (isStatic) LyricMotion.legacyMainSp else if (backing) LyricMotion.backgroundSp else LyricMotion.karaokeMainSp
             val timed = isWord && hasTimed
             val paired = timed && showPronunciation && tokens.any { it.pronunciation.isNotBlank() }
@@ -825,7 +837,9 @@ internal class LyricInkView(context: Context) : View(context) {
             sealSweepRows(firstSweepRow)
             if (backing) {
                 backingPivotY = y
-                backingPivotX = x + if (rightAligned) available else 0
+                backingPivotX = if (isWord) {
+                    if (wordRightAligned) frameRight else frameLeft
+                } else x + if (rightAligned) available else 0
             }
         }
 
@@ -840,6 +854,10 @@ internal class LyricInkView(context: Context) : View(context) {
                         weight = 400, attribution = true)
                 }
             }
+        }
+        if (isWord && model != null) {
+            foregroundPivotX = if (wordRightAligned) frameRight else frameLeft
+            foregroundPivotY = y
         }
         val bottomPadding = dp(if (isStatic && model != null) 11f else 10f)
         collapsedContentHeight = (y + bottomPadding).roundToInt()
@@ -1053,6 +1071,9 @@ internal class LyricInkView(context: Context) : View(context) {
         }
         val scale = if (isStatic) 1f else currentScale(now)
         val saved = canvas.save()
+        val wordContainerMode = isWord && line != null
+        val foregroundSaved = if (wordContainerMode) canvas.save() else saved
+        if (wordContainerMode) canvas.scale(scale, scale, foregroundPivotX, foregroundPivotY)
         var drawingBacking = false
         var hasReturningLift = false
         for (blockIndex in blocks.indices) {
@@ -1060,17 +1081,22 @@ internal class LyricInkView(context: Context) : View(context) {
             if (block.backing) {
                 if (!backgroundVisible || backingAlpha <= 0f) continue
                 if (!drawingBacking) {
+                    // Native karaoke voices are siblings; backing clip/alpha stay in row coordinates.
+                    if (wordContainerMode) canvas.restoreToCount(foregroundSaved)
                     drawingBacking = true
                     // RecyclerView allows ink overflow; clip only the opening backing voice to the row.
                     if (expandingBacking) canvas.clipRect(0, 0, width, height)
                     // j0 fades the contiguous backing blocks as one group, including masks and annotations.
                     if (backingAlpha < 1f) canvas.saveLayerAlpha(0f, 0f, width.toFloat(), height.toFloat(),
                         (255 * backingAlpha).roundToInt())
+                    if (wordContainerMode) canvas.scale(backingScale, backingScale, backingPivotX, backingPivotY)
                 }
             }
             val shifted = canvas.save()
-            canvas.scale(scale, scale, block.pivotX, block.pivotY)
-            if (block.backing) canvas.scale(backingScale, backingScale, backingPivotX, backingPivotY)
+            if (!wordContainerMode) {
+                canvas.scale(scale, scale, block.pivotX, block.pivotY)
+                if (block.backing) canvas.scale(backingScale, backingScale, backingPivotX, backingPivotY)
+            }
             canvas.translate(block.x, block.y)
             if (block.scaleX != 1f) canvas.scale(block.scaleX, 1f)
             if (block.bands.isEmpty()) {
