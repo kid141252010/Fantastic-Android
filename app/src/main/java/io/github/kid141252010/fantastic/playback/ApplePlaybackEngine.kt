@@ -13,6 +13,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -26,21 +27,25 @@ import io.github.kid141252010.fantastic.data.reportedAudioDetails
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.coroutines.coroutineContext
 
 internal data class ApplePlaybackProfile(val network: String, val quality: String, val spatial: String)
 
@@ -72,10 +77,16 @@ internal data class AppleCacheSource(
     val durationMs: Long,
     val server: String,
     val storefront: String,
+    val resolvedAlac: AppleResolvedSource? = null,
 )
 
 @UnstableApi
-internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, private val api: FantasticApi) {
+internal class ApplePlaybackEngine(
+    context: Context,
+    private val prefs: Prefs,
+    private val api: FantasticApi,
+    private val cache: PlaybackCache,
+) {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -96,8 +107,14 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
     private var occurrence = -1
     private var mediaPlayer: ExoPlayer? = null
     private var requestJob: Job? = null
+    private var alacJob: Job? = null
+    private val alacRunMutex = Mutex()
     private var serverMonitorJob: Job? = null
-    private var nativeDecrypt: AppleNativeDecrypt? = null
+    private sealed interface AlacSource {
+        data class Online(val source: AppleResolvedSource) : AlacSource
+        data class Cached(val entry: PlaybackCacheEntry) : AlacSource
+    }
+    private var activeAlacSource: AlacSource? = null
     private var activeTrack: AppleResolvedTrack? = null
     private var activeProfile = ApplePlaybackProfile("wifi", "hires", "auto")
     private var activeServer = ""
@@ -107,14 +124,28 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
     private var pendingPositionMs = 0L
     private var timelineInstalled = false
     private var pendingSeekBeforeTimeline = false
-    @Volatile private var alacOutput: AudioTrack? = null
-    @Volatile private var alacHandle = 0L
-    @Volatile private var alacSampleRate = 0
-    @Volatile private var alacChannels = 0
-    @Volatile private var alacStartFrame = 0L
-    @Volatile private var alacStartPositionMs = 0L
-    @Volatile private var alacSubmittedSerial = -1L
+    private val mediaWindow = Timeline.Window()
+    private class AlacRun(
+        val serial: Long,
+        val generation: Int,
+        val output: AudioTrack,
+        val handle: Long,
+        val sampleRate: Int,
+        val channels: Int,
+        val bits: Int,
+        val cacheFileId: String?,
+        val startPositionMs: Long,
+        val headBase: Long,
+    ) {
+        var submittedFrames = 0L
+        var playedFrames = 0L
+        var lastHead = headBase
+        var outputStarted = false
+    }
+
+    private var alacRun: AlacRun? = null
     private var loggedOutputSerial = -1L
+    private var pendingSeekLogGeneration: Int? = null
 
     internal val currentUid: Int get() = songs.getOrNull(occurrence)?.uid ?: -1
 
@@ -123,19 +154,20 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
     }
 
     fun position(): Long {
-        val track = activeTrack ?: return pendingPositionMs
         if (activeSerial != requestSerial) return pendingPositionMs
         val currentSong = songs.getOrNull(occurrence) ?: return pendingPositionMs
         if (_state.value.queueIndex != occurrence || _state.value.mediaId != "apple:${currentSong.track.id}") return pendingPositionMs
-        val duration = track.media.durationMs.takeIf { it > 0L }
-            ?: songs.getOrNull(occurrence)?.track?.durationMs?.takeIf { it > 0L }
-        val position = if (track.variant.groupId.contains("alac", true)) {
-            val output = alacOutput ?: return pendingPositionMs
-            val rate = alacSampleRate.takeIf { it > 0 } ?: return pendingPositionMs
-            val frames = output.playbackHeadPosition.toLong() and 0xffff_ffffL
-            alacStartPositionMs + (frames - alacStartFrame).coerceAtLeast(0L) * 1000L / rate
+        val duration = _state.value.durationMs.takeIf { it > 0L } ?: currentSong.track.durationMs.takeIf { it > 0L }
+        val position = if (activeAlacSource != null) {
+            val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) && it.outputStarted }
+                ?: return pendingPositionMs
+            val head = run.output.playbackHeadPosition.toLong() and 0xffff_ffffL
+            val advanced = (head - run.lastHead) and 0xffff_ffffL
+            run.lastHead = head
+            run.playedFrames = (run.playedFrames + advanced).coerceAtMost(run.submittedFrames)
+            run.startPositionMs + run.playedFrames * 1000L / run.sampleRate
         } else {
-            if (!timelineInstalled) return pendingPositionMs
+            if (!timelineInstalled || !hasRealMedia3Timeline(activeSerial)) return pendingPositionMs
             (mediaPlayer?.currentPosition ?: pendingPositionMs).coerceAtLeast(0L)
         }
         return position.coerceAtMost(duration ?: Long.MAX_VALUE)
@@ -145,6 +177,7 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         songs: List<QueuedSong>, index: Int, startPositionMs: Long = 0L,
         playWhenReady: Boolean = true, quality: String? = null,
         server: String = prefs.baseUrl, storefront: String = prefs.storefront,
+        skipCachedAlac: Boolean = false,
     ) = onMain {
         if (closed) return@onMain
         val selected = songs.getOrNull(index) ?: return@onMain
@@ -163,6 +196,7 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         timelineInstalled = false
         pendingSeekBeforeTimeline = false
         loggedOutputSerial = -1L
+        pendingSeekLogGeneration = null
         _state.value = previous.copy(
             connected = false,
             mediaId = "apple:${selected.track.id}",
@@ -186,29 +220,43 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
             qualityLabel = null,
             audioDetails = null,
         )
+        val key = PlaybackCacheKey.from(server, activeStorefront, Source.Apple, selected.track.id)
+        val profile = applePlaybackProfile(appContext, prefs, key?.let(cache::appleNetwork))
+        activeProfile = profile
+        val choice = requestedQuality ?: profile.quality
+        val cached = if (skipCachedAlac || key == null) null else cache.find(key, choice, profile)?.takeIf { it.isCompleteAppleAlac }
+        if (cached != null) {
+            activeServer = cached.key.server
+            activeSerial = serial
+            val source = AlacSource.Cached(cached)
+            activeAlacSource = source
+            _state.value = _state.value.copy(connected = true, durationMs = cached.durationMs)
+            releaseMediaPlayer()
+            startServerMonitor(serial)
+            startAlac(source, serial)
+            return@onMain
+        }
         if (!playWhenReady) return@onMain
         val normalized = SourceStatus.normalizeBaseUrl(server) ?: run {
             publishError("服务器地址无效")
             return@onMain
         }
         activeServer = normalized
-        activeProfile = applePlaybackProfile(appContext, prefs)
-        val profile = activeProfile
-        val choice = requestedQuality ?: profile.quality
         requestJob = scope.launch {
             try {
                 val decrypt = AppleNativeDecrypt(appContext, api, normalized)
                 val resolved = decrypt.prepare(selected.track.id, choice, profile)
                 if (closed || serial != requestSerial) return@launch
-                nativeDecrypt = decrypt
                 activeTrack = resolved
                 activeSerial = serial
                 val duration = resolved.media.durationMs.takeIf { it > 0L } ?: selected.track.durationMs
-                _state.value = _state.value.copy(connected = true, buffering = true, durationMs = duration)
+                _state.value = _state.value.copy(connected = true, buffering = _state.value.playWhenReady, durationMs = duration)
                 startServerMonitor(serial)
-                if (resolved.variant.groupId.contains("alac", true)) {
+                if (resolved.variant.groupId.contains("alac", true) && !resolved.variant.widevine) {
                     releaseMediaPlayer()
-                    playAlac(resolved, decrypt, serial, pendingPositionMs)
+                    val source = AlacSource.Online(AppleResolvedSource(resolved, decrypt))
+                    activeAlacSource = source
+                    startAlac(source, serial)
                 } else {
                     startMedia3(resolved, decrypt, serial, normalized)
                 }
@@ -232,10 +280,10 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
     fun pause() = onMain {
         val previous = _state.value
         if (!previous.playWhenReady) return@onMain
+        mediaPlayer?.pause()
+        runCatching { alacRun?.output?.pause() }
         pendingPositionMs = position()
         activeCacheSource = null
-        mediaPlayer?.pause()
-        runCatching { alacOutput?.pause() }
         _state.value = previous.copy(playWhenReady = false, isPlaying = false, buffering = false,
             bufferedPositionMs = pendingPositionMs)
     }
@@ -246,27 +294,27 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         val duration = state.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
         pendingPositionMs = ms.coerceIn(0L, duration)
         activeCacheSource = null
+        val source = activeAlacSource
+        val alac = source != null
+        val readyTimeline = !alac && timelineInstalled && hasRealMedia3Timeline(activeSerial)
         _state.value = state.copy(ended = false, seekGeneration = state.seekGeneration + 1,
+            isPlaying = if (readyTimeline) state.isPlaying else false,
+            buffering = if (readyTimeline) state.buffering else state.playWhenReady,
             bufferedPositionMs = pendingPositionMs)
-        val track = activeTrack ?: return@onMain
+        pendingSeekLogGeneration = _state.value.seekGeneration
+        val id = songs.getOrNull(occurrence)?.track?.id.orEmpty().appleLogToken()
+        Log.i("FantasticPlayback", "apple-seek id=$id occurrence=$currentUid request=$requestSerial " +
+            "seek=${_state.value.seekGeneration} targetMs=$pendingPositionMs")
         if (activeSerial != requestSerial) return@onMain
-        if (track.variant.groupId.contains("alac", true)) {
-            val serial = requestSerial
-            requestJob?.cancel()
-            releaseAlacOutput()
-            requestJob = scope.launch {
-                try {
-                    playAlac(track, nativeDecrypt ?: return@launch, serial, pendingPositionMs)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    if (isCurrent(serial)) publishError(error.message?.takeIf(String::isNotBlank) ?: "ALAC 播放失败")
-                }
-            }
+        if (source != null) {
+            // Generation invalidation above must precede cancellation and the old run's finally.
+            startAlac(source, requestSerial)
         } else {
             val player = mediaPlayer
-            if (player != null && timelineInstalled) player.seekTo(pendingPositionMs)
-            else pendingSeekBeforeTimeline = player != null
+            if (player != null && readyTimeline) {
+                player.seekTo(pendingPositionMs)
+                publishMedia3State(activeSerial)
+            } else pendingSeekBeforeTimeline = player != null
         }
     }
 
@@ -283,15 +331,25 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
                 playQueue(songs, state.queueIndex, if (state.ended) 0L else pendingPositionMs,
                     true, requestedQuality, scopeServer, activeStorefront)
             } else {
-                _state.value = state.copy(playWhenReady = true, ended = false)
-                mediaPlayer?.play()
-                val output = alacOutput
-                if (output != null) {
-                    output.play()
-                    if (alacSubmittedSerial == requestSerial) publishOutputStarted(requestSerial, "alac")
+                _state.value = state.copy(playWhenReady = true, buffering = true, ended = false)
+                if (isCurrent(activeSerial)) {
+                    mediaPlayer?.play()
+                    if (mediaPlayer != null) publishMedia3State(activeSerial)
                 }
-                if (mediaPlayer == null && output == null && requestJob == null) {
-                    playQueue(songs, state.queueIndex, pendingPositionMs, true, requestedQuality, prefs.baseUrl, prefs.storefront)
+                val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) }
+                if (run != null) {
+                    run.output.play()
+                    publishAlacState(run)
+                }
+                if (run == null && (mediaPlayer == null || !isCurrent(activeSerial)) &&
+                    requestJob?.isActive != true && alacJob?.isActive != true) {
+                    val source = activeAlacSource
+                    if (source != null && isCurrent(requestSerial)) {
+                        startAlac(source, requestSerial)
+                    } else {
+                        playQueue(songs, state.queueIndex, pendingPositionMs, true, requestedQuality,
+                            activeServer.takeIf(String::isNotBlank) ?: prefs.baseUrl, activeStorefront)
+                    }
                 }
             }
         }
@@ -312,13 +370,6 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         if (_state.value.repeatMode != mode) _state.value = _state.value.copy(repeatMode = mode)
     }
 
-    fun selectQuality(group: String) = onMain {
-        if (group !in CACHE_QUALITIES || occurrence !in songs.indices) return@onMain
-        val resumeAt = position()
-        val next = songs.toMutableList().apply { this[occurrence] = this[occurrence].copy(quality = group) }
-        val server = activeServer.takeIf(String::isNotBlank) ?: prefs.baseUrl
-        playQueue(next, occurrence, resumeAt, _state.value.playWhenReady, group, server, activeStorefront)
-    }
 
     fun close() = onMain {
         if (closed) return@onMain
@@ -332,6 +383,8 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
     }
 
     private fun startMedia3(track: AppleResolvedTrack, decrypt: AppleNativeDecrypt, serial: Long, server: String) {
+        if (finishAtResolvedEnd(track)) return
+        val playWhenReady = _state.value.playWhenReady
         val mediaItemBuilder = MediaItem.Builder()
             .setMediaId("apple:${songs.getOrNull(occurrence)?.track?.id.orEmpty()}")
             .setUri(Uri.parse("apple-native://$serial/playlist.m3u8"))
@@ -348,10 +401,11 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         val player = ensureMediaPlayer()
         timelineInstalled = false
         pendingSeekBeforeTimeline = false
+        _state.value = _state.value.copy(connected = true, isPlaying = false, buffering = playWhenReady)
+        player.playWhenReady = playWhenReady
         player.setMediaSource(source, pendingPositionMs)
         player.prepare()
-        player.playWhenReady = true
-        _state.value = _state.value.copy(connected = true, buffering = true, playWhenReady = true)
+        publishMedia3State(serial)
     }
 
     private fun ensureMediaPlayer(): ExoPlayer {
@@ -373,154 +427,249 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
     }
 
     private val mediaListener = object : Player.Listener {
-        override fun onIsPlayingChanged(isPlaying: Boolean) = onMain {
-            val serial = activeSerial
-            if (!isCurrent(serial)) return@onMain
-            val player = mediaPlayer ?: return@onMain
-            if (isPlaying) publishOutputStarted(serial, "mse") else activeCacheSource = null
-            _state.value = _state.value.copy(isPlaying = isPlaying, playWhenReady = player.playWhenReady,
-                buffering = player.playbackState == Player.STATE_BUFFERING)
-        }
+        override fun onIsPlayingChanged(isPlaying: Boolean) = onMain { publishMedia3State(activeSerial) }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = onMain {
-            val serial = activeSerial
-            if (isCurrent(serial)) _state.value = _state.value.copy(playWhenReady = playWhenReady)
+            publishMedia3State(activeSerial)
         }
 
-        override fun onPlaybackStateChanged(playbackState: Int) = onMain {
-            val serial = activeSerial
-            if (!isCurrent(serial)) return@onMain
-            val player = mediaPlayer ?: return@onMain
-            val ended = playbackState == Player.STATE_ENDED
-            if (ended) activeCacheSource = null
-            _state.value = _state.value.copy(
-                connected = true,
-                isPlaying = player.isPlaying,
-                playWhenReady = player.playWhenReady,
-                buffering = playbackState == Player.STATE_BUFFERING,
-                ended = ended,
-                bufferedPositionMs = player.bufferedPosition.coerceAtLeast(0L),
-            )
-        }
+        override fun onPlaybackStateChanged(playbackState: Int) = onMain { publishMedia3State(activeSerial) }
 
-        override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = onMain {
-            val serial = activeSerial
-            val player = mediaPlayer ?: return@onMain
-            if (!isCurrent(serial) || timeline.isEmpty) return@onMain
-            timelineInstalled = true
-            if (pendingSeekBeforeTimeline) {
-                pendingSeekBeforeTimeline = false
-                player.seekTo(pendingPositionMs)
-            }
-            pendingPositionMs = player.currentPosition.coerceAtLeast(0L)
-        }
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) = onMain { publishMedia3State(activeSerial) }
 
         override fun onPlayerError(error: PlaybackException) = onMain {
             val serial = activeSerial
-            if (!isCurrent(serial)) return@onMain
+            val player = mediaPlayer ?: return@onMain
+            if (!isCurrent(serial) || player.currentMediaItem?.localConfiguration?.uri?.host?.toLongOrNull() != serial) return@onMain
+            pendingPositionMs = position()
             val message = if (activeTrack?.variant?.widevine == true) AppleWidevineCallback.LICENSE_REJECTED
                 else error.message?.takeIf(String::isNotBlank) ?: "Apple 播放失败"
             publishError(message)
         }
     }
 
-    private suspend fun playAlac(track: AppleResolvedTrack, decrypt: AppleNativeDecrypt, serial: Long, startAtMs: Long) {
-        val cookie = track.alacCookie ?: throw IOException("该曲目没有所选音质")
-        val handle = AlacDecoder.openSafe(cookie)
-        if (handle == 0L) throw IOException("该曲目没有所选音质")
-        val channels = AlacDecoder.channels(handle)
-        val sampleRate = AlacDecoder.sampleRate(handle)
-        val bits = AlacDecoder.bits(handle)
-        if (channels !in 1..8 || sampleRate <= 0 || bits !in setOf(16, 20, 24, 32)) {
-            AlacDecoder.closeSafe(handle)
-            throw IOException("ALAC 解码器初始化失败")
+    private fun hasRealMedia3Timeline(serial: Long): Boolean {
+        val player = mediaPlayer ?: return false
+        if (!isCurrent(serial) || player.currentMediaItem?.localConfiguration?.uri?.host?.toLongOrNull() != serial) return false
+        val timeline = player.currentTimeline
+        val index = player.currentMediaItemIndex
+        return index in 0 until timeline.windowCount && !timeline.getWindow(index, mediaWindow).isPlaceholder
+    }
+
+    private fun publishMedia3State(serial: Long) {
+        val player = mediaPlayer ?: return
+        if (!isCurrent(serial) || player.currentMediaItem?.localConfiguration?.uri?.host?.toLongOrNull() != serial) return
+        if (!hasRealMedia3Timeline(serial)) {
+            timelineInstalled = false
+            activeCacheSource = null
+            val state = _state.value
+            _state.value = state.copy(isPlaying = false, buffering = state.playWhenReady,
+                bufferedPositionMs = pendingPositionMs)
+            return
         }
-        val built = buildAlacOutput(sampleRate, channels, bits)
-            ?: run { AlacDecoder.closeSafe(handle); throw IOException("ALAC AudioTrack 创建失败") }
-        val output = built.first
-        val floatOutput = built.second
-        if (!isCurrent(serial)) {
-            runCatching { output.release() }
-            AlacDecoder.closeSafe(handle)
-            throw CancellationException()
+        timelineInstalled = true
+        if (pendingSeekBeforeTimeline) {
+            pendingSeekBeforeTimeline = false
+            player.seekTo(pendingPositionMs)
         }
-        alacOutput = output
-        alacHandle = handle
-        alacSampleRate = sampleRate
-        alacChannels = channels
-        alacStartFrame = output.playbackHeadPosition.toLong() and 0xffff_ffffL
-        alacSubmittedSerial = -1L
-        val bytesPerOutputSample = if (floatOutput) 4 else 2
-        val maximumBlock = track.alacConfig?.maxBlock ?: 65535
-        val direct = ByteBuffer.allocateDirect(maximumBlock * channels * bytesPerOutputSample).order(ByteOrder.LITTLE_ENDIAN)
-        try {
-            while (!_state.value.playWhenReady) awaitPlayWhenReady(serial)
-            output.play()
-            val segments = track.media.segments
-            val startIndex = segments.indexOfLast { it.startMs <= startAtMs }.coerceAtLeast(0)
-            var skipFrames = ((startAtMs - segments[startIndex].startMs).coerceAtLeast(0L) * sampleRate / 1000L)
-            supervisorScope {
-                var upcoming: Deferred<ByteArray>? = null
+        pendingPositionMs = player.currentPosition.coerceAtLeast(0L)
+        if (player.playbackState == Player.STATE_READY) logSeekOutput(serial, "mse")
+        if (player.isPlaying) publishOutputStarted(serial, "mse") else activeCacheSource = null
+        _state.value = _state.value.copy(
+            connected = true,
+            isPlaying = player.isPlaying,
+            playWhenReady = player.playWhenReady,
+            buffering = player.playbackState == Player.STATE_BUFFERING,
+            ended = player.playbackState == Player.STATE_ENDED,
+            bufferedPositionMs = player.bufferedPosition.coerceAtLeast(pendingPositionMs),
+        )
+    }
+
+    private fun finishAtResolvedEnd(track: AppleResolvedTrack): Boolean {
+        val duration = track.media.durationMs.takeIf { it > 0L } ?: _state.value.durationMs.takeIf { it > 0L }
+        pendingPositionMs = pendingPositionMs.coerceIn(0L, duration ?: Long.MAX_VALUE)
+        if (duration == null || pendingPositionMs < duration || track.media.segments.isEmpty()) return false
+        activeCacheSource = null
+        _state.value = _state.value.copy(isPlaying = false, buffering = false, ended = true,
+            bufferedPositionMs = pendingPositionMs)
+        return true
+    }
+
+    private fun startAlac(source: AlacSource, serial: Long) {
+        cancelAlacRun()
+        val target = pendingPositionMs
+        val generation = _state.value.seekGeneration
+        alacJob = scope.launch {
+            alacRunMutex.withLock {
+                if (!isCurrentAlac(serial, generation)) return@withLock
                 try {
-                    var index = startIndex
-                    var current = decrypt.fetchSegment(track, index)
-                    while (index < segments.size) {
-                        if (!isCurrent(serial)) throw CancellationException()
-                        if (upcoming == null && index + 1 < segments.size) {
-                            val nextIndex = index + 1
-                            upcoming = async(Dispatchers.IO) { decrypt.fetchSegment(track, nextIndex) }
-                        }
-                        val ranges = decrypt.sampleRanges(current)
-                        for (range in ranges) {
-                            awaitPlayWhenReady(serial)
-                            val packet = current.copyOfRange(range.start, range.end)
-                            val pcm = withContext(Dispatchers.Default) { AlacDecoder.decodeSafe(handle, packet) }
-                            if (pcm.isEmpty()) throw IOException("ALAC 分片解码失败")
-                            val frameBytes = channels * if (bits == 16) 2 else 4
-                            val frames = pcm.size / frameBytes
-                            if (frames <= 0) throw IOException("ALAC 分片解码失败")
-                            val skipped = minOf(skipFrames, frames.toLong()).toInt()
-                            skipFrames -= skipped
-                            if (skipped < frames) {
-                                val written = withContext(Dispatchers.IO) {
-                                    writeAlacPcm(output, pcm, skipped, frames - skipped, channels, bits, floatOutput, direct)
-                                }
-                                if (written > 0 && alacSubmittedSerial != serial) {
-                                    alacSubmittedSerial = serial
-                                    withContext(Dispatchers.Main.immediate) {
-                                        if (isCurrent(serial)) publishOutputStarted(serial, "alac")
-                                    }
-                                }
-                            }
-                        }
-                        val next = upcoming ?: break
-                        current = next.await()
-                        upcoming = null
-                        index++
+                    playAlac(source, serial, generation, target)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (isCurrentAlac(serial, generation)) {
+                        if (error is AppleAlacCacheException && source is AlacSource.Cached) {
+                            val target = pendingPositionMs
+                            val playing = _state.value.playWhenReady
+                            cache.invalidate(source.entry.fileId)
+                            cache.pinCurrent(null)
+                            Log.w("FantasticPlayback", "apple-cache-invalid id=${source.entry.key.trackId.appleLogToken()} " +
+                                "occurrence=$currentUid request=$serial file=${source.entry.fileId} reason=${error.message}")
+                            playQueue(songs, occurrence, target, playing, requestedQuality,
+                                activeServer, activeStorefront, skipCachedAlac = true)
+                        } else publishError(error.message?.takeIf(String::isNotBlank) ?: "ALAC 播放失败")
                     }
-                } finally {
-                    upcoming?.cancel()
                 }
             }
-            if (isCurrent(serial)) onMain {
-                activeCacheSource = null
-                _state.value = _state.value.copy(isPlaying = false, buffering = false, ended = true,
-                    bufferedPositionMs = _state.value.durationMs)
-            }
-        } finally {
-            if (alacOutput === output) alacOutput = null
-            if (alacHandle == handle) alacHandle = 0L
-            alacSampleRate = 0
-            alacChannels = 0
-            runCatching { output.stop() }
-            runCatching { output.release() }
-            AlacDecoder.closeSafe(handle)
         }
     }
 
-    private suspend fun awaitPlayWhenReady(serial: Long) {
+    private suspend fun playAlac(
+        source: AlacSource, serial: Long, generation: Int, startAtMs: Long,
+    ) = supervisorScope {
+        var reader: AppleAlacReader? = null
+        var handle = 0L
+        var output: AudioTrack? = null
+        var run: AlacRun? = null
+        var monitor: Job? = null
+        fun decodeFailure(message: String): Nothing {
+            if (source is AlacSource.Cached) throw AppleAlacCacheException("ALAC 缓存格式无效", IOException(message))
+            throw IOException(message)
+        }
+        try {
+            awaitPlayWhenReady(serial, generation)
+            val opened = when (source) {
+                is AlacSource.Online -> AppleAlacStreamReader(source.source, this)
+                is AlacSource.Cached -> {
+                    val lease = cache.acquire(source.entry.fileId) ?: throw AppleAlacCacheException("ALAC 缓存读取失败")
+                    AppleAlacFileReader.open(lease.file, lease)
+                }
+            }
+            reader = opened
+            if (!isCurrentAlac(serial, generation)) throw CancellationException()
+            if (source is AlacSource.Cached) {
+                val expected = maxOf(source.entry.durationMs, songs.getOrNull(occurrence)?.track?.durationMs ?: 0L)
+                if (expected > 10_000L && opened.durationMs + 5_000L < expected) {
+                    throw AppleAlacCacheException("ALAC 缓存格式无效", IOException("音源仅返回试听片段，未保存为完整歌曲"))
+                }
+                Log.i("FantasticPlayback", "apple-route id=${source.entry.key.trackId.appleLogToken()} " +
+                    "occurrence=$currentUid request=$serial path=cache-alac file=${source.entry.fileId}")
+            }
+            val duration = opened.durationMs.takeIf { it > 0L }
+            val target = startAtMs.coerceIn(0L, duration ?: Long.MAX_VALUE)
+            pendingPositionMs = target
+            if (duration != null) _state.value = _state.value.copy(durationMs = duration)
+            if (duration != null && target == duration) {
+                activeCacheSource = null
+                _state.value = _state.value.copy(isPlaying = false, buffering = false, ended = true,
+                    bufferedPositionMs = target)
+                return@supervisorScope
+            }
+            handle = AlacDecoder.openSafe(opened.cookie)
+            if (handle == 0L) decodeFailure("该曲目没有所选音质")
+            val channels = AlacDecoder.channels(handle)
+            val sampleRate = AlacDecoder.sampleRate(handle)
+            val bits = AlacDecoder.bits(handle)
+            if (channels !in 1..8 || sampleRate <= 0 || bits != 16 && bits != 20 && bits != 24 && bits != 32) {
+                decodeFailure("ALAC 解码器初始化失败")
+            }
+            val firstPacketTimeUs = opened.seekTo(target)
+            awaitPlayWhenReady(serial, generation)
+            val built = buildAlacOutput(sampleRate, channels, bits) ?: throw IOException("ALAC AudioTrack 创建失败")
+            val createdOutput = built.first
+            output = createdOutput
+            val floatOutput = built.second
+            val cacheFileId = (source as? AlacSource.Cached)?.entry?.fileId
+            val currentRun = AlacRun(serial, generation, createdOutput, handle, sampleRate, channels, bits, cacheFileId,
+                target, createdOutput.playbackHeadPosition.toLong() and 0xffff_ffffL)
+            run = currentRun
+            alacRun = currentRun
+            if (cacheFileId != null) cache.pinCurrent(cacheFileId)
+            val bytesPerOutputSample = if (floatOutput) 4 else 2
+            val direct = ByteBuffer.allocateDirect(opened.maxBlock * channels * bytesPerOutputSample).order(ByteOrder.LITTLE_ENDIAN)
+            var skipFrames = maxOf(0L, target * 1000L - firstPacketTimeUs) * sampleRate / 1_000_000L
+            createdOutput.play()
+            monitor = launch {
+                while (isCurrentAlac(serial, generation)) {
+                    publishAlacState(currentRun)
+                    delay(100L)
+                }
+            }
+            while (true) {
+                awaitPlayWhenReady(serial, generation)
+                val packet = opened.readPacket() ?: break
+                val decoderHandle = currentRun.handle
+                val pcm = withContext(Dispatchers.Default) { AlacDecoder.decodeSafe(decoderHandle, packet) }
+                val frameBytes = channels * if (bits == 16) 2 else 4
+                if (pcm.isEmpty() || pcm.size % frameBytes != 0 || pcm.size / frameBytes > opened.maxBlock) {
+                    decodeFailure("ALAC 分片解码失败")
+                }
+                val frames = pcm.size / frameBytes
+                val skipped = minOf(skipFrames, frames.toLong()).toInt()
+                skipFrames -= skipped
+                if (skipped < frames) {
+                    writeAlacPcm(currentRun, pcm, skipped, frames - skipped, bits, floatOutput, direct)
+                }
+            }
+            if (currentRun.submittedFrames == 0L) decodeFailure("ALAC 音频轨道为空")
+            // Submission is not playback: retain the output until its real head drains.
+            while (true) {
+                awaitPlayWhenReady(serial, generation)
+                position()
+                if (currentRun.playedFrames >= currentRun.submittedFrames) break
+                delay(100L)
+            }
+            pendingPositionMs = position()
+            activeCacheSource = null
+            _state.value = _state.value.copy(isPlaying = false, buffering = false, ended = true,
+                bufferedPositionMs = pendingPositionMs)
+        } finally {
+            monitor?.cancel()
+            try {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    if (run != null && alacRun === run) {
+                        if (isCurrentAlac(serial, generation)) pendingPositionMs = position()
+                        alacRun = null
+                        if (run.cacheFileId != null) cache.pinCurrent(null)
+                    }
+                    runCatching { output?.pause() }
+                    runCatching { output?.flush() }
+                }
+                withContext(NonCancellable + Dispatchers.IO) {
+                    try { reader?.close() }
+                    finally { monitor?.cancelAndJoin() }
+                }
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    runCatching { output?.stop() }
+                    runCatching { output?.release() }
+                    AlacDecoder.closeSafe(handle)
+                }
+            }
+        }
+    }
+
+    private fun publishAlacState(run: AlacRun) {
+        if (alacRun !== run || !isCurrentAlac(run.serial, run.generation)) return
+        val state = _state.value
+        if (state.ended) return
+        val absolutePosition = position()
+        val playing = state.playWhenReady && run.outputStarted && run.submittedFrames > run.playedFrames
+        val buffering = state.playWhenReady && !playing
+        if (state.isPlaying == playing && state.buffering == buffering) return
+        if (playing) {
+            publishOutputStarted(run.serial, "alac")
+        } else {
+            pendingPositionMs = absolutePosition
+            activeCacheSource = null
+            _state.value = state.copy(isPlaying = false, buffering = buffering, bufferedPositionMs = absolutePosition)
+        }
+    }
+
+    private suspend fun awaitPlayWhenReady(serial: Long, generation: Int) {
         while (true) {
-            if (!isCurrent(serial)) throw CancellationException()
+            coroutineContext.ensureActive()
+            if (!isCurrentAlac(serial, generation)) throw CancellationException()
             if (_state.value.playWhenReady) return
             delay(40L)
         }
@@ -558,65 +707,77 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         return build(AudioFormat.ENCODING_PCM_16BIT, false)
     }
 
-    private fun writeAlacPcm(
-        output: AudioTrack,
+    private suspend fun writeAlacPcm(
+        run: AlacRun,
         pcm: ByteArray,
         skipFrames: Int,
         frames: Int,
-        channels: Int,
         bits: Int,
         floatOutput: Boolean,
         direct: ByteBuffer,
     ): Int {
-        direct.clear()
-        if (floatOutput) {
-            val start = skipFrames * channels * 4
-            direct.put(pcm, start, frames * channels * 4)
-        } else if (bits == 16) {
-            val start = skipFrames * channels * 2
-            direct.put(pcm, start, frames * channels * 2)
-        } else {
-            val source = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
-            source.position(skipFrames * channels * 4)
-            repeat(frames * channels) {
-                val sample = (source.float.coerceIn(-1.0f, 1.0f) * 32768.0f).toInt()
-                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                direct.putShort(sample.toShort())
+        val channels = run.channels
+        withContext(Dispatchers.Default) {
+            direct.clear()
+            if (floatOutput) {
+                val start = skipFrames * channels * 4
+                direct.put(pcm, start, frames * channels * 4)
+            } else if (bits == 16) {
+                val start = skipFrames * channels * 2
+                direct.put(pcm, start, frames * channels * 2)
+            } else {
+                val source = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
+                source.position(skipFrames * channels * 4)
+                repeat(frames * channels) {
+                    val sample = (source.float.coerceIn(-1.0f, 1.0f) * 32768.0f).toInt()
+                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                    direct.putShort(sample.toShort())
+                }
             }
+            direct.flip()
         }
-        direct.flip()
+        val frameBytes = channels * if (floatOutput) 4 else 2
         var writtenBytes = 0
         while (direct.hasRemaining()) {
-            val before = direct.position()
-            val result = output.write(direct, direct.remaining(), AudioTrack.WRITE_BLOCKING)
+            awaitPlayWhenReady(run.serial, run.generation)
+            val result = run.output.write(direct, direct.remaining(), AudioTrack.WRITE_NON_BLOCKING)
             if (result < 0) throw IOException("ALAC AudioTrack 写入失败")
-            val advanced = direct.position() - before
-            if (advanced <= 0) throw IOException("ALAC AudioTrack 未提交 PCM")
-            writtenBytes += advanced
+            if (result == 0) {
+                delay(10L)
+                continue
+            }
+            writtenBytes += result
+            run.submittedFrames += result / frameBytes
+            if (!run.outputStarted || !_state.value.isPlaying) {
+                run.outputStarted = true
+                publishAlacState(run)
+            }
         }
         return writtenBytes
     }
 
     private fun publishOutputStarted(serial: Long, mode: String) {
-        if (!isCurrent(serial)) return
-        val track = activeTrack ?: return
+        if (!isCurrent(serial) || !_state.value.playWhenReady) return
         val song = songs.getOrNull(occurrence) ?: return
         if (_state.value.queueIndex != occurrence || _state.value.mediaId != "apple:${song.track.id}") return
-        val variant = track.variant
-        val group = variant.groupId
+        val run = alacRun?.takeIf { mode == "alac" && it.outputStarted && isCurrentAlac(it.serial, it.generation) }
+        if (mode == "alac" && run == null) return
+        val variant = activeTrack?.variant
+        val cached = (activeAlacSource as? AlacSource.Cached)?.entry
+        val group = cached?.appleGroup ?: variant?.groupId ?: return
         val quality = codecGroup(group)
-        val codecs = variant.codecs
-        val reportedCodec = if (group.contains("alac", true) && !codecs.contains("alac", true)) "alac" else codecs
-        val duration = track.media.durationMs.takeIf { it > 0L } ?: song.track.durationMs
+        val codecs = if (cached != null) "alac" else variant?.codecs.orEmpty()
+        val reportedCodec = if (group.contains("alac", true)) "alac" else codecs
+        val duration = _state.value.durationMs.takeIf { it > 0L } ?: song.track.durationMs
+        val rate = run?.sampleRate ?: variant?.sampleRate ?: 0
         val details = reportedAudioDetails(
             codec = reportedCodec,
-            sampleRate = variant.sampleRate,
-            bitDepth = variant.bitDepth,
-            channels = variant.channels,
-            bitrate = variant.bandwidth,
+            sampleRate = rate,
+            bitDepth = run?.bits ?: variant?.bitDepth ?: 0,
+            channels = run?.channels?.toString() ?: variant?.channels,
+            bitrate = variant?.bandwidth ?: 0L,
             bitrateLabel = "变体带宽",
         )
-        val label = qualityLabel(group, variant.sampleRate)
         _state.value = _state.value.copy(
             connected = true,
             mediaId = "apple:${song.track.id}",
@@ -624,22 +785,35 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
             artist = song.track.artist,
             artworkUri = song.track.artwork(600),
             isPlaying = true,
-            playWhenReady = true,
             buffering = false,
             ended = false,
             durationMs = duration,
             quality = quality,
-            qualityLabel = label,
+            qualityLabel = qualityLabel(group, rate),
             audioDetails = details,
         )
-        val cache = if (duration > 0L && quality != null && quality in CACHE_QUALITIES && CACHE_GROUP.matches(group) && codecs.isNotBlank()) {
-            AppleCacheSource(occurrence, serial, activeProfile, group, codecs, quality, mode, duration, activeServer, activeStorefront)
+        activeCacheSource = if (cached == null && duration > 0L && quality != null && quality in CACHE_QUALITIES &&
+            CACHE_GROUP.matches(group) && codecs.isNotBlank()) {
+            AppleCacheSource(currentUid, serial, activeProfile, group, codecs, quality, mode, duration, activeServer, activeStorefront,
+                (activeAlacSource as? AlacSource.Online)?.source)
         } else null
-        activeCacheSource = cache
+        logSeekOutput(serial, mode)
         if (loggedOutputSerial != serial) {
             loggedOutputSerial = serial
-            Log.i("FantasticPlayback", "native-apple id=${song.track.id} group=$group codecs=$codecs mode=$mode")
+            if (cached != null) cache.markPlayed(cached.key)
+            Log.i("FantasticPlayback", "native-apple id=${song.track.id.appleLogToken()} group=${group.appleLogToken()} " +
+                "codecs=${codecs.appleLogToken()} mode=$mode rate=$rate bits=${run?.bits ?: variant?.bitDepth ?: 0} " +
+                "channels=${run?.channels ?: variant?.channels} file=${run?.cacheFileId ?: "-"}")
         }
+    }
+
+    private fun logSeekOutput(serial: Long, mode: String) {
+        val generation = pendingSeekLogGeneration ?: return
+        if (!isCurrent(serial) || generation != _state.value.seekGeneration) return
+        pendingSeekLogGeneration = null
+        val id = songs.getOrNull(occurrence)?.track?.id.orEmpty().appleLogToken()
+        Log.i("FantasticPlayback", "apple-seek-output id=$id occurrence=$currentUid request=$serial " +
+            "seek=$generation mode=$mode positionMs=${position()}")
     }
 
     private fun qualityLabel(group: String, sampleRate: Int): String {
@@ -687,7 +861,8 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         serverMonitorJob = null
         activeCacheSource = null
         activeSerial = -1L
-        nativeDecrypt = null
+        (activeAlacSource as? AlacSource.Online)?.source?.decrypt?.clearSegmentCache()
+        activeAlacSource = null
         activeTrack = null
         timelineInstalled = false
         pendingSeekBeforeTimeline = false
@@ -701,7 +876,7 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
                 mediaPlayer = null
             }
         }
-        releaseAlacOutput()
+        cancelAlacRun()
     }
 
     private fun releaseMediaPlayer() {
@@ -713,22 +888,22 @@ internal class ApplePlaybackEngine(context: Context, private val prefs: Prefs, p
         mediaPlayer = null
     }
 
-    private fun releaseAlacOutput() {
-        val output = alacOutput
-        alacOutput = null
-        val handle = alacHandle
-        alacHandle = 0L
-        alacSampleRate = 0
-        alacChannels = 0
-        alacSubmittedSerial = -1L
-        if (output != null) {
-            runCatching { output.stop() }
-            runCatching { output.release() }
+    private fun cancelAlacRun() {
+        val run = alacRun
+        alacRun = null
+        if (run != null) {
+            runCatching { run.output.pause() }
+            runCatching { run.output.flush() }
+            if (run.cacheFileId != null) cache.pinCurrent(null)
         }
-        AlacDecoder.closeSafe(handle)
+        alacJob?.cancel()
+        alacJob = null
     }
 
     private fun isCurrent(serial: Long): Boolean = !closed && serial > 0L && serial == requestSerial && serial == activeSerial
+
+    private fun isCurrentAlac(serial: Long, generation: Int): Boolean =
+        isCurrent(serial) && _state.value.seekGeneration == generation
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)

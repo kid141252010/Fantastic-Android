@@ -13,6 +13,9 @@ import androidx.media3.common.util.UnstableApi
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.SourceStatus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,6 +29,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.LinkedHashMap
 import kotlin.math.ceil
 
 internal data class AppleVariant(
@@ -81,6 +85,19 @@ internal data class AppleResolvedTrack(
     val widevinePssh: ByteArray?,
 )
 
+internal const val APPLE_ALAC_SEGMENT_BUFFER_BYTES = 8L * 1024 * 1024
+
+internal data class AppleResolvedSource(val track: AppleResolvedTrack, val decrypt: AppleNativeDecrypt)
+
+private data class AppleSegmentKey(
+    val resourceUrl: HttpUrl,
+    val adamId: String,
+    val groupId: String,
+    val range: AppleByteRange,
+    val keyKind: KeyKind?,
+    val keyUri: String?,
+)
+
 /** Resolves Apple HLS and performs length-preserving FairPlay sample decryption in-process. */
 @UnstableApi
 internal class AppleNativeDecrypt(
@@ -96,6 +113,18 @@ internal class AppleNativeDecrypt(
         .readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
+    private val segmentLock = Any()
+    private val inFlight = mutableMapOf<AppleSegmentKey, CompletableDeferred<ByteArray>>()
+    private val completedSegments = LinkedHashMap<AppleSegmentKey, ByteArray>(4, 0.75f, true)
+    private var completedSegmentBytes = 0L
+    private var retainSegments = true
+
+    internal fun clearSegmentCache() = synchronized(segmentLock) {
+        completedSegments.clear()
+        completedSegmentBytes = 0L
+        // Detached sources can finish their cache transfer, but no longer retain playback fragments.
+        retainSegments = false
+    }
 
     suspend fun prepare(
         adamId: String,
@@ -232,6 +261,56 @@ internal class AppleNativeDecrypt(
     suspend fun fetchInit(track: AppleResolvedTrack): ByteArray = track.initBytes.copyOf()
 
     suspend fun fetchSegment(track: AppleResolvedTrack, index: Int): ByteArray {
+        if (!track.variant.groupId.contains("alac", true) || track.variant.widevine) {
+            return fetchSegmentUncached(track, index)
+        }
+        val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
+        val key = AppleSegmentKey(track.media.resourceUrl, track.media.adamId, track.variant.groupId,
+            segment.range, segment.keyKind, segment.keyUri)
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            var producer = false
+            val result = synchronized(segmentLock) {
+                completedSegments[key]?.let { return it }
+                inFlight[key] ?: CompletableDeferred<ByteArray>().also {
+                    inFlight[key] = it
+                    producer = true
+                }
+            }
+            if (!producer) {
+                try { return result.await() }
+                catch (cancelled: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    continue
+                }
+            }
+            try {
+                val bytes = fetchSegmentUncached(track, index)
+                synchronized(segmentLock) {
+                    if (retainSegments && bytes.size <= APPLE_ALAC_SEGMENT_BUFFER_BYTES) {
+                        completedSegments[key] = bytes
+                        completedSegmentBytes += bytes.size
+                        val entries = completedSegments.entries.iterator()
+                        while (completedSegments.size > 4 || completedSegmentBytes > APPLE_ALAC_SEGMENT_BUFFER_BYTES) {
+                            completedSegmentBytes -= entries.next().value.size
+                            entries.remove()
+                        }
+                    }
+                }
+                result.complete(bytes)
+                return bytes
+            } catch (error: Throwable) {
+                // Remove the cancelled producer before waking live waiters to compete again.
+                synchronized(segmentLock) { if (inFlight[key] === result) inFlight.remove(key) }
+                result.completeExceptionally(error)
+                throw error
+            } finally {
+                synchronized(segmentLock) { if (inFlight[key] === result) inFlight.remove(key) }
+            }
+        }
+    }
+
+    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int): ByteArray {
         val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
         val bytes = fetchRange(track.media, segment.range, "Apple 分片获取失败")
         if (segment.keyKind == KeyKind.WIDEVINE) return bytes

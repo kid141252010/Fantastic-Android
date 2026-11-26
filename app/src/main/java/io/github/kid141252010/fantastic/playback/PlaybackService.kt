@@ -58,7 +58,7 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
-        val apple = ApplePlaybackEngine(this, app.prefs, app.api)
+        val apple = ApplePlaybackEngine(this, app.prefs, app.api, cache)
         val player = FantasticSessionPlayer(this, native, apple, app.prefs, app.downloads::audio, cache, requests)
         val open = PendingIntent.getActivity(
             this, 0,

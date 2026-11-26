@@ -33,6 +33,7 @@ internal data class FullAudioRequest(
     val strict: Boolean = false,
     val expectedDurationMs: Long = 0,
     val requestedNeteaseQuality: String? = null,
+    val resolvedApple: AppleResolvedSource? = null,
 )
 
 internal data class AudioFileInfo(

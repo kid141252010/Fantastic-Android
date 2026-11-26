@@ -66,10 +66,12 @@ internal class FantasticSessionPlayer(
         val cached: PlaybackCacheEntry?,
         val requestId: String? = null,
     ) {
-        val hosted get() = song.track.source == Source.Apple && offline == null && cached == null
+        val onlineApple get() = song.track.source == Source.Apple && offline == null && cached == null
+        val usesAppleEngine get() = onlineApple ||
+            (song.track.source == Source.Apple && offline == null && cached?.isCompleteAppleAlac == true)
 
         fun matches(other: Stream) = song == other.song && server == other.server && key == other.key &&
-            (hosted && other.hosted || requestedQuality == other.requestedQuality && quality == other.quality) &&
+            (onlineApple && other.onlineApple || requestedQuality == other.requestedQuality && quality == other.quality) &&
             offline == other.offline && cached?.fileId == other.cached?.fileId
     }
 
@@ -101,7 +103,6 @@ internal class FantasticSessionPlayer(
     internal var onCurrentAudioChanged: (CurrentAudio?) -> Unit = {}
     private var publishedAudio: CurrentAudio? = null
     private val spatialDecoders = mutableMapOf<Pair<String, Int?>, Boolean>()
-    private var lastAppleSeek = 0
     private var lastAppleLoops = 0L
     private var discontinuity: Pair<Int, Long>? = null
     private var automaticOccurrence: Int? = null
@@ -185,18 +186,14 @@ internal class FantasticSessionPlayer(
                     val wrapped = previous == run.lastOrNull()?.song?.uid && state.queueIndex == 0 && previous != song.uid
                     if (looped || wrapped) {
                         val next = stream(song)
-                        if (!next.hosted) {
+                        if (!next.usesAppleEngine) {
                             start(song, apple.position(), state.playWhenReady, next)
                             publish()
                             return@collect
                         }
                     }
-                    if (current?.uid == song.uid && state.seekGeneration != lastAppleSeek && apple.position() < 1_000) {
-                        discontinuity = Player.DISCONTINUITY_REASON_AUTO_TRANSITION to apple.position()
-                    }
                     engineSelected(song)
                 }
-                lastAppleSeek = state.seekGeneration
                 apple.activeCacheSource?.let(::observeApplePlayback)
                 if (state.ended && state.playWhenReady) adjacent(true, automatic = true)?.let { start(it, 0L, true) }
                 publish()
@@ -367,7 +364,10 @@ internal class FantasticSessionPlayer(
     private fun observeApplePlayback(source: AppleCacheSource) {
         if (!appleActive || switching || released || stopped) return
         val song = current?.takeIf { it.uid == source.occurrence } ?: return
+        if (source !== apple.activeCacheSource || apple.currentUid != song.uid) return
+        val selected = run.firstOrNull { it.song.uid == song.uid } ?: return
         val key = PlaybackCacheKey.from(source.server, source.storefront, Source.Apple, song.track.id) ?: return
+        if (selected.key != key || selected.server != key.server) return
         val request = source.requestSerial.toString()
         val signature = PlaybackStart(song.uid, request, source.quality, source.codecs, source.group)
         if (lastStart == signature) return
@@ -376,7 +376,7 @@ internal class FantasticSessionPlayer(
         cache.markPlayed(key)
         cache.enqueue(PlaybackRendition(song.track, song.uid, song.quality ?: source.profile.quality,
             source.quality, source.durationMs, null, request, appleGroup = source.group, appleCodecs = source.codecs,
-            appleProfile = source.profile, appleMode = source.mode, key = key))
+            appleProfile = source.profile, appleMode = source.mode, resolvedApple = source.resolvedAlac, key = key))
     }
 
     fun selectQuality(quality: String) {
@@ -392,12 +392,7 @@ internal class FantasticSessionPlayer(
         traversal = traversal.map { if (it.uid == song.uid) changed else it }
         cacheRecovery = null
         val selected = stream(changed)
-        if (appleActive && selected.hosted) {
-            clearPublishedAudio()
-            current = changed
-            run = run.map { if (it.song.uid == song.uid) it.copy(song = changed, requestedQuality = quality, quality = quality) else it }
-            apple.selectQuality(quality)
-        } else start(changed, position(), wantsPlay(), selected)
+        start(changed, position(), wantsPlay(), selected)
         persistQueue()
         publish()
     }
@@ -708,7 +703,8 @@ internal class FantasticSessionPlayer(
         val requested = song.quality ?: profile.quality
         val cached = cache.find(key, requested, profile)?.takeIf { entry ->
             val spatial = entry.appleMode in HOSTED_SPATIAL
-            if (network != null) prefs.appleTransition == "off" && !spatial else !spatial || canDecodeSpatial(entry)
+            entry.isCompleteAppleAlac ||
+                if (network != null) prefs.appleTransition == "off" && !spatial else !spatial || canDecodeSpatial(entry)
         }
         return Stream(song, server, key, requested, cached?.actualQuality ?: requested, null, cached)
     }
@@ -721,7 +717,7 @@ internal class FantasticSessionPlayer(
     }
 
     private fun withRequest(stream: Stream): Stream =
-        if (stream.hosted) stream else stream.copy(requestId = "${stream.song.uid}:${++streamSerial}")
+        if (stream.usesAppleEngine) stream else stream.copy(requestId = "${stream.song.uid}:${++streamSerial}")
 
     private fun mediaItem(stream: Stream): MediaItem {
         val cached = stream.cached
@@ -740,9 +736,9 @@ internal class FantasticSessionPlayer(
         val selected = withRequest(selection)
         val index = traversal.indexOf(song)
         val before = traversal.subList(0, index).asReversed().asSequence().map { stream(it) }
-            .takeWhile { it.hosted == selected.hosted }.toList().asReversed()
+            .takeWhile { it.usesAppleEngine == selected.usesAppleEngine }.toList().asReversed()
         val after = traversal.subList(index + 1, traversal.size).asSequence().map { stream(it) }
-            .takeWhile { it.hosted == selected.hosted }.toList()
+            .takeWhile { it.usesAppleEngine == selected.usesAppleEngine }.toList()
         checkpoint()
         switching = true
         try {
@@ -750,7 +746,7 @@ internal class FantasticSessionPlayer(
             stopped = false
             run = before.map(::withRequest) + selected + after.map(::withRequest)
             requests.clear()
-            cache.pinCurrent(selected.cached?.fileId)
+            cache.pinCurrent(null)
             clearNativeFormat()
             clearPublishedAudio()
             if (!recovery) cacheRecovery = null
@@ -758,17 +754,17 @@ internal class FantasticSessionPlayer(
             automaticOccurrence = null
             discontinuity = null
             val wasApple = appleActive
-            appleActive = selected.hosted
+            appleActive = selected.usesAppleEngine
             if (appleActive) {
-                Log.i(TAG, "apple-route id=${song.track.id.appleLogToken()} path=hosted occurrence=${song.uid}")
+                if (selected.onlineApple) Log.i(TAG, "apple-route id=${song.track.id.appleLogToken()} path=hosted occurrence=${song.uid}")
                 if (!wasApple) { native.pause(); native.stop(); native.clearMediaItems() }
                 apple.setRepeatMode(engineRepeatMode())
                 apple.playQueue(run.map { it.song }, before.size, at, playing, song.quality,
                     server = selected.server, storefront = selected.key?.storefront ?: prefs.storefront)
-                lastAppleSeek = appleState.seekGeneration
                 lastAppleLoops = apple.completedLoops
             } else {
                 if (wasApple) apple.stop()
+                cache.pinCurrent(selected.cached?.fileId)
                 native.repeatMode = engineRepeatMode()
                 native.setMediaItems(run.map(::mediaItem), before.size, at)
                 native.playWhenReady = playing
@@ -785,7 +781,7 @@ internal class FantasticSessionPlayer(
         val activeIndex = run.indexOfFirst { it.song.uid == song.uid }
         if (index < 0 || activeIndex < 0 || !appleActive && currentNativeStream() == null) return
         val after = traversal.subList(index + 1, traversal.size).asSequence().map { stream(it) }
-            .takeWhile { it.hosted == appleActive }.toList()
+            .takeWhile { it.usesAppleEngine == appleActive }.toList()
         val previous = run.subList(activeIndex + 1, run.size)
         var kept = 0
         while (kept < minOf(previous.size, after.size) && previous[kept].matches(after[kept])) kept++
@@ -821,7 +817,7 @@ internal class FantasticSessionPlayer(
         if (request == cacheRecovery) return false
         cacheRecovery = request
         val online = stream.copy(quality = stream.requestedQuality, cached = null, requestId = null)
-        if (online.hosted) start(stream.song, position(), wantsPlay(), online, recovery = true)
+        if (online.usesAppleEngine) start(stream.song, position(), wantsPlay(), online, recovery = true)
         else replaceNativeStream(online)
         publish()
         return true
