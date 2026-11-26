@@ -25,11 +25,13 @@
 ## Apple 在线流定位与时钟
 
 - 歌词定位沿用 `NativeLyricsView → LyricsController → PlayerConnection → MediaController → FantasticSessionPlayer`，不修改歌词时码或增加 UI 时钟。每次定位同步保存最后目标；暂停定位不自动播放。
-- ALAC 的每次定位以请求和 `seekGeneration` 隔离，输出协程独占解码器及 AudioTrack，取消时先摘除输出并 `pause()+flush()`，等待旧协程清理后才创建新输出。时钟为绝对起点加 unsigned 播放头差量，下载/提交帧不充当已播时间；缓冲耗尽停止会话外推，尾部真实排空后才结束。
-- AAC/Widevine 沿用 Media3 1.5.1 的原生 HLS/DRM 路径。仅当前请求的非占位 window 可接管位置；加载期多次定位只应用最后目标，保留播放/暂停意图。用户 seek 由 `SimpleBasePlayer` 发出 SEEK discontinuity，不再把小于一秒的位置伪装为自动循环。
+- ALAC 的每次定位以请求和 `seekGeneration` 隔离，在线与缓存 source 在启动时统一登记，后续定位仍进入 ALAC 重启分支；先捕获最新目标，保持 generation 失效早于取消。输出协程独占解码器及 AudioTrack，取消时先摘除输出并 `pause()+flush()`，等待旧协程清理后才创建新输出。时钟为绝对起点加 unsigned 播放头差量，下载/提交帧不充当已播时间；缓冲耗尽停止会话外推，尾部真实排空后才结束。
+- AAC/Widevine 沿用 Media3 1.5.1 的原生 HLS/DRM 路径。用户定位以 `requestSerial/seekGeneration/targetMs` 保存最新记录；解析前或占位 timeline 期间不丢弃目标，也不使用 `currentPosition` 覆盖它。创建 source 前已有用户定位时先从 0 安装 source，匹配请求的非占位 window 到达后先消费记录，再应用一次 seek；无用户定位的队列恢复仍使用保存的位置初始化 source。保留播放/暂停意图和 `SimpleBasePlayer` 的 SEEK discontinuity，不把小于一秒的位置伪装为自动循环。
 - 诊断标签 `FantasticPlayback` 每次接受定位记录 `apple-seek`，对应 ALAC 首输出或 Media3 READY 记录 `apple-seek-output`；包含安全曲目 ID、occurrence、request、seek 与绝对位置，不打印服务器、鉴权或 CDN URL。
+- 当前 Apple 曲目定位后立即 `publish()`，使会话快照的 `contentPosition` 读取引擎待应用的位置；`PlayerConnection` 的毫秒转发、SeekBar 松手提交最后位置和非 Apple 定位行为不变。
 - 依据：[Apple Android 同步歌词说明（2025-09-17）](https://support.apple.com/en-us/109355)、[AudioTrack 播放头及 pause/flush 契约](https://developer.android.com/reference/android/media/AudioTrack#getPlaybackHeadPosition())、Media3 1.5.1 [MaskingMediaSource](https://github.com/androidx/media/blob/1.5.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/source/MaskingMediaSource.java) 与 [SimpleBasePlayer](https://github.com/androidx/media/blob/1.5.1/libraries/common/src/main/java/androidx/media3/common/SimpleBasePlayer.java)。10ms 写入背压轮询、100ms 输出采样是工程实现值，不是 Apple 参数。
 - 上一轮在线任意位置播放与真实时钟已由用户实测正常；本轮新增完整 ALAC 缓存路径仍需单独设备验收，不能用旧路径的验收代替。
+- 首次定位修复的本轮检查：Temurin 17.0.21.1+2、Gradle 8.11.1、SDK 35，显式启用本地字体；强制 `compileDebugKotlin` 成功（17 项任务全部执行），随后 `assembleDebug` 成功，Debug v2 签名通过、25 个字体逐项与源文件一致，3 个 TTC 未压缩。证据在忽略目录 `.work/apple-initial-seek-qa/`。ADB 无连接设备，未安装、未检查测试服务器，high/lossless 的首次缓冲 50% 与出声后 25% 四种场景、路由日志匹配和实际出声位置均未验证；不能以构建通过认定设备定位已修复。未新增或运行自动化测试。
 
 ## Apple 完整 ALAC 预缓存与复用
 

@@ -124,7 +124,12 @@ internal class ApplePlaybackEngine(
     private var requestedQuality: String? = null
     private var pendingPositionMs = 0L
     private var timelineInstalled = false
-    private var pendingSeekBeforeTimeline = false
+    private data class PendingSeek(
+        val requestSerial: Long,
+        val seekGeneration: Int,
+        val targetMs: Long,
+    )
+    private var pendingSeek: PendingSeek? = null
     private val mediaWindow = Timeline.Window()
     private class AlacRun(
         val serial: Long,
@@ -155,6 +160,7 @@ internal class ApplePlaybackEngine(
     }
 
     fun position(): Long {
+        if (pendingSeekFor(requestSerial) != null) return pendingPositionMs
         if (activeSerial != requestSerial) return pendingPositionMs
         val currentSong = songs.getOrNull(occurrence) ?: return pendingPositionMs
         if (_state.value.queueIndex != occurrence || _state.value.mediaId != "apple:${currentSong.track.id}") return pendingPositionMs
@@ -199,7 +205,7 @@ internal class ApplePlaybackEngine(
         configuredServer = prefs.baseUrl
         pendingPositionMs = startPositionMs.coerceIn(0L, selected.track.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
         timelineInstalled = false
-        pendingSeekBeforeTimeline = false
+        pendingSeek = null
         loggedOutputSerial = -1L
         pendingSeekLogGeneration = null
         _state.value = previous.copy(
@@ -297,11 +303,13 @@ internal class ApplePlaybackEngine(
         if (state.queueIndex !in state.queue.indices) return@onMain
         val duration = state.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
         pendingPositionMs = ms.coerceIn(0L, duration)
+        val seek = PendingSeek(requestSerial, state.seekGeneration + 1, pendingPositionMs)
+        pendingSeek = seek
         activeCacheSource = null
         val source = activeAlacSource
         val alac = source != null
         val readyTimeline = !alac && timelineInstalled && hasRealMedia3Timeline(activeSerial)
-        _state.value = state.copy(ended = false, seekGeneration = state.seekGeneration + 1,
+        _state.value = state.copy(ended = false, seekGeneration = seek.seekGeneration,
             isPlaying = if (readyTimeline) state.isPlaying else false,
             buffering = if (readyTimeline) state.buffering else state.playWhenReady,
             bufferedPositionMs = pendingPositionMs)
@@ -314,11 +322,7 @@ internal class ApplePlaybackEngine(
             // Generation invalidation above must precede cancellation and the old run's finally.
             startAlac(source, requestSerial)
         } else {
-            val player = mediaPlayer
-            if (player != null && readyTimeline) {
-                player.seekTo(pendingPositionMs)
-                publishMedia3State(activeSerial)
-            } else pendingSeekBeforeTimeline = player != null
+            publishMedia3State(requestSerial)
         }
     }
 
@@ -404,10 +408,10 @@ internal class ApplePlaybackEngine(
         val source = sourceFactory.createMediaSource(mediaItemBuilder.build())
         val player = ensureMediaPlayer()
         timelineInstalled = false
-        pendingSeekBeforeTimeline = false
+        val startPositionMs = if (pendingSeekFor(serial) != null) 0L else pendingPositionMs
         _state.value = _state.value.copy(connected = true, isPlaying = false, buffering = playWhenReady)
         player.playWhenReady = playWhenReady
-        player.setMediaSource(source, pendingPositionMs)
+        player.setMediaSource(source, startPositionMs)
         player.prepare()
         publishMedia3State(serial)
     }
@@ -472,9 +476,10 @@ internal class ApplePlaybackEngine(
             return
         }
         timelineInstalled = true
-        if (pendingSeekBeforeTimeline) {
-            pendingSeekBeforeTimeline = false
-            player.seekTo(pendingPositionMs)
+        val seek = pendingSeekFor(serial)
+        if (seek != null) {
+            pendingSeek = null
+            player.seekTo(seek.targetMs)
         }
         pendingPositionMs = player.currentPosition.coerceAtLeast(0L)
         if (player.playbackState == Player.STATE_READY) logSeekOutput(serial, "mse")
@@ -500,9 +505,12 @@ internal class ApplePlaybackEngine(
     }
 
     private fun startAlac(source: AlacSource, serial: Long) {
-        cancelAlacRun()
-        val target = pendingPositionMs
         val generation = _state.value.seekGeneration
+        if (!isCurrentAlac(serial, generation)) return
+        val target = pendingSeekFor(serial)?.targetMs ?: pendingPositionMs
+        pendingSeek = null
+        activeAlacSource = source
+        cancelAlacRun()
         alacJob = scope.launch {
             alacRunMutex.withLock {
                 if (!isCurrentAlac(serial, generation)) return@withLock
@@ -869,7 +877,7 @@ internal class ApplePlaybackEngine(
         activeAlacSource = null
         activeTrack = null
         timelineInstalled = false
-        pendingSeekBeforeTimeline = false
+        pendingSeek = null
         val player = mediaPlayer
         if (player != null) {
             runCatching { player.stop() }
@@ -902,6 +910,10 @@ internal class ApplePlaybackEngine(
         }
         alacJob?.cancel()
         alacJob = null
+    }
+
+    private fun pendingSeekFor(serial: Long): PendingSeek? = pendingSeek?.takeIf {
+        it.requestSerial == serial && serial == requestSerial && it.seekGeneration == _state.value.seekGeneration
     }
 
     private fun isCurrent(serial: Long): Boolean = !closed && serial > 0L && serial == requestSerial && serial == activeSerial
