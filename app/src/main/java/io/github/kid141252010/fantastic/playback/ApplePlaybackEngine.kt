@@ -1,7 +1,10 @@
 package io.github.kid141252010.fantastic.playback
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -90,6 +93,11 @@ internal class ApplePlaybackEngine(
 ) {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val alacAudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
@@ -145,6 +153,14 @@ internal class ApplePlaybackEngine(
     }
 
     private var alacRun: AlacRun? = null
+    private enum class AlacFocusResult { GRANTED, DELAYED, FAILED }
+    private var alacFocusRequest: AudioFocusRequest? = null
+    private var alacFocusActive = false
+    private var alacFocusGranted = false
+    private var alacFocusDelayed = false
+    private var alacResumeOnFocusGain = false
+    private var alacFocusDucked = false
+    private var alacFocusEpoch = 0L
     private var loggedOutputSerial = -1L
     private var pendingSeekLogGeneration: Int? = null
 
@@ -282,11 +298,13 @@ internal class ApplePlaybackEngine(
     }
 
     fun pause() = onMain {
+        alacResumeOnFocusGain = false
         val previous = _state.value
         if (!previous.playWhenReady) return@onMain
         mediaPlayer?.pause()
         runCatching { alacRun?.output?.pause() }
         pendingPositionMs = position()
+        abandonAlacAudioFocus()
         activeCacheSource = null
         _state.value = previous.copy(playWhenReady = false, isPlaying = false, buffering = false,
             bufferedPositionMs = pendingPositionMs)
@@ -342,7 +360,14 @@ internal class ApplePlaybackEngine(
                 }
                 val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) }
                 if (run != null) {
-                    run.output.play()
+                    when (requestAlacAudioFocus()) {
+                        AlacFocusResult.GRANTED -> run.output.play()
+                        AlacFocusResult.DELAYED -> Unit
+                        AlacFocusResult.FAILED -> {
+                            publishError("音频焦点不可用")
+                            return@onMain
+                        }
+                    }
                     publishAlacState(run)
                 }
                 if (run == null && (mediaPlayer == null || !isCurrent(activeSerial)) &&
@@ -387,6 +412,7 @@ internal class ApplePlaybackEngine(
     }
 
     private fun startMedia3(track: AppleResolvedTrack, decrypt: AppleNativeDecrypt, serial: Long, server: String) {
+        abandonAlacAudioFocus()
         if (finishAtResolvedEnd(track)) return
         val playWhenReady = _state.value.playWhenReady
         val mediaItemBuilder = MediaItem.Builder()
@@ -501,6 +527,7 @@ internal class ApplePlaybackEngine(
 
     private fun startAlac(source: AlacSource, serial: Long) {
         cancelAlacRun()
+        activeAlacSource = source
         val target = pendingPositionMs
         val generation = _state.value.seekGeneration
         alacJob = scope.launch {
@@ -589,6 +616,10 @@ internal class ApplePlaybackEngine(
             run = currentRun
             alacRun = currentRun
             if (cacheFileId != null) cache.pinCurrent(cacheFileId)
+            if (requestAlacAudioFocus() == AlacFocusResult.FAILED) throw IOException("音频焦点不可用")
+            if (alacFocusDucked) createdOutput.setVolume(0.2f)
+            publishAlacState(currentRun)
+            awaitPlayWhenReady(serial, generation)
             val bytesPerOutputSample = if (floatOutput) 4 else 2
             val direct = ByteBuffer.allocateDirect(opened.maxBlock * channels * bytesPerOutputSample).order(ByteOrder.LITTLE_ENDIAN)
             var skipFrames = maxOf(0L, target * 1000L - firstPacketTimeUs) * sampleRate / 1_000_000L
@@ -631,6 +662,7 @@ internal class ApplePlaybackEngine(
             monitor?.cancel()
             try {
                 withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    val ownsFocus = isCurrentAlac(serial, generation) && (run == null || alacRun === run)
                     if (run != null && alacRun === run) {
                         if (isCurrentAlac(serial, generation)) pendingPositionMs = position()
                         alacRun = null
@@ -638,6 +670,7 @@ internal class ApplePlaybackEngine(
                     }
                     runCatching { output?.pause() }
                     runCatching { output?.flush() }
+                    if (ownsFocus) abandonAlacAudioFocus()
                 }
                 withContext(NonCancellable + Dispatchers.IO) {
                     try { reader?.close() }
@@ -658,8 +691,9 @@ internal class ApplePlaybackEngine(
         val state = _state.value
         if (state.ended) return
         val absolutePosition = position()
-        val playing = state.playWhenReady && run.outputStarted && run.submittedFrames > run.playedFrames
-        val buffering = state.playWhenReady && !playing
+        val playing = state.playWhenReady && alacFocusGranted && run.outputStarted &&
+            run.submittedFrames > run.playedFrames
+        val buffering = state.playWhenReady && alacFocusGranted && !playing
         if (state.isPlaying == playing && state.buffering == buffering) return
         if (playing) {
             publishOutputStarted(run.serial, "alac")
@@ -674,8 +708,108 @@ internal class ApplePlaybackEngine(
         while (true) {
             coroutineContext.ensureActive()
             if (!isCurrentAlac(serial, generation)) throw CancellationException()
-            if (_state.value.playWhenReady) return
+            if (_state.value.playWhenReady && (!alacFocusActive || alacFocusGranted)) return
             delay(40L)
+        }
+    }
+
+    private fun requestAlacAudioFocus(): AlacFocusResult {
+        if (alacFocusActive) {
+            if (alacFocusGranted) return AlacFocusResult.GRANTED
+            if (alacFocusDelayed || alacResumeOnFocusGain) return AlacFocusResult.DELAYED
+        }
+        abandonAlacAudioFocus()
+        val epoch = alacFocusEpoch
+        val serial = requestSerial
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(alacAudioAttributes)
+            .setAcceptsDelayedFocusGain(true)
+            .setOnAudioFocusChangeListener({ change ->
+                onMain {
+                    if (epoch == alacFocusEpoch && alacFocusActive && isCurrent(serial)) {
+                        handleAlacAudioFocusChange(change)
+                    }
+                }
+            }, main)
+            .build()
+        alacFocusRequest = request
+        alacFocusActive = true
+        return when (audioManager.requestAudioFocus(request)) {
+            AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> {
+                alacFocusGranted = true
+                Log.i("FantasticPlayback", "apple-focus request=granted")
+                AlacFocusResult.GRANTED
+            }
+            AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> {
+                alacFocusDelayed = true
+                Log.i("FantasticPlayback", "apple-focus request=delayed")
+                AlacFocusResult.DELAYED
+            }
+            else -> {
+                abandonAlacAudioFocus()
+                Log.i("FantasticPlayback", "apple-focus request=failed")
+                AlacFocusResult.FAILED
+            }
+        }
+    }
+
+    private fun abandonAlacAudioFocus() {
+        val request = alacFocusRequest
+        ++alacFocusEpoch
+        alacFocusRequest = null
+        alacFocusActive = false
+        alacFocusGranted = false
+        alacFocusDelayed = false
+        alacResumeOnFocusGain = false
+        if (alacFocusDucked) runCatching { alacRun?.output?.setVolume(1.0f) }
+        alacFocusDucked = false
+        if (request != null) audioManager.abandonAudioFocusRequest(request)
+    }
+
+    private fun handleAlacAudioFocusChange(change: Int) {
+        if (!alacFocusActive) return
+        val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) }
+        when (change) {
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Log.i("FantasticPlayback", "apple-focus change=gain")
+                val resume = alacFocusGranted || alacFocusDelayed || alacResumeOnFocusGain
+                alacFocusGranted = true
+                alacFocusDelayed = false
+                alacResumeOnFocusGain = false
+                alacFocusDucked = false
+                run?.output?.setVolume(1.0f)
+                if (run != null) {
+                    if (resume && _state.value.playWhenReady) run.output.play()
+                    publishAlacState(run)
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                Log.i("FantasticPlayback", "apple-focus change=loss")
+                pendingPositionMs = position()
+                run?.output?.pause()
+                activeCacheSource = null
+                _state.value = _state.value.copy(playWhenReady = false, isPlaying = false,
+                    buffering = false, bufferedPositionMs = pendingPositionMs)
+                // Flushing discards queued frames; reopen the decoder at the saved head on manual play.
+                cancelAlacRun()
+                abandonAlacAudioFocus()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                Log.i("FantasticPlayback", "apple-focus change=loss-transient")
+                pendingPositionMs = position()
+                alacFocusGranted = false
+                alacFocusDelayed = false
+                alacResumeOnFocusGain = _state.value.playWhenReady
+                run?.output?.pause()
+                activeCacheSource = null
+                _state.value = _state.value.copy(isPlaying = false, buffering = false,
+                    bufferedPositionMs = pendingPositionMs)
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                Log.i("FantasticPlayback", "apple-focus change=loss-transient-duck")
+                alacFocusDucked = true
+                run?.output?.setVolume(0.2f)
+            }
         }
     }
 
@@ -691,10 +825,7 @@ internal class ApplePlaybackEngine(
             if (minimum == AudioTrack.ERROR_BAD_VALUE || minimum == AudioTrack.ERROR || minimum <= 0) return null
             val track = runCatching {
                 AudioTrack.Builder()
-                    .setAudioAttributes(android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build())
+                    .setAudioAttributes(alacAudioAttributes)
                     .setAudioFormat(AudioFormat.Builder().setEncoding(encoding).setSampleRate(sampleRate)
                         .setChannelMask(channelMask).build())
                     .setBufferSizeInBytes(minimum.coerceAtLeast(32 * 1024))
@@ -881,6 +1012,7 @@ internal class ApplePlaybackEngine(
             }
         }
         cancelAlacRun()
+        abandonAlacAudioFocus()
     }
 
     private fun releaseMediaPlayer() {
