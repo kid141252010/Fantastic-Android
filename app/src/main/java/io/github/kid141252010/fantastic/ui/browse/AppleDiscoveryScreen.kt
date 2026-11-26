@@ -56,6 +56,8 @@ import io.github.kid141252010.fantastic.data.AppleCatalogResponse
 import io.github.kid141252010.fantastic.data.AppleCatalogApi
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.SearchCatalog
+import io.github.kid141252010.fantastic.data.catalogCountry
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3BackButton
@@ -81,6 +83,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
     var area by rememberSaveable(initialArea) { mutableStateOf(initialArea) }
     var stack by remember(initialArea) { mutableStateOf(emptyList<BrowseTarget>()) }
     var chartKind by remember { mutableStateOf<String?>(null) }
+    var chartCountry by remember { mutableStateOf<String?>(null) }
     var genreId by rememberSaveable { mutableStateOf(ALL_GENRES) }
     var retry by remember { mutableIntStateOf(0) }
     var model by remember { mutableStateOf<DiscoveryModel?>(null) }
@@ -99,6 +102,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
                 stack = emptyList()
                 area = initialArea
                 chartKind = null
+                chartCountry = null
                 genreId = ALL_GENRES
             }
             handledRootNavigationRequest = rootNavigationRequest
@@ -110,21 +114,24 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
         if (stack.isNotEmpty()) stack = stack.dropLast(1)
         else if (chartKind != null) {
             chartKind = null
+            chartCountry = null
             genreId = ALL_GENRES
         } else {
             area = initialArea
+            chartCountry = null
             genreId = ALL_GENRES
         }
     }
 
-    LaunchedEffect(radio, storefront, area, target, chartKind, genreId, retry) {
+    val requestCountry = target?.country ?: chartCountry ?: storefront
+    LaunchedEffect(radio, requestCountry, area, target, chartKind, genreId, retry) {
         moreJob?.cancel()
         loading = true
         loadingMore = false
         error = null
         model = null
         try {
-            model = loadDiscovery(app.apple, storefront, radio, area, target, chartKind, genreId)
+            model = loadDiscovery(app.apple, requestCountry, radio, area, target, chartKind, genreId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -140,6 +147,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
         if (destination.kind == "charts") {
             area = AREA_CHARTS
             chartKind = null
+            chartCountry = destination.country
             genreId = ALL_GENRES
             return
         }
@@ -151,20 +159,22 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
                 title = destination.title,
                 artwork = artwork,
                 detailOnly = true,
+                country = destination.country,
             ))
         } else {
             stack = stack + destination
             chartKind = null
+            chartCountry = null
         }
     }
 
-    fun openResource(resource: AppleCatalogResource) {
-        val editorialTarget = resource.toDiscoveryTarget()
+    fun openResource(resource: AppleCatalogResource, country: String?) {
+        val editorialTarget = resource.toDiscoveryTarget(country)
         if (editorialTarget != null) {
             openTarget(editorialTarget, resource.artworkUrl(500))
             return
         }
-        onOpen(resource.toCatalogHit())
+        onOpen(SearchCatalog.appleHit(resource, country))
     }
 
     val title = when {
@@ -201,13 +211,13 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         DiscoveryTab("新发现", area == AREA_NEW) {
-                            area = AREA_NEW; chartKind = null; genreId = ALL_GENRES
+                            area = AREA_NEW; chartKind = null; chartCountry = null; genreId = ALL_GENRES
                         }
                         DiscoveryTab("排行榜", area == AREA_CHARTS) {
-                            area = AREA_CHARTS; chartKind = null; genreId = ALL_GENRES
+                            area = AREA_CHARTS; chartKind = null; chartCountry = null; genreId = ALL_GENRES
                         }
                         DiscoveryTab("类别", area == AREA_CATEGORIES) {
-                            area = AREA_CATEGORIES; chartKind = null; genreId = ALL_GENRES
+                            area = AREA_CATEGORIES; chartKind = null; chartCountry = null; genreId = ALL_GENRES
                         }
                     }
                 }
@@ -273,12 +283,13 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
                     DiscoveryShelf(
                         section = section,
                         onSelect = { entry ->
-                            entry.resource?.let(::openResource) ?: entry.target?.let(::openTarget)
+                            entry.resource?.let { openResource(it, entry.country) } ?: entry.target?.let(::openTarget)
                         },
                         onSeeAll = { section.seeAll?.let(::openTarget) },
                         onChart = { kind ->
                             area = AREA_CHARTS
                             chartKind = kind
+                            chartCountry = section.country ?: current.country
                             genreId = ALL_GENRES
                         },
                     )
@@ -304,16 +315,17 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
                                             val more = page?.data ?: response.data
                                             val first = pageModel.sections.firstOrNull()
                                             val next = page?.next ?: response.next
-                                            if (first == null) model = pageModel.copy(next = next)
+                                            if (first == null) model = pageModel.copy(next = next, country = response.requestStorefront ?: pageModel.country)
                                             else {
                                                 val appended = (first.entries + more.mapIndexed { index, resource ->
-                                                    resource.toEntry(index + first.entries.size)
+                                                    resource.toEntry(index + first.entries.size, response.requestStorefront ?: pageModel.country)
                                                 }).distinctBy { it.key }
                                                 model = pageModel.copy(
                                                     sections = pageModel.sections.toMutableList().also { sections ->
                                                         sections[0] = first.copy(entries = appended)
                                                     },
                                                     next = next,
+                                                    country = response.requestStorefront ?: pageModel.country,
                                                 )
                                             }
                                         } catch (cancelled: CancellationException) {
@@ -439,7 +451,7 @@ private fun CategoryBrick(brick: CategoryBrick, modifier: Modifier, onClick: () 
     }
 }
 
-private data class BrowseTarget(val kind: String, val id: String, val title: String)
+private data class BrowseTarget(val kind: String, val id: String, val title: String, val country: String? = null)
 private data class DiscoveryEntry(
     val key: String,
     val title: String,
@@ -448,6 +460,7 @@ private data class DiscoveryEntry(
     val resource: AppleCatalogResource? = null,
     val target: BrowseTarget? = null,
     val rank: Int = 0,
+    val country: String? = null,
 )
 private data class DiscoverySection(
     val key: String,
@@ -456,12 +469,14 @@ private data class DiscoverySection(
     val description: String? = null,
     val seeAll: BrowseTarget? = null,
     val chartKind: String? = null,
+    val country: String? = null,
 )
 private data class DiscoveryModel(
     val sections: List<DiscoverySection>,
     val next: String? = null,
     val nextChartKind: String? = null,
     val genres: List<DiscoveryGenre> = emptyList(),
+    val country: String? = null,
 )
 private data class DiscoveryGenre(val id: String, val name: String)
 
@@ -475,17 +490,17 @@ private suspend fun loadDiscovery(
     genreId: String,
 ): DiscoveryModel {
     if (target != null) return loadEditorialTarget(api, storefront, target)
-    if (radio) return loadGrouping(api.radio(storefront), "广播")
+    if (radio) return loadGrouping(api.radio(storefront), "广播", storefront)
     return when (area) {
         AREA_CHARTS -> {
-            if (chartKind == null) loadChartShelves(api.charts(storefront = storefront))
+            if (chartKind == null) loadChartShelves(api.charts(storefront = storefront), storefront)
             else {
                 val response = api.charts(genre = genreId, limit = 50, storefront = storefront)
-                val page = response.charts(chartKind).firstOrNull()
-                    ?: return DiscoveryModel(emptyList())
+                val country = response.requestStorefront ?: storefront
+                val page = response.charts(chartKind).firstOrNull() ?: return DiscoveryModel(emptyList(), country = country)
                 val genres = if (chartKind in GENRE_CHARTS) {
                     val available = try {
-                        api.genres(storefront).data.mapNotNull { resource ->
+                        api.genres(country).data.mapNotNull { resource ->
                             resource.attributes.text("name").takeIf { it.isNotBlank() }?.let { DiscoveryGenre(resource.id, it) }
                         }
                     } catch (cancelled: CancellationException) {
@@ -497,30 +512,29 @@ private suspend fun loadDiscovery(
                 } else emptyList()
                 DiscoveryModel(
                     sections = listOf(DiscoverySection(
-                        key = "chart-$chartKind",
-                        title = page.name ?: chartLabel(chartKind),
-                        entries = page.data.mapIndexed { index, resource -> resource.toEntry(index + 1) },
-                    )),
-                    next = page.next,
-                    nextChartKind = chartKind,
-                    genres = genres,
+                        key = "chart-$chartKind", title = page.name ?: chartLabel(chartKind),
+                        entries = page.data.mapIndexed { index, resource -> resource.toEntry(index + 1, country) },
+                        country = country,
+                    )), next = page.next, nextChartKind = chartKind, genres = genres, country = country,
                 )
             }
         }
-        AREA_CATEGORIES -> loadCategories(api.categories(storefront))
-        else -> loadGrouping(api.browse(storefront), "新发现")
+        AREA_CATEGORIES -> loadCategories(api.categories(storefront), storefront)
+        else -> loadGrouping(api.browse(storefront), "新发现", storefront)
     }
 }
 
-private fun loadGrouping(response: AppleCatalogResponse, fallbackTitle: String): DiscoveryModel {
-    val grouping = response.data.firstOrNull() ?: return DiscoveryModel(emptyList())
+private fun loadGrouping(response: AppleCatalogResponse, fallbackTitle: String, requestCountry: String): DiscoveryModel {
+    val grouping = response.data.firstOrNull() ?: return DiscoveryModel(emptyList(), country = response.requestStorefront ?: requestCountry)
+    val country = grouping.catalogCountry(response.requestStorefront ?: requestCountry)
     val title = grouping.attributes.text("name").ifBlank { fallbackTitle }
     val tab = grouping.relationships["tabs"]?.data?.firstOrNull()
     val elements = tab?.relationships?.get("children")?.data.orEmpty()
-    return DiscoveryModel(elements.mapIndexedNotNull { index, element -> editorialSection(element, index) })
+    return DiscoveryModel(elements.mapIndexedNotNull { index, element -> editorialSection(element, index, country) }, country = country)
 }
 
-private fun editorialSection(element: AppleCatalogResource, index: Int): DiscoverySection? {
+private fun editorialSection(element: AppleCatalogResource, index: Int, fallbackCountry: String?): DiscoverySection? {
+    val country = element.catalogCountry(fallbackCountry)
     val attrs = element.attributes
     val kind = attrs.text("editorialElementKind")
     val sectionTitle = attrs.text("name").ifBlank { attrs.text("title") }
@@ -528,12 +542,12 @@ private fun editorialSection(element: AppleCatalogResource, index: Int): Discove
     val entries = when (kind) {
         "316", "385" -> element.relationships["children"]?.data.orEmpty().mapNotNull { child ->
             val content = child.relationships["contents"]?.data?.firstOrNull()
-            if (content != null) content.toEntry(0)
-            else child.toEntry(attrs = child.attributes, target = child.attributes.obj("link")?.text("url")?.toDiscoveryTarget(), fallbackTitle = child.attributes.text("designTag").ifBlank { child.attributes.text("name") })
+            if (content != null) content.toEntry(0, country)
+            else child.toEntry(fallbackCountry = country, attrs = child.attributes, target = child.attributes.obj("link")?.text("url")?.toDiscoveryTarget(), fallbackTitle = child.attributes.text("designTag").ifBlank { child.attributes.text("name") })
         }
-        "326", "327", "345", "387" -> element.relationships["contents"]?.data.orEmpty().mapIndexed { i, res -> res.toEntry(i + 1) }
+        "326", "327", "345", "387" -> element.relationships["contents"]?.data.orEmpty().mapIndexed { i, res -> res.toEntry(i + 1, country) }
         "488" -> element.relationships["children"]?.data.orEmpty().mapNotNull { child ->
-            child.relationships["contents"]?.data?.firstOrNull()?.toEntry(0)
+            child.relationships["contents"]?.data?.firstOrNull()?.toEntry(0, country)
         }
         else -> emptyList()
     }
@@ -542,13 +556,13 @@ private fun editorialSection(element: AppleCatalogResource, index: Int): Discove
             val value = link as? JsonObject ?: return@mapNotNull null
             val label = value.text("label")
             val destination = value.text("url").toDiscoveryTarget() ?: return@mapNotNull null
-            DiscoveryEntry("link-${destination.kind}-${destination.id}", label.ifBlank { destination.title }, target = destination)
+            DiscoveryEntry("link-${destination.kind}-${destination.id}", label.ifBlank { destination.title }, target = destination, country = destination.country)
         }
         else -> emptyList()
     }
     val allEntries = entries + links
     val room = element.relationships["room"]?.data?.firstOrNull()?.let {
-        BrowseTarget("room", it.id, it.attributes.text("title").ifBlank { it.attributes.text("name") }.ifBlank { sectionTitle })
+        BrowseTarget("room", it.id, it.attributes.text("title").ifBlank { it.attributes.text("name") }.ifBlank { sectionTitle }, it.catalogCountry(country))
     }?.takeIf { allEntries.size >= 6 }
     val description = if (kind == "404") attrs.text("description").plainText() else null
     if (allEntries.isEmpty() && description.isNullOrBlank()) return null
@@ -558,81 +572,91 @@ private fun editorialSection(element: AppleCatalogResource, index: Int): Discove
         entries = allEntries,
         description = description,
         seeAll = room,
+        country = country,
     )
 }
 
-private suspend fun loadCategories(response: AppleCatalogResponse): DiscoveryModel {
+private suspend fun loadCategories(response: AppleCatalogResponse, requestCountry: String): DiscoveryModel {
+    val country = response.requestStorefront ?: requestCountry
     val seen = HashSet<String>()
     val sections = response.data.mapIndexedNotNull { index, recommendation ->
         val attrs = recommendation.attributes
         val title = attrs.obj("title")?.text("stringForDisplay").orEmpty()
         val entries = recommendation.relationships["contents"]?.data.orEmpty().mapNotNull { resource ->
             if (!seen.add("${resource.type}:${resource.id}")) return@mapNotNull null
-            resource.toEntry(0)
+            resource.toEntry(0, recommendation.catalogCountry(country))
         }
         if (entries.isEmpty()) null else DiscoverySection("category-$index-${recommendation.id}", title.ifBlank { "为你推荐" }, entries)
     }
-    return DiscoveryModel(sections)
+    return DiscoveryModel(sections, country = country)
 }
 
 private suspend fun loadEditorialTarget(api: AppleCatalogApi, storefront: String, target: BrowseTarget): DiscoveryModel {
     return when (target.kind) {
-        "charts" -> loadChartShelves(api.charts(storefront = storefront))
-        "grouping" -> loadGrouping(api.editorial(AppleCatalogApi.Editorial.Grouping, target.id, storefront), target.title)
+        "charts" -> loadChartShelves(api.charts(storefront = storefront), storefront)
+        "grouping" -> loadGrouping(api.editorial(AppleCatalogApi.Editorial.Grouping, target.id, storefront), target.title, storefront)
         "room" -> {
-            val room = api.editorial(AppleCatalogApi.Editorial.Room, target.id, storefront).data.firstOrNull()
+            val response = api.editorial(AppleCatalogApi.Editorial.Room, target.id, storefront)
+            val room = response.data.firstOrNull()
                 ?: return DiscoveryModel(emptyList())
+            val country = room.catalogCountry(response.requestStorefront ?: storefront)
             val contents = room.relationships["contents"]
             DiscoveryModel(listOf(DiscoverySection(
                 "room-${target.id}", target.title.ifBlank { room.attributes.text("title").ifBlank { room.attributes.text("name") } },
-                contents?.data.orEmpty().mapIndexed { index, resource -> resource.toEntry(index + 1) },
-            )), contents?.next)
+                contents?.data.orEmpty().mapIndexed { index, resource -> resource.toEntry(index + 1, country) },
+            )), contents?.next, country = country)
         }
         "multi-room" -> {
-            val multi = api.editorial(AppleCatalogApi.Editorial.MultiRoom, target.id, storefront).data.firstOrNull()
+            val response = api.editorial(AppleCatalogApi.Editorial.MultiRoom, target.id, storefront)
+            val multi = response.data.firstOrNull()
                 ?: return DiscoveryModel(emptyList())
-            DiscoveryModel(multi.relationships["children"]?.data.orEmpty().mapIndexedNotNull { index, element -> editorialSection(element, index) })
+            val country = multi.catalogCountry(response.requestStorefront ?: storefront)
+            DiscoveryModel(multi.relationships["children"]?.data.orEmpty().mapIndexedNotNull { index, element -> editorialSection(element, index, country) }, country = country)
         }
         "curator" -> {
-            val curator = api.curator(target.id, storefront).data.firstOrNull() ?: return DiscoveryModel(emptyList())
+            val response = api.curator(target.id, storefront)
+            val curator = response.data.firstOrNull() ?: return DiscoveryModel(emptyList())
+            val country = curator.catalogCountry(response.requestStorefront ?: storefront)
             val grouping = curator.relationships["grouping"]?.data?.firstOrNull()
             if (grouping != null) {
                 val tab = grouping.relationships["tabs"]?.data?.firstOrNull()
-                val sections = tab?.relationships?.get("children")?.data.orEmpty().mapIndexedNotNull { index, element -> editorialSection(element, index) }
-                if (sections.isNotEmpty()) DiscoveryModel(sections) else curatorPlaylists(curator, target)
-            } else curatorPlaylists(curator, target)
+                val sections = tab?.relationships?.get("children")?.data.orEmpty().mapIndexedNotNull { index, element -> editorialSection(element, index, country) }
+                if (sections.isNotEmpty()) DiscoveryModel(sections, country = country) else curatorPlaylists(curator, target, country)
+            } else curatorPlaylists(curator, target, country)
         }
         else -> DiscoveryModel(emptyList())
     }
 }
 
-private fun curatorPlaylists(curator: AppleCatalogResource, target: BrowseTarget): DiscoveryModel {
+private fun curatorPlaylists(curator: AppleCatalogResource, target: BrowseTarget, country: String?): DiscoveryModel {
     val page = curator.relationships["playlists"]
     return DiscoveryModel(
-        listOf(DiscoverySection("curator-${target.id}", target.title.ifBlank { curator.name }, page?.data.orEmpty().map { it.toEntry(0) })),
+        listOf(DiscoverySection("curator-${target.id}", target.title.ifBlank { curator.name }, page?.data.orEmpty().map { it.toEntry(0, country) })),
         next = page?.next,
+        country = country,
     )
 }
 
-private fun loadChartShelves(response: AppleCatalogResponse): DiscoveryModel {
+private fun loadChartShelves(response: AppleCatalogResponse, requestCountry: String): DiscoveryModel {
+    val country = response.requestStorefront ?: requestCountry
     val order = listOf("songs", "cityCharts", "dailyGlobalTopCharts", "playlists", "albums", "music-videos")
     val sections = order.mapNotNull { kind ->
         val page = response.charts(kind).firstOrNull() ?: return@mapNotNull null
         if (page.data.isEmpty()) return@mapNotNull null
         DiscoverySection(
-            key = "chart-$kind",
-            title = page.name ?: chartLabel(kind),
-            entries = page.data.mapIndexed { index, resource -> resource.toEntry(if (kind in RANKED_CHARTS) index + 1 else 0) },
-            chartKind = kind.takeIf { kind in RANKED_CHARTS },
+            key = "chart-$kind", title = page.name ?: chartLabel(kind),
+            entries = page.data.mapIndexed { index, resource -> resource.toEntry(if (kind in RANKED_CHARTS) index + 1 else 0, country) },
+            chartKind = kind.takeIf { kind in RANKED_CHARTS }, country = country,
         )
     }
-    return DiscoveryModel(sections)
+    return DiscoveryModel(sections, country = country)
 }
 
 private fun AppleCatalogResource.toEntry(
     rank: Int = 0,
+    fallbackCountry: String? = null,
     attrs: JsonObject = attributes,
-    target: BrowseTarget? = toDiscoveryTarget(),
+    target: BrowseTarget? = toDiscoveryTarget(fallbackCountry),
     fallbackTitle: String = "",
 ): DiscoveryEntry {
     val art = artworkUrl(500) ?: attrs.obj("editorialArtwork")?.let { editorial ->
@@ -649,39 +673,16 @@ private fun AppleCatalogResource.toEntry(
         resource = takeIf { type != "editorial-elements" },
         target = target,
         rank = rank,
+        country = catalogCountry(fallbackCountry),
     )
 }
 
-private fun AppleCatalogResource.toCatalogHit(): CatalogHit {
-    val kind = when (type) {
-        "songs" -> "song"
-        "artists" -> "artist"
-        "albums" -> "album"
-        "playlists" -> "playlist"
-        "music-videos" -> "music-video"
-        "stations" -> "station"
-        "uploaded-videos" -> "post"
-        else -> type
-    }
-    return CatalogHit(
-        source = Source.Apple,
-        kind = kind,
-        id = id,
-        title = name,
-        subtitle = artist,
-        artwork = artworkUrl(500),
-        track = toTrack(),
-        explicit = explicit,
-        detailOnly = type != "songs",
-        attributes = attributes,
-    )
-}
 
-private fun AppleCatalogResource.toDiscoveryTarget(): BrowseTarget? = when (type) {
-    "groupings" -> BrowseTarget("grouping", id, name)
-    "rooms" -> BrowseTarget("room", id, name)
-    "multirooms" -> BrowseTarget("multi-room", id, name)
-    "apple-curators", "curators" -> BrowseTarget("curator", id, name)
+private fun AppleCatalogResource.toDiscoveryTarget(fallbackCountry: String?): BrowseTarget? = when (type) {
+    "groupings" -> BrowseTarget("grouping", id, name, catalogCountry(fallbackCountry))
+    "rooms" -> BrowseTarget("room", id, name, catalogCountry(fallbackCountry))
+    "multirooms" -> BrowseTarget("multi-room", id, name, catalogCountry(fallbackCountry))
+    "apple-curators", "curators" -> BrowseTarget("curator", id, name, catalogCountry(fallbackCountry))
     "editorial-items", "activities" -> attributes.text("url").ifBlank {
         attributes.obj("link")?.text("url").orEmpty()
     }.toDiscoveryTarget()
@@ -706,6 +707,7 @@ private fun String.toDiscoveryTarget(): BrowseTarget? {
         "room" -> "room" to route.getOrNull(1)
         "multi-room" -> "multi-room" to route.getOrNull(1)
         "curator" -> "curator" to route.lastOrNull()
+        "song", "album", "artist", "playlist", "music-video", "station", "post" -> route[0].lowercase(Locale.ROOT) to route.lastOrNull()
         "new" -> if (route.getOrNull(1) == "top-charts") "charts" to "" else return null
         else -> return null
     }
@@ -717,7 +719,7 @@ private fun String.toDiscoveryTarget(): BrowseTarget? {
         "grouping" -> "浏览"
         "multi-room" -> "专题"
         else -> "策展人"
-    })
+    }, cc)
 }
 
 private fun JsonObject.text(key: String): String = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
@@ -743,5 +745,5 @@ private const val AREA_RADIO = "radio"
 private const val ALL_GENRES = "34"
 private val GENRE_CHARTS = setOf("songs", "albums", "music-videos")
 private val RANKED_CHARTS = setOf("songs", "playlists", "albums", "music-videos")
-private val CATALOG_TARGETS = setOf("music-video", "station", "post")
+private val CATALOG_TARGETS = setOf("song", "album", "artist", "playlist", "music-video", "station", "post")
 private val TRACK_PAGE_PARAMS = mapOf("include[songs]" to "artists", "relate[songs]" to "albums")

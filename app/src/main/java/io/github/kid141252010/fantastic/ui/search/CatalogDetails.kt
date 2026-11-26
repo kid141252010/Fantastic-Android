@@ -1,6 +1,7 @@
 package io.github.kid141252010.fantastic.ui.search
 
 import android.text.Html
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Shuffle
@@ -66,6 +68,7 @@ import io.github.kid141252010.fantastic.data.AppleCatalogHttpException
 import io.github.kid141252010.fantastic.data.AppleCatalogPage
 import io.github.kid141252010.fantastic.data.AppleCatalogResource
 import io.github.kid141252010.fantastic.data.CatalogHit
+import io.github.kid141252010.fantastic.data.LibraryAlbumMetadata
 import io.github.kid141252010.fantastic.data.NeteaseAlbumList
 import io.github.kid141252010.fantastic.data.NeteaseAlbum
 import io.github.kid141252010.fantastic.data.NeteaseAlbumSummary
@@ -80,6 +83,9 @@ import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.QqSong
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.catalogCountry
+import io.github.kid141252010.fantastic.data.libraryTrackCount
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.data.toLibraryTracks
 import io.github.kid141252010.fantastic.ui.Dimens
@@ -101,6 +107,7 @@ import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
@@ -123,11 +130,15 @@ internal fun CatalogDetails(
     source: Source,
     kind: String,
     id: String,
+    country: String?,
     modifier: Modifier = Modifier,
     interactive: Boolean = true,
     onClose: () -> Unit,
 ) {
-    val root = remember(source, kind, id) { DetailTarget(source, normalizedKind(kind), id) }
+    val root = remember(source, kind, id, country) {
+        DetailTarget(source, normalizedKind(kind), id,
+            if (source == Source.Apple) country.normalizedAppleCountry() ?: app.prefs.storefront.normalizedAppleCountry() else null)
+    }
     var history by remember(root) { mutableStateOf(listOf(root)) }
     val current = history.last()
     val player by app.player.state.collectAsStateWithLifecycle()
@@ -189,12 +200,12 @@ internal fun CatalogDetails(
                 NeteaseSongControls(app, track, player.mediaId, play,
                     expanded = qualityExpanded, onDismiss = { qualityExpanded = false }, playbackError = playbackError)
             }
-            BackHandler(enabled = qualityExpanded) { qualityExpanded = false }
+            BackHandler(enabled = interactive && qualityExpanded) { qualityExpanded = false }
         }
     }
 }
 
-private data class DetailTarget(val source: Source, val kind: String, val id: String)
+private data class DetailTarget(val source: Source, val kind: String, val id: String, val country: String? = null)
 private data class DetailEntry(
     val target: DetailTarget,
     val title: String,
@@ -223,6 +234,7 @@ private data class DetailPage(
     val song: Track? = null,
     val sections: List<DetailSection> = emptyList(),
     val notice: String? = null,
+    val country: String? = null,
 )
 private class DetailUnavailable(message: String) : IOException(message)
 
@@ -248,8 +260,10 @@ private fun DetailBody(
     var moreSection by remember { mutableStateOf<DetailSection?>(null) }
     var moreIndex by remember { mutableStateOf(-1) }
     val player by app.player.state.collectAsStateWithLifecycle()
+    val attemptedArtists = remember(repository) { mutableSetOf<DetailTarget>() }
     LaunchedEffect(repository, retry) {
         error = null
+        attemptedArtists.clear()
         try {
             page = repository.load()
         } catch (e: CancellationException) {
@@ -307,6 +321,27 @@ private fun DetailBody(
         }
     }
     val artists = remember(loaded) { loaded.sections.flatMap { it.entries }.filter { it.target.kind == "artist" }.distinctBy { it.target } }
+    val artistTargets = remember(artists) { artists.map { it.target } }
+    LaunchedEffect(repository, artistTargets, retry) {
+        if (target.kind != "album") return@LaunchedEffect
+        for (entry in artists) {
+            if (!entry.artwork.isNullOrBlank() || !attemptedArtists.add(entry.target)) continue
+            try {
+                val artwork = repository.artistArtwork(entry.target.id, entry.target.country)
+                    ?.takeIf { it.isNotBlank() } ?: continue
+                ensureActive()
+                page = page?.let { latest -> latest.copy(sections = latest.sections.map { section ->
+                    section.copy(entries = section.entries.map { current ->
+                        if (current.target == entry.target) current.copy(artwork = artwork) else current
+                    })
+                }) }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                Log.w("FantasticCatalog", "${entry.target.source} artist artwork failed for ${entry.target.id}", failure)
+            }
+        }
+    }
     val artistPage = target.kind == "artist"
     val firstPlayable = playableSection?.entries?.indexOfFirst { it.track != null } ?: -1
     LaunchedEffect(moreRequest) {
@@ -468,7 +503,8 @@ private fun DetailBody(
         }
     }
     moreEntry?.let { entry ->
-        val hit = CatalogHit(entry.target.source, entry.target.kind, entry.target.id, entry.title, entry.subtitle, entry.artwork, entry.track)
+        val hit = CatalogHit(entry.target.source, entry.target.kind, entry.target.id, entry.title, entry.subtitle, entry.artwork, entry.track,
+            country = if (entry.target == target) loaded.country else entry.track?.country ?: entry.target.country)
         val queue = if (entry.target == target) playable else listOfNotNull(entry.track)
         val resolverSection = (if (target.kind == "album") loaded.sections.firstOrNull {
             it.key == "tracks" || it.key == "relationship:tracks"
@@ -493,7 +529,7 @@ private fun DetailBody(
                 resolveTracks = resolverSection?.let { section -> { repository.completeTracks(section) } },
                 saveParentAlbum = sectionForSong?.takeIf { target.kind == "album" && entry.track?.albumId == target.id }?.let { section ->
                     {
-                        val album = CatalogHit(target.source, "album", target.id, loaded.title, loaded.subtitle, loaded.artwork)
+                        val album = CatalogHit(target.source, "album", target.id, loaded.title, loaded.subtitle, loaded.artwork, country = loaded.country)
                         app.library.add(album, repository.completeTracks(section))
                     }
                 },
@@ -585,7 +621,8 @@ private fun DetailRelationRow(entry: DetailEntry, onClick: () -> Unit) {
         leading = {
             val artist = entry.target.kind == "artist"
             Md3MediaArtwork(entry.artwork, Modifier.size(48.dp),
-                shape = if (artist) CircleShape else MaterialTheme.shapes.small)
+                shape = if (artist) CircleShape else MaterialTheme.shapes.small,
+                icon = if (artist) Icons.Rounded.Person else Icons.Rounded.MusicNote)
         },
         trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
     )
@@ -677,7 +714,8 @@ private fun NeteaseSongControls(
 private class DetailRepository(private val app: FantasticApp, private val target: DetailTarget) {
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
     // Keep a consistent storefront while navigating this resource's opaque pagination links.
-    private val storefront = app.prefs.storefront
+    private val storefront = target.country.normalizedAppleCountry() ?: app.prefs.storefront
+    private var resourceCountry: String? = storefront.normalizedAppleCountry()
     private var parentAlbum: AppleCatalogResource? = null
 
     suspend fun load(): DetailPage {
@@ -694,7 +732,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
             val response = if (cursor.tracks) app.apple.trackPage(cursor.next) else app.apple.page(cursor.next)
             val next = response.next?.takeIf { it.isNotBlank() }
             if (next == cursor.next || next in cursor.visited) throw DetailUnavailable("服务器分页没有前进，请稍后重试。")
-            val entries = response.data.mapNotNull { appleEntry(it, parentAlbum.takeIf { cursor.tracks }) }
+            val entries = response.data.mapNotNull { appleEntry(it, parentAlbum.takeIf { cursor.tracks }, response.requestStorefront ?: resourceCountry) }
             DetailSection("", "", entries,
                 next?.let { DetailCursor.Apple(it, cursor.tracks, cursor.visited + cursor.next) },
                 if (response.data.any { !isSupportedKind(it.type) }) "部分非音频资源不支持在此页面打开。" else null)
@@ -753,6 +791,8 @@ private class DetailRepository(private val app: FantasticApp, private val target
         }
         val resource = app.apple.entity(entity, target.id, storefront = storefront,
             params = if (entity == AppleCatalogApi.Entity.Album) mapOf("include" to "tracks,artists,record-labels") else emptyMap())
+        if (resource.id != target.id || resource.type != entity.route) throw DetailUnavailable("服务器返回了其他资源。")
+        resourceCountry = resource.catalogCountry(storefront)
         parentAlbum = resource.takeIf { target.kind == "album" }
         val facts = buildList {
             val attrs = resource.attributes
@@ -775,8 +815,9 @@ private class DetailRepository(private val app: FantasticApp, private val target
         val description = listOf("description", "plainEditorialNotes", "editorialNotes", "artistBio")
             .firstNotNullOfOrNull { key -> detailPlainText(resource.attributes[key]).takeIf { it.isNotBlank() } }.orEmpty()
         return DetailPage(resource.name, listOf(resource.artist, resource.album).filter { it.isNotBlank() }.distinct().joinToString(" · "),
-            resource.artworkUrl(600), description, facts, resource.toTrack().takeIf { target.kind == "song" }, sections,
-            if (target.kind == "music-video") "这是音乐视频。当前播放器队列只接受音频歌曲；此处不将视频冒充音频，也不解析 DRM 视频地址。可浏览下方关联艺人和专辑。" else null)
+            resource.artworkUrl(600), description, facts, resource.toTrack(resourceCountry).takeIf { target.kind == "song" }, sections,
+            if (target.kind == "music-video") "这是音乐视频。当前播放器队列只接受音频歌曲；此处不将视频冒充音频，也不解析 DRM 视频地址。可浏览下方关联艺人和专辑。" else null,
+            country = resourceCountry)
     }
 
     private fun appleSection(key: String, name: String, page: AppleCatalogPage, parent: AppleCatalogResource): DetailSection? {
@@ -789,16 +830,17 @@ private class DetailRepository(private val app: FantasticApp, private val target
             if (page.data.any { !isSupportedKind(it.type) }) "部分非音频资源不支持在此页面打开。" else null)
     }
 
-    private fun appleEntry(resource: AppleCatalogResource, album: AppleCatalogResource? = null): DetailEntry? {
+    private fun appleEntry(resource: AppleCatalogResource, album: AppleCatalogResource? = null, country: String? = resourceCountry): DetailEntry? {
         if (!isSupportedKind(resource.type)) return null
-        val track = resource.toTrack().takeIf { normalizedKind(resource.type) == "song" }?.let { song -> if (album == null) song else song.copy(
+        val entryCountry = resource.catalogCountry(country)
+        val track = resource.toTrack(entryCountry).takeIf { normalizedKind(resource.type) == "song" }?.let { song -> if (album == null) song else song.copy(
             album = song.album.ifBlank { album.name },
             artist = song.artist.ifBlank { album.artist },
             artworkTemplate = song.artworkTemplate ?: album.artwork?.detailString("url")?.replace("{c}", "bb"),
             albumId = album.id,
             albumArtist = song.albumArtist.ifBlank { album.artist },
         ) }
-        return DetailEntry(DetailTarget(Source.Apple, normalizedKind(resource.type), resource.id),
+        return DetailEntry(DetailTarget(Source.Apple, normalizedKind(resource.type), resource.id, entryCountry),
             resource.name, resource.artist, resource.artworkUrl(160) ?: track?.artwork(160), track)
     }
 
@@ -831,18 +873,23 @@ private class DetailRepository(private val app: FantasticApp, private val target
             val albumArtist = album.artists.joinToString(" / ") { it.name }
             val tracks = neteaseAlbum?.toLibraryTracks(target.id)
                 ?: (qqAlbum?.get("songs") as? JsonArray).orEmpty().map { json.decodeFromJsonElement<QqSong>(it).toTrack() }
+            if (album.mid != target.id) throw DetailUnavailable("服务器返回了其他专辑。")
+            val albumTracks = tracks.filter { it.albumId.isBlank() || it.albumId == target.id }.map { song ->
+                song.copy(albumId = target.id, album = song.album.ifBlank { album.name },
+                    albumArtist = song.albumArtist.ifBlank { albumArtist },
+                    artworkTemplate = song.artworkTemplate?.takeIf { it.isNotBlank() } ?: album.cover.ifBlank { null })
+            }
+            album.size.libraryTrackCount(tracks.size)?.let { count ->
+                app.library.recordAlbumMetadata(LibraryAlbumMetadata(target.source, target.id, albumArtist, albumTracks, count))
+            }
             DetailPage(album.name, albumArtist, artwork(album.cover), detailPlainText(JsonPrimitive(album.description)),
                 buildList {
-                    add("曲目数" to album.size.toString())
+                    album.size?.takeIf { it >= 0 }?.let { add("曲目数" to it.toString()) }
                     detailDate(album.publishTime)?.let { add("发行日期" to it) }
                     if (album.language.isNotBlank()) add("语言" to album.language)
                     if (album.subType.isNotBlank()) add("类型" to album.subType)
                 }, sections = buildList {
-                    add(DetailSection("tracks", "曲目", tracks.filter { it.id.isNotBlank() }.map { song ->
-                        songEntry(song.copy(albumId = target.id, album = song.album.ifBlank { album.name },
-                            albumArtist = albumArtist.ifBlank { song.albumArtist },
-                            artworkTemplate = song.artworkTemplate?.takeIf { it.isNotBlank() } ?: album.cover.ifBlank { null }))
-                    }))
+                    add(DetailSection("tracks", "曲目", albumTracks.filter { it.id.isNotBlank() }.map(::songEntry)))
                     artistRelations(album.artists)?.let { add(it) }
                 })
         }
@@ -887,7 +934,7 @@ private class DetailRepository(private val app: FantasticApp, private val target
         songEntry(track)
     }
 
-    private fun songEntry(track: Track) = DetailEntry(DetailTarget(track.source, "song", track.id),
+    private fun songEntry(track: Track) = DetailEntry(DetailTarget(track.source, "song", track.id, track.country),
         track.title, track.artist, track.artwork(160), track)
 
     private fun albumEntries(albums: List<NeteaseAlbumSummary>): List<DetailEntry> = albums.filter { it.mid.isNotBlank() }.map {
@@ -900,6 +947,19 @@ private class DetailRepository(private val app: FantasticApp, private val target
             DetailEntry(DetailTarget(target.source, "artist", it.mid), it.name, artwork = artwork(it.avatar))
         }
         return entries.takeIf { it.isNotEmpty() }?.let { DetailSection("artists", "艺人", it) }
+    }
+
+    suspend fun artistArtwork(artistId: String, country: String?): String? {
+        if (artistId.isBlank() || artistId == "0") return null
+        return when (target.source) {
+            Source.Apple -> app.apple.entity(AppleCatalogApi.Entity.Artist, artistId,
+                storefront = country.normalizedAppleCountry() ?: storefront)
+                .takeIf { it.id == artistId && it.type == "artists" }?.artworkUrl(160)
+            Source.Netease -> app.netease.artist(artistId).artist.takeIf { it.mid == artistId }
+                ?.let { artwork(it.avatar.ifBlank { it.cover }) }
+            Source.QQ -> json.decodeFromJsonElement<NeteaseArtistPage>(app.qq.artist(artistId)).artist
+                .takeIf { it.mid == artistId }?.let { artwork(it.avatar.ifBlank { it.cover }) }
+        }
     }
 
     private suspend fun artist(): NeteaseArtistPage = if (target.source == Source.Netease) app.netease.artist(target.id)
