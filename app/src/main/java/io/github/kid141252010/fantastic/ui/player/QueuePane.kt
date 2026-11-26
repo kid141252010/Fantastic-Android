@@ -27,6 +27,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -63,6 +64,8 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -118,7 +121,8 @@ internal fun QueuePane(
         Row(Modifier.fillMaxWidth().padding(start = 32.dp, end = 20.dp).then(contentFade),
             verticalAlignment = Alignment.CenterVertically) {
             Text("继续播放", Modifier.weight(1f).padding(vertical = 14.dp),
-                color = Color.White.copy(alpha = .94f), fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                color = Color.White.copy(alpha = .94f),
+                style = LocalTextStyle.current.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium).withUserFontWeight(FontWeightRole.Title))
             if (rows.isNotEmpty() && state.canEditQueue) {
                 TextButton(onClick = { clearRevision = state.queueRevision }) {
                     Text("清除队列", color = Color.White.copy(alpha = .65f), fontSize = 13.sp)

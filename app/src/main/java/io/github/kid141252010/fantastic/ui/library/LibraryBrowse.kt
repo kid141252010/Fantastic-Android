@@ -61,6 +61,8 @@ import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 internal enum class LibraryCategory(val title: String, val kind: String?, val icon: ImageVector) {
     Playlists("歌单", "playlist", Icons.AutoMirrored.Rounded.QueueMusic),
@@ -183,7 +185,7 @@ internal fun LibraryHome(
             item(key = "library_title_key", span = { GridItemSpan(maxLineSpan) }) {
                 Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("资料库", Modifier.weight(1f), style = MaterialTheme.typography.headlineLarge.copy(
-                        fontSize = 34.sp, lineHeight = 41.sp, fontWeight = FontWeight.Bold))
+                        fontSize = 34.sp, lineHeight = 41.sp, fontWeight = FontWeight.Bold).withUserFontWeight(FontWeightRole.Title))
                     if (!floatingActions) actions()
                 }
             }

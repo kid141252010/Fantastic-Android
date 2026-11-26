@@ -28,6 +28,7 @@ import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.ThumbDownOffAlt
 import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,6 +56,8 @@ import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.playback.validSongId
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -125,7 +128,8 @@ internal fun MediaActionContent(
     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
         Artwork(hit.artwork, 80.dp, 5.dp)
         Column(Modifier.weight(1f).padding(start = 16.dp)) {
-            Text(hit.title, color = palette.label, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+            Text(hit.title, color = palette.label,
+                style = LocalTextStyle.current.copy(fontSize = 17.sp, fontWeight = FontWeight.Bold).withUserFontWeight(FontWeightRole.Title),
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (hit.subtitle.isNotBlank()) Text(hit.subtitle, Modifier.padding(top = 4.dp),
                 color = palette.secondary, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

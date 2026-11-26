@@ -23,12 +23,14 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -36,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -43,6 +47,7 @@ import io.github.kid141252010.fantastic.BuildConfig
 import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.AppleLyricsOptions
 import io.github.kid141252010.fantastic.data.NeteaseCapabilities
+import io.github.kid141252010.fantastic.data.FontWeights
 import io.github.kid141252010.fantastic.data.PlaybackCacheLimit
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.SourceStatus
@@ -53,6 +58,7 @@ import io.github.kid141252010.fantastic.ui.Md3PreferenceRow
 import io.github.kid141252010.fantastic.ui.Md3SectionHeader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -68,6 +74,7 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     var baseUrl by remember { mutableStateOf(prefs.baseUrl) }
     val savedStorefront by prefs.storefrontState.collectAsStateWithLifecycle()
+    val fontWeights by prefs.fontWeightsState.collectAsStateWithLifecycle()
     val regions by app.appleRegions.state.collectAsStateWithLifecycle()
     var storefrontDraft by remember { mutableStateOf(prefs.storefront) }
     var storefrontEdited by remember { mutableStateOf(false) }
@@ -335,6 +342,23 @@ fun SettingsScreen(
                         )
                     }
 
+                    Md3SectionHeader("字体字重")
+                    FontWeightPreference("正文", fontWeights.body, 400) {
+                        prefs.fontWeights = prefs.fontWeights.copy(body = it)
+                    }
+                    FontWeightPreference("标题", fontWeights.title, 600) {
+                        prefs.fontWeights = prefs.fontWeights.copy(title = it)
+                    }
+                    FontWeightPreference("歌词", fontWeights.lyrics, 700) {
+                        prefs.fontWeights = prefs.fontWeights.copy(lyrics = it)
+                    }
+                    Text(
+                        "100–900，数值越大越粗。松手保存并生效，重启后保留；恢复默认沿用各处原样式。静态或系统字体按可用字重匹配。",
+                        Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
                     Md3SectionHeader("资料库")
                     Md3PreferenceRow(
                         title = "显示音源来源",
@@ -507,6 +531,30 @@ private suspend fun <T> sourceResult(block: suspend () -> T): Result<T> = try {
     throw e
 } catch (e: Exception) {
     Result.failure(e)
+}
+
+@Composable
+private fun FontWeightPreference(title: String, value: Int, initialWeight: Int, onChange: (Int) -> Unit) {
+    var draft by remember(value) { mutableFloatStateOf((if (value == 0) initialWeight else value).toFloat()) }
+    var dragging by remember(value) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+            Text(if (value == 0 && !dragging) "默认" else draft.roundToInt().toString(),
+                style = MaterialTheme.typography.bodyMedium)
+            TextButton(onClick = { onChange(0) }, enabled = value != 0) { Text("恢复默认") }
+        }
+        Slider(
+            value = draft,
+            onValueChange = { draft = it; dragging = true },
+            onValueChangeFinished = {
+                onChange(draft.roundToInt().coerceIn(FontWeights.MIN, FontWeights.MAX))
+                dragging = false
+            },
+            valueRange = FontWeights.MIN.toFloat()..FontWeights.MAX.toFloat(),
+            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "${title}字重" },
+        )
+    }
 }
 
 @Composable

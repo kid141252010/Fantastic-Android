@@ -37,13 +37,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 @Composable
 internal fun Md3SectionHeader(title: String) {
     Text(
         title,
         modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 8.dp),
-        style = MaterialTheme.typography.labelLarge,
+        style = MaterialTheme.typography.labelLarge.withUserFontWeight(FontWeightRole.Title, defaultWeight = 500),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }

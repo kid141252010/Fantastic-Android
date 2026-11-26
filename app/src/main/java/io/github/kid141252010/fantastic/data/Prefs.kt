@@ -13,11 +13,45 @@ internal enum class PlaybackCacheLimit(val id: String, val label: String, val by
     Gb5("5gb", "5 GB", 5_000_000_000L),
 }
 
+/** Zero preserves each existing text style; nonzero values are exact user-selected weights. */
+internal data class FontWeights(val body: Int = 0, val title: Int = 0, val lyrics: Int = 0) {
+    init {
+        require(valid(body) && valid(title) && valid(lyrics))
+    }
+
+    companion object {
+        const val MIN = 100
+        const val MAX = 900
+        private fun valid(weight: Int) = weight == 0 || weight in MIN..MAX
+    }
+}
+
 /** 简单的键值设置。服务器地址指向用户自己部署的 Fantastic。 */
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("fantastic", Context.MODE_PRIVATE)
     private val _storefrontState = MutableStateFlow(sp.getString("storefront", DEFAULT_STOREFRONT)!!)
     val storefrontState: StateFlow<String> = _storefrontState.asStateFlow()
+    private val _fontWeightsState = MutableStateFlow(FontWeights(
+        body = savedFontWeight("bodyFontWeight"),
+        title = savedFontWeight("titleFontWeight"),
+        lyrics = savedFontWeight("lyricsFontWeight"),
+    ))
+    internal val fontWeightsState: StateFlow<FontWeights> = _fontWeightsState.asStateFlow()
+
+    private fun savedFontWeight(key: String): Int =
+        sp.getInt(key, 0).takeIf { it in FontWeights.MIN..FontWeights.MAX } ?: 0
+
+    internal var fontWeights: FontWeights
+        get() = _fontWeightsState.value
+        set(value) {
+            if (value == _fontWeightsState.value) return
+            sp.edit {
+                putInt("bodyFontWeight", value.body)
+                putInt("titleFontWeight", value.title)
+                putInt("lyricsFontWeight", value.lyrics)
+            }
+            _fontWeightsState.value = value
+        }
 
     var baseUrl: String
         get() = sp.getString("baseUrl", DEFAULT_BASE_URL)!!.trimEnd('/')

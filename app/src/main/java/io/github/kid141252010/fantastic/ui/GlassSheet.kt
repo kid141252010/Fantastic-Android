@@ -33,6 +33,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -60,6 +61,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import io.github.kid141252010.fantastic.R
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 internal data class ActionSheetColors(val surface: Color, val label: Color, val secondary: Color, val divider: Color)
 
@@ -130,12 +133,13 @@ internal fun GlassSheet(
                             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Text(title, Modifier.weight(1f).semantics { heading() }, color = palette.label,
-                                    fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    style = LocalTextStyle.current.copy(fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                        .withUserFontWeight(FontWeightRole.Title), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 CircularIconButton(onClick = onDismissRequest) { Icon(Icons.Rounded.Close, "关闭$title", tint = palette.secondary) }
                             }
                             HorizontalDivider(thickness = .5.dp, color = palette.divider)
                         }
-                        ProvideTextStyle(TextStyle(color = palette.label, fontSize = 17.sp)) {
+                        ProvideTextStyle(TextStyle(color = palette.label, fontSize = 17.sp).withUserFontWeight()) {
                             Column(
                                 Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
                                 content = content,

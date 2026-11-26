@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -50,6 +51,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.kid141252010.fantastic.lyrics.LyricsController
 import io.github.kid141252010.fantastic.playback.PlayerState
+import io.github.kid141252010.fantastic.ui.theme.LocalFontWeights
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -191,6 +195,7 @@ internal fun LyricsPlayerPane(
     controls: @Composable (Modifier) -> Unit,
     contentFade: Modifier,
 ) {
+    val lyricFontWeight = LocalFontWeights.current.lyrics
     var controlsMode by remember(mediaId) { mutableStateOf(LyricsControlsMode.Shown) }
     var popupExpanded by remember(mediaId) { mutableStateOf(false) }
     var pointerDown by remember { mutableStateOf(false) }
@@ -232,6 +237,7 @@ internal fun LyricsPlayerPane(
                         factory = lyrics::createView,
                         modifier = Modifier.fillMaxSize(),
                         update = { view ->
+                            view.setFontWeight(lyricFontWeight)
                             view.onSheetDragBy = onSheetDragBy
                             view.onSheetScrollEnd = onSheetScrollEnd
                             if (view.isNestedScrollingEnabled != interactive) {
@@ -265,8 +271,9 @@ internal fun LyricsPlayerPane(
                                 textAlign = TextAlign.Center,
                             )
                             else -> Text(
-                                "歌词不可用", color = PlayerSecondary, fontWeight = FontWeight.Bold,
-                                fontSize = 34.sp, textAlign = TextAlign.Center,
+                                "歌词不可用", color = PlayerSecondary,
+                                style = LocalTextStyle.current.copy(fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                                    .withUserFontWeight(FontWeightRole.Title), textAlign = TextAlign.Center,
                             )
                         }
                     }
