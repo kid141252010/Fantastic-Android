@@ -40,7 +40,12 @@ internal class AppleNativeExporter(private val context: Context, private val api
         reserve: (Long) -> Unit,
         progress: (Int?) -> Unit,
     ): AudioFileInfo = withContext(Dispatchers.IO) {
-        request.resolvedApple?.let { return@withContext exportResolvedAlac(request, it, target, reserve, progress) }
+        request.resolvedApple?.let { resolved ->
+            if (PlaybackCacheKey.from(request.server, request.storefront, io.github.kid141252010.fantastic.data.Source.Apple, request.track.id) != resolved.key) {
+                throw IOException("Apple 缓存音源与请求国家不一致")
+            }
+            return@withContext exportResolvedAlac(request, resolved, target, reserve, progress)
+        }
         val wanted = normalizeWanted(request.quality)
         val profile = applePlaybackProfile(context.applicationContext, Prefs(context.applicationContext))
         val decrypt = AppleNativeDecrypt(context.applicationContext, api, request.server)

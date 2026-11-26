@@ -43,6 +43,17 @@
 - 依据：[Apple 无损说明（2026-11-12）](https://support.apple.com/en-us/118295) 确认 Android 流播/下载音质分别选择及无损的流量/存储成本；[Media3 1.5.1 Mp4Extractor](https://github.com/androidx/media/blob/1.5.1/libraries/extractor/src/main/java/androidx/media3/extractor/mp4/Mp4Extractor.java) 与 [TrackOutput](https://github.com/androidx/media/blob/1.5.1/libraries/extractor/src/main/java/androidx/media3/extractor/TrackOutput.java) 提供本地 packet/seek 契约。3 槽、8 MiB、4 片和完整性容差均为项目实现值，不是 Apple 公布的缓存参数；不承诺整曲完成时限。
 - 本轮 `adb devices -l` 无设备。首次生成耗时、首尾实际无损输出、同音质二次试听无 prepare/CDN/模板请求、断网重启、本地 90s/180s 歌词定位与暂停恢复、生成中快速定位/切歌、空间不足/断网失败、随机混源 uid 和音质/profile 隔离均未运行真实设备验收；构建或包体核验不能代替这些证据。
 
+## MiniPlayer 材质、资料库与国家来源
+
+- MiniPlayer 与底栏复用同一 `Glass`／`LocalHaze`，不再叠加自己的不透明胶囊底色和边框；保留 48dp 布局、封面交接、拖动、按钮与同一帧透明度。材质关系依据 iOS 26 [WWDC25 284 的 2:31–3:35](https://developer.apple.com/videos/play/wwdc2025/284/)：Music MiniPlayer 是外观匹配 tab bar 的 bottom accessory；[Materials HIG](https://developer.apple.com/design/human-interface-guidelines/materials) 要求控制层浮于内容上方。24dp 模糊、0.8 tint、0.02 noise、8dp 阴影及边框均沿用本项目底栏，不是 Apple 官方 Android 参数；API 26–30 或无采样源沿用共享不透明回退。
+- 播放器按实际展开、拖动和收束状态发布系统返回所有权；资料库及其下载／本地专辑子页明确服从该所有权、目录和设置前景层。最近添加歌单仍用已有 `playlistId`／`goBack` 逐层退回来源页，不新增横向手势，也不把它改成歌单类别页。截图当次系统回调被谁消费未获运行证据，不能归因于原本没有 BackHandler。
+- Apple 专辑字段投影包含 `artistName` 和 `trackCount`；只信同身份专辑的非负总数，不以已保存数量或可播放返回数猜总数。真实服务 GET 的 us／tw `1716152955` 均返回 `trackCount=11`，关联艺人 `1049828482` 有独立 `Features115/.../mzl.yiqjixhi.jpg` 头像；此证据不等于 APK 已通过界面验收。
+- QQ／网易云的有效专辑信息写入 `am-hook-library` v1 可选 `albumMetadata`；沿用同一 AtomicFile、容量边界与保存错误状态。缓存的完整 tracks 只作为曲序参考，不是库成员。共享请求在进程内锁住恢复、查询、请求与发布窗口，命中后不自动刷新；未知总数不缓存为成功，离线重启与零重复请求仍需真实网络记录验收。
+- 完整专辑的艺人关联行按真实 source、artistId 与国家补图，单个失败保留 Person 占位，不用专辑图替代；补图不阻塞曲目展示，不另造图片缓存。
+- Apple `CatalogHit`／`Track` 保留实际 catalog 国家，合法同身份 href 优先于开始请求时捕获的国家，其次才是同资源官方 URL。已知国家导出为 `country` 与 `countrySource=catalog`，并保留嵌套 Track 国家；无证据旧 us 保留未知，不删歌曲、不猜当前偏好。资料库键和 mediaId 不因国家变化，目录导航、MediaSession、制作信息、分享、缓存、下载、歌词本地身份与动封查询分别保留来源；不跨两个已知国家补关系或曲序。
+- JNI、DRM、ALAC 封装与帧时钟未改变。歌词／媒体解密 wrapper 未暴露地区参数，不新增伪 query；本地隔离不能证明服务端媒体选择地区。真实出声、系统返回手势、明暗玻璃、跨区请求／导入／重启与 QQ／网易云零重复请求必须单独设备验收。
+
+
 
 
 ## Apple Music 搜索选区

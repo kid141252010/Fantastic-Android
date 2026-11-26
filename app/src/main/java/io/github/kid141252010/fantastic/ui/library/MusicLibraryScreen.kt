@@ -101,7 +101,7 @@ import java.text.Collator
 /** Offline catalog library, favorites, local playlists and nested playlist folders. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit) {
+fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavigationRequest: Int, backEnabled: Boolean, onOpen: (CatalogHit) -> Unit) {
     val snapshot by app.library.snapshot.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -153,7 +153,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     }
     val currentCategory = category
     if (currentCategory == LibraryCategory.Downloads) {
-        DownloadedMusicScreen(app, onBack = { category = null })
+        DownloadedMusicScreen(app, backEnabled = backEnabled, onBack = { category = null })
         return
     }
     val albums = remember(snapshot.items) { libraryAlbums(snapshot.items) }
@@ -161,7 +161,8 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     if (albumEntry != null) {
         val savedTracks = remember(albumEntry, snapshot.items) { libraryAlbumTracks(albumEntry, snapshot.items) }
         pageState.SaveableStateProvider(albumEntry.stableKey) {
-            LibraryAlbumScreen(app, albumEntry, savedTracks, showLibrarySources, onBack = { libraryAlbum = null }, onOpenCatalog = onOpen)
+            LibraryAlbumScreen(app, albumEntry, savedTracks, showLibrarySources, backEnabled = backEnabled,
+                onBack = { libraryAlbum = null }, onOpenCatalog = onOpen)
         }
         return
     }
@@ -215,7 +216,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         }
     }
     val isHome = currentCategory == null && selectedPlaylist == null
-    BackHandler(enabled = !sheetOpen && !isHome, onBack = ::goBack)
+    BackHandler(enabled = backEnabled && !sheetOpen && !isHome, onBack = ::goBack)
 
     fun applyImport(replace: Boolean) {
         val text = importText ?: return
@@ -241,7 +242,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
             else -> menuEntry = null
         }
     }
-    BackHandler(enabled = sheetOpen, onBack = ::dismissSheet)
+    BackHandler(enabled = backEnabled && sheetOpen, onBack = ::dismissSheet)
 
 
     val title = selectedPlaylist?.name ?: currentFolder?.name ?: when {
@@ -742,7 +743,7 @@ private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: 
 }
 
 private fun asTrack(hit: CatalogHit): Track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
-    ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0)
+    ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0, country = hit.country)
 
 internal fun Source.librarySubtitle(subtitle: String, showSource: Boolean): String = when {
     !showSource -> subtitle

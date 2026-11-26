@@ -5,6 +5,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class Source(val mediaPrefix: String) { Apple("apple"), QQ("qq"), Netease("ncm") }
 
+internal fun String?.normalizedAppleCountry(): String? =
+    this?.takeIf { it.length == 2 && it.all { char -> char in 'a'..'z' || char in 'A'..'Z' } }
+        ?.lowercase(java.util.Locale.ROOT)
+
 /** 界面统一使用的歌曲。 */
 @Serializable
 data class Track(
@@ -23,6 +27,7 @@ data class Track(
     val albumArtist: String = "",
     val discNumber: Int = 0,
     val trackNumber: Int = 0,
+    val country: String? = null,
 ) {
     fun artwork(size: Int): String? {
         // QQ 封面只有固定几档尺寸，其他尺寸（如 600、120）返回 404；取不小于所需的最小一档
@@ -127,10 +132,11 @@ data class AmSongAttributes(
 
 @Serializable
 data class AmSong(val id: String, val type: String = "", val attributes: AmSongAttributes? = null) {
-    fun toTrack(): Track {
+    fun toTrack(country: String): Track {
         val a = attributes ?: AmSongAttributes()
         return Track(id, Source.Apple, a.name, a.artistName, a.albumName, a.artwork?.url, a.durationInMillis,
-            albumArtist = a.albumArtistName, discNumber = a.discNumber, trackNumber = a.trackNumber)
+            albumArtist = a.albumArtistName, discNumber = a.discNumber, trackNumber = a.trackNumber,
+            country = country.normalizedAppleCountry())
     }
 }
 

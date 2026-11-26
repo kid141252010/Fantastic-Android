@@ -80,7 +80,10 @@ class AppleCatalogApi(
 
     private suspend fun request(url: HttpUrl): AppleCatalogResponse {
         val body = requestJson(url)
-        return json.decodeFromJsonElement<AppleCatalogResponse>(body).copy(raw = body)
+        return json.decodeFromJsonElement<AppleCatalogResponse>(body).copy(
+            raw = body,
+            requestStorefront = REQUEST_COUNTRY.find(url.encodedPath)?.groupValues?.get(1).normalizedAppleCountry(),
+        )
     }
 
     suspend fun search(
@@ -138,8 +141,8 @@ class AppleCatalogApi(
             ?: throw IOException("Apple Music resource not found")
     }
 
-    internal suspend fun songCredits(id: String): List<SongCreditSection> {
-        val path = "${catalog(prefs.storefront)}/${Entity.Song.route}/${segment(id)}"
+    internal suspend fun songCredits(id: String, storefront: String): List<SongCreditSection> {
+        val path = "${catalog(storefront)}/${Entity.Song.route}/${segment(id)}"
         val response = try {
             request(path, mapOf("include" to "credits", "extend[role-categories]" to "titleInTitleCase,title"))
         } catch (error: AppleCatalogHttpException) {
@@ -299,7 +302,7 @@ class AppleCatalogApi(
         if (track.source != Source.Apple) return null
 
         val baseUrl = prefs.baseUrl
-        val storefront = prefs.storefront.lowercase(Locale.ROOT)
+        val storefront = track.country.normalizedAppleCountry() ?: prefs.storefront
         val knownAlbumId = track.albumId.takeIf(String::isMotionCatalogId)
         val songKey = if (knownAlbumId == null) {
             if (!track.id.isMotionCatalogId()) return null
@@ -323,7 +326,7 @@ class AppleCatalogApi(
             if (tall == null && square == null) return null
             AppleMotionArtwork(tall, square)
         }
-        saveMotionArtwork(baseUrl, storefront, albumKey, songKey, artwork)
+        saveMotionArtwork(baseUrl, albumKey, songKey, artwork)
         return artwork
     }
 
@@ -333,14 +336,13 @@ class AppleCatalogApi(
 
     private suspend fun saveMotionArtwork(
         baseUrl: String,
-        storefront: String,
         albumKey: String,
         songKey: String?,
         artwork: AppleMotionArtwork,
     ) = withContext(Dispatchers.IO) {
         motionArtworkMutex.withLock {
             ensureActive()
-            if (prefs.baseUrl != baseUrl || !prefs.storefront.equals(storefront, ignoreCase = true)) return@withLock
+            if (prefs.baseUrl != baseUrl) return@withLock
             val entries = motionArtworkEntries()
             entries.putRecentMotionArtwork(albumKey, artwork)
             if (songKey != null) entries.putRecentMotionArtwork(songKey, artwork)
@@ -551,6 +553,7 @@ class AppleCatalogApi(
         )
         private val HOST_CONFIG = Regex("""(?m)^\s*window\.FANTASTIC_HOST\s*=\s*(\{.*\});?\s*$""")
         private val ROUTE = Regex("/v1/(?:catalog/[a-z]{2}(?:/[A-Za-z0-9_.,:/-]+)?|editorial/[a-z]{2}/[A-Za-z0-9_.,:/-]+|recommendations/[a-z]{2}|storefronts)")
+        private val REQUEST_COUNTRY = Regex("/amp/v1/(?:catalog|editorial|recommendations)/([a-z]{2})(?:/|$)")
         private val RETRY_STATUS = setOf(429, 502, 503, 504)
         private val SEARCH_TYPES = listOf(Entity.Song, Entity.Album, Entity.MusicVideo, Entity.Playlist, Entity.Artist)
         private val SEARCH_PAGE_PARAMS = mapOf(
@@ -569,6 +572,7 @@ class AppleCatalogApi(
             "fields[artists]" to "name,url,artwork", "extend" to "extendedAssetUrls",
         )
         private val ALBUM_PARAMS = TRACK_PARAMS + mapOf(
+            "fields[albums]" to "name,artistName,artwork,playParams,url,trackCount",
             "platform" to "web", "extend" to "offers,editorialArtwork,editorialVideo,extendedAssetUrls",
             "art[url]" to "f", "include" to "record-labels,artists", "meta[albums:tracks]" to "popularity",
             "include[songs]" to "artists,composers,albums", "include[music-videos]" to "artists",
@@ -652,7 +656,7 @@ data class AppleCatalogResource(
     val explicit: Boolean get() = attributes.text("contentRating") == "explicit"
 
     /** Non-song catalogue entries must remain navigable entities, not fake playable audio tracks. */
-    fun toTrack(): Track? = if (type == "songs") Track(
+    fun toTrack(fallbackCountry: String? = null): Track? = if (type == "songs") Track(
         id, Source.Apple, name, artist, album,
         artwork?.text("url")?.replace("{c}", "bb"), durationMs,
         artistId = relationships["artists"]?.data?.firstOrNull()?.id.orEmpty(),
@@ -661,10 +665,45 @@ data class AppleCatalogResource(
         albumArtist = attributes.text("albumArtistName").orEmpty().ifBlank { relationships["albums"]?.data?.firstOrNull()?.artist.orEmpty() },
         discNumber = attributes.text("discNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
         trackNumber = attributes.text("trackNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+        country = catalogCountry(fallbackCountry),
     ) else null
 
     fun artworkUrl(width: Int, height: Int = width, crop: String = "bb", format: String = "jpg"): String? =
         artwork?.text("url")?.expandArtworkUrl(width, height, crop, format)
+}
+
+internal fun AppleCatalogResource.catalogCountry(fallbackCountry: String?): String? =
+    appleResourceCountry(type, id, href, url, fallbackCountry)
+
+/** Only matching catalogue identity or an official same-resource URL is country evidence. */
+internal fun appleResourceCountry(type: String, id: String, href: String?, url: String?, fallbackCountry: String?): String? {
+    val resourceUri = try { href?.let(URI::create) } catch (_: IllegalArgumentException) { null }
+    if (resourceUri != null && (resourceUri.rawAuthority == null ||
+            resourceUri.scheme == "https" && resourceUri.rawAuthority == "api.music.apple.com")) {
+        val parts = resourceUri.path.orEmpty().split('/')
+        if (parts.size == 6 && parts[1] == "v1" && parts[2] == "catalog" && parts[4] == type && parts[5] == id) {
+            parts[3].normalizedAppleCountry()?.let { return it }
+        }
+    }
+    fallbackCountry.normalizedAppleCountry()?.let { return it }
+    val official = try { url?.let(URI::create) } catch (_: IllegalArgumentException) { null } ?: return null
+    if (official.scheme != "https" || !official.rawAuthority.equals("music.apple.com", ignoreCase = true)) return null
+    val parts = official.path.orEmpty().split('/').filter(String::isNotEmpty)
+    if (parts.size !in 3..4) return null
+    val country = parts[0].normalizedAppleCountry() ?: return null
+    val kind = when (type) {
+        "songs" -> "song"
+        "albums" -> "album"
+        "artists" -> "artist"
+        "playlists" -> "playlist"
+        "music-videos" -> "music-video"
+        "stations" -> "station"
+        else -> return null
+    }
+    if (parts[1] == kind && parts.last() == id) return country
+    if (type == "songs" && parts[1] == "album" &&
+        url?.toHttpUrl()?.queryParameter("i") == id) return country
+    return null
 }
 
 @Serializable
@@ -676,7 +715,7 @@ data class AppleCatalogPage(
     val meta: JsonObject = JsonObject(emptyMap()),
     val attributes: JsonObject = JsonObject(emptyMap()),
 ) {
-    fun tracks(): List<Track> = data.mapNotNull { it.toTrack() }
+    fun tracks(fallbackCountry: String? = null): List<Track> = data.mapNotNull { it.toTrack(fallbackCountry) }
 }
 
 @Serializable
@@ -686,6 +725,7 @@ data class AppleCatalogResponse(
     val results: JsonObject = JsonObject(emptyMap()),
     val meta: JsonObject = JsonObject(emptyMap()),
     @kotlinx.serialization.Transient val raw: JsonObject = JsonObject(emptyMap()),
+    @kotlinx.serialization.Transient val requestStorefront: String? = null,
 ) {
     /** Charts use results.<type>[index], unlike search's results.<group>. */
     fun charts(type: String): List<AppleCatalogPage> =

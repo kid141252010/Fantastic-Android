@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.media3.common.Player
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -30,7 +32,9 @@ internal class PlaybackStore(context: Context, private val settings: Prefs) {
         }.getOrDefault(PlaybackSnapshot())
         val modes = PlaybackSnapshot(shuffle = saved.shuffle,
             repeat = saved.repeat.takeIf { it in Player.REPEAT_MODE_OFF..Player.REPEAT_MODE_ALL } ?: Player.REPEAT_MODE_OFF)
-        if (prefs.getString("server", null) != settings.baseUrl || prefs.getString("storefront", null) != settings.storefront) return modes
+        if (prefs.getString("server", null) != settings.baseUrl) return modes
+        if (prefs.getString("storefront", null) != settings.storefront &&
+            saved.songs.any { it.track.source == Source.Apple && it.track.country.normalizedAppleCountry() == null }) return modes
         val ids = saved.songs.map { it.uid }.toSet()
         val selected = prefs.getInt("positionUid", -1).takeIf { it in ids } ?: saved.current
         if (saved.songs.size != ids.size || saved.order.size != ids.size || saved.order.toSet() != ids || selected == null || selected !in ids) {

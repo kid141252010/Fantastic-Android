@@ -26,6 +26,7 @@ import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.nativeAudioPresentation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -688,7 +689,8 @@ internal class FantasticSessionPlayer(
 
     private fun stream(song: QueuedSong): Stream {
         val track = song.track
-        val key = PlaybackCacheKey.from(prefs.baseUrl, prefs.storefront, track.source, track.id)
+        val storefront = if (track.source == Source.Apple) track.country.normalizedAppleCountry() ?: prefs.storefront else prefs.storefront
+        val key = PlaybackCacheKey.from(prefs.baseUrl, storefront, track.source, track.id)
         val server = key?.server ?: prefs.baseUrl
         val offline = localAudio(track, song.quality)
         val preferred = song.quality ?: prefs.preferredQuality(track.source)
@@ -760,7 +762,7 @@ internal class FantasticSessionPlayer(
                 if (!wasApple) { native.pause(); native.stop(); native.clearMediaItems() }
                 apple.setRepeatMode(engineRepeatMode())
                 apple.playQueue(run.map { it.song }, before.size, at, playing, song.quality,
-                    server = selected.server, storefront = selected.key?.storefront ?: prefs.storefront)
+                    server = selected.server, storefront = selected.key?.storefront ?: song.track.country.normalizedAppleCountry() ?: prefs.storefront)
                 lastAppleLoops = apple.completedLoops
             } else {
                 if (wasApple) apple.stop()

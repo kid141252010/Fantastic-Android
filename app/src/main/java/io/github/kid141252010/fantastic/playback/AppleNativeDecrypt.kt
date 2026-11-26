@@ -87,7 +87,7 @@ internal data class AppleResolvedTrack(
 
 internal const val APPLE_ALAC_SEGMENT_BUFFER_BYTES = 8L * 1024 * 1024
 
-internal data class AppleResolvedSource(val track: AppleResolvedTrack, val decrypt: AppleNativeDecrypt)
+internal data class AppleResolvedSource(val track: AppleResolvedTrack, val decrypt: AppleNativeDecrypt, val key: PlaybackCacheKey)
 
 private data class AppleSegmentKey(
     val resourceUrl: HttpUrl,

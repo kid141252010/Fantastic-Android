@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -80,6 +81,8 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
     }
 
     fun audio(track: Track, requestedQuality: String?): OfflineAudio? = ready[track.mediaId]?.let { job ->
+        val country = if (track.source == Source.Apple) track.country.normalizedAppleCountry() else null
+        if (country != null && job.storefront != country) return@let null
         if (requestedQuality != null && requestedQuality != job.quality) return@let null
         val file = completed(job).takeIf(File::isFile) ?: return@let null
         OfflineAudio(file, job.quality)
@@ -87,13 +90,23 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
 
     fun enqueue(tracks: List<Track>, quality: String? = null) {
         val existing = state.value.associateBy { it.key }
+        fun country(track: Track): String? = if (track.source == Source.Apple)
+            track.country.normalizedAppleCountry() ?: prefs.storefront.normalizedAppleCountry() else prefs.storefront
         val new = tracks.distinctBy { it.mediaId }.filter { track ->
-            track.source.validSongId(track.id) && existing[track.mediaId]?.status !in
-                setOf(DownloadStatus.Queued, DownloadStatus.Downloading, DownloadStatus.Ready)
-        }.map { track ->
+            val region = country(track) ?: return@filter false
+            val previous = existing[track.mediaId]
+            val changedAppleRegion = track.source == Source.Apple && previous != null && previous.storefront != region
+            track.source.validSongId(track.id) && (changedAppleRegion || previous?.status !in
+                setOf(DownloadStatus.Queued, DownloadStatus.Downloading, DownloadStatus.Ready))
+        }.mapNotNull { track ->
             val selected = quality?.takeIf { q -> track.source.qualities.any { it.first == q } }
                 ?: prefs.preferredQuality(track.source)
-            OfflineDownload(track, UUID.randomUUID().toString(), prefs.baseUrl, prefs.storefront, selected)
+            val region = country(track) ?: return@mapNotNull null
+            val previous = existing[track.mediaId]
+            if (track.source == Source.Apple && previous != null && previous.storefront != region) {
+                scope.launch(Dispatchers.IO) { completed(previous).delete() }
+            }
+            OfflineDownload(track, UUID.randomUUID().toString(), prefs.baseUrl, region, selected)
         }
         if (new.isEmpty()) return
         val replacing = new.mapTo(hashSetOf()) { it.key }

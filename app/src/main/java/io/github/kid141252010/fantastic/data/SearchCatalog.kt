@@ -42,17 +42,18 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
                 AppleCatalogApi.Entity.Song, AppleCatalogApi.Entity.Album, AppleCatalogApi.Entity.MusicVideo,
                 AppleCatalogApi.Entity.Playlist, AppleCatalogApi.Entity.Artist,
             ), limit = 21, storefront = storefront)
+            val country = response.response.requestStorefront ?: storefront
             val groups = response.groups.mapNotNull { group ->
                 if (group.key == "top") {
-                    val hits = group.page.data.map(::appleHit).distinctBy { "${it.kind}:${it.id}" }.take(6)
+                    val hits = group.page.data.map { appleHit(it, country) }.distinctBy { "${it.kind}:${it.id}" }.take(6)
                     return@mapNotNull hits.takeIf { it.isNotEmpty() }?.let { Group("top", "最佳结果", null, it) }
                 }
                 val kind = appleKind(group.key) ?: return@mapNotNull null
-                val hits = group.page.data.filter { appleKind(it.type) == kind }.map(::appleHit)
+                val hits = group.page.data.filter { appleKind(it.type) == kind }.map { appleHit(it, country) }
                     .distinctBy { "${it.kind}:${it.id}" }
                 if (hits.isEmpty()) return@mapNotNull null
                 val next = group.page.next?.takeIf(String::isNotBlank)?.let {
-                    Cursor(source, kind, term, hits.size, next = it, storefront = storefront)
+                    Cursor(source, kind, term, hits.size, next = it, storefront = country)
                 }
                 Group(kind.id, kind.title, kind, hits, next)
             }
@@ -97,10 +98,11 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
             else apple.searchPage(cursor.next)
             val page = response.groups.firstOrNull { appleKind(it.key) == kind }?.page
                 ?: response.groups.firstOrNull { group -> group.page.data.any { appleKind(it.type) == kind } }?.page
-            val items = page?.data.orEmpty().filter { appleKind(it.type) == kind }.map(::appleHit)
+            val country = response.response.requestStorefront ?: cursor.storefront
+            val items = page?.data.orEmpty().filter { appleKind(it.type) == kind }.map { appleHit(it, country) }
             val next = page?.next?.takeIf { it.isNotBlank() }
             if (next != null && (next == cursor.next || items.isEmpty())) throw IOException("搜索分页没有前进")
-            return Page(items, next?.let { cursor.copy(offset = cursor.offset + items.size, next = it) })
+            return Page(items, next?.let { cursor.copy(offset = cursor.offset + items.size, next = it, storefront = country) })
         }
         val items: List<CatalogHit>
         val rawCount: Int
@@ -137,7 +139,7 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
         if (query.isBlank()) return emptyList()
         val values = when (source) {
             Source.Apple -> apple.suggestions(query, storefront = storefront).mapNotNull { item ->
-                item.content?.let { resource -> Suggestion(resource.name, hit = appleHit(resource)) }
+                item.content?.let { resource -> Suggestion(resource.name, hit = appleHit(resource, storefront)) }
                     ?: item.searchTerm?.let { Suggestion(item.displayTerm ?: it, query = it) }
             }
             Source.Netease -> netease.suggest(query).let { result ->
@@ -189,12 +191,16 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
     private fun JsonObject.text(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
 
     companion object {
-        fun trackHit(track: Track) = CatalogHit(track.source, "song", track.id, track.title, track.artist, track.artwork(500), track, detailOnly = false)
-        fun appleHit(resource: AppleCatalogResource): CatalogHit = CatalogHit(Source.Apple,
-            when (resource.type) { "songs" -> "song"; "artists" -> "artist"; "albums" -> "album"; "playlists" -> "playlist";
-                "music-videos" -> "music-video"; "stations" -> "station"; "uploaded-videos" -> "post"; else -> resource.type },
-            resource.id, resource.name, resource.artist, resource.artworkUrl(500),
-            resource.toTrack().takeIf { resource.type == "songs" }, resource.explicit,
-            resource.type != "songs", resource.attributes)
+        fun trackHit(track: Track) = CatalogHit(track.source, "song", track.id, track.title, track.artist, track.artwork(500), track,
+            detailOnly = false, country = if (track.source == Source.Apple) track.country.normalizedAppleCountry() else null)
+        fun appleHit(resource: AppleCatalogResource, fallbackCountry: String?): CatalogHit {
+            val country = resource.catalogCountry(fallbackCountry)
+            return CatalogHit(Source.Apple,
+                when (resource.type) { "songs" -> "song"; "artists" -> "artist"; "albums" -> "album"; "playlists" -> "playlist";
+                    "music-videos" -> "music-video"; "stations" -> "station"; "uploaded-videos" -> "post"; else -> resource.type },
+                resource.id, resource.name, resource.artist, resource.artworkUrl(500),
+                resource.toTrack(country).takeIf { resource.type == "songs" }, resource.explicit,
+                resource.type != "songs", resource.attributes, country = country)
+        }
     }
 }

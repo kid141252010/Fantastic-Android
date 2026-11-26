@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -59,6 +60,7 @@ data class MusicLibrarySnapshot(
     val folders: List<LibraryFolder> = emptyList(),
     val loading: Boolean = true,
     val persistenceError: Boolean = false,
+    val albumMetadata: List<LibraryAlbumMetadata> = emptyList(),
 )
 
 data class LibraryImportReport(val items: Int, val playlists: Int, val folders: Int, val skipped: Int)
@@ -74,6 +76,7 @@ class MusicLibrary(context: Context) {
     private val commands = Channel<(MusicLibrarySnapshot) -> MusicLibrarySnapshot>(Channel.UNLIMITED)
     private val mutableSnapshot = MutableStateFlow(MusicLibrarySnapshot())
     val snapshot: StateFlow<MusicLibrarySnapshot> = mutableSnapshot.asStateFlow()
+    internal val albumMetadataMutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
@@ -128,8 +131,8 @@ class MusicLibrary(context: Context) {
             val old = state.items.getOrNull(index)
             if (old == null && state.items.size >= MAX_ITEMS) return@trySend state
             val tracks = if (clean.kind == "album" && albumTracks.isNotEmpty()) {
-                val incoming = albumTracks.asSequence().filter { it.source == clean.source && it.albumId == clean.id }
-                    .distinctBy { it.id }.take(MAX_ITEMS).mapNotNull { normalizeHit(SearchCatalog.trackHit(it))?.track }.toList()
+                val incoming = deduplicateTracks(albumTracks.asSequence().filter { it.source == clean.source && it.albumId == clean.id }
+                    .take(MAX_ITEMS).mapNotNull { normalizeHit(SearchCatalog.trackHit(it))?.track }.toList())
                 mergeAlbumTracks(incoming, old?.albumTracks.orEmpty())
             } else old?.albumTracks.orEmpty()
             val favoriteAt = if (toggleFavorite) {
@@ -140,7 +143,7 @@ class MusicLibrary(context: Context) {
                 val track = refreshed.track
                 val reference = state.items.firstOrNull {
                     it.hit.kind == "album" && it.hit.source == refreshed.source && it.hit.id == track?.albumId
-                }?.albumTracks?.firstOrNull { it.id == refreshed.id && it.source == refreshed.source && it.albumId == track?.albumId }
+                }?.albumTracks?.firstOrNull { it.id == refreshed.id && it.source == refreshed.source && it.albumId == track?.albumId && compatibleLibraryCountries(refreshed.country, it.country) }
                 if (reference != null) refreshed = mergeSongMetadata(refreshed, SearchCatalog.trackHit(reference))
             }
             val entry = LibraryEntry(refreshed, old?.addedAt ?: now(), favoriteAt, old?.folderId.orEmpty(), old?.metadata, tracks)
@@ -151,9 +154,12 @@ class MusicLibrary(context: Context) {
 
     /** Incoming values win, except unknown fields never erase an existing song snapshot. */
     private fun mergeSongMetadata(incoming: CatalogHit, existing: CatalogHit?): CatalogHit {
-        if (incoming.kind != "song" || existing?.kind != "song" || incoming.source != existing.source || incoming.id != existing.id) return incoming
-        val old = existing.track ?: return incoming
-        val track = incoming.track ?: return incoming.copy(track = old)
+        if (existing == null || incoming.source != existing.source || incoming.kind != existing.kind || incoming.id != existing.id) return incoming
+        val country = if (incoming.source == Source.Apple) incoming.country.normalizedAppleCountry() ?: existing.country.normalizedAppleCountry() else null
+        val result = incoming.copy(country = country, track = incoming.track?.copy(country = country))
+        if (incoming.kind != "song" || !compatibleLibraryCountries(incoming.country, existing.country)) return result
+        val old = existing.track ?: return result
+        val track = incoming.track ?: return result.copy(track = old.copy(country = country))
         val albumChanged = track.albumId.isNotBlank() && track.albumId != "0" && old.albumId.isNotBlank() && old.albumId != "0" && track.albumId != old.albumId
         val merged = track.copy(
             title = track.title.ifBlank { old.title },
@@ -167,8 +173,9 @@ class MusicLibrary(context: Context) {
             albumArtist = track.albumArtist.ifBlank { if (albumChanged) "" else old.albumArtist },
             discNumber = track.discNumber.takeIf { it > 0 } ?: if (albumChanged) 0 else old.discNumber,
             trackNumber = track.trackNumber.takeIf { it > 0 } ?: if (albumChanged) 0 else old.trackNumber,
+            country = country,
         )
-        return incoming.copy(
+        return result.copy(
             subtitle = incoming.subtitle.ifBlank { existing.subtitle },
             artwork = incoming.artwork ?: existing.artwork.takeUnless { albumChanged },
             track = merged,
@@ -181,28 +188,39 @@ class MusicLibrary(context: Context) {
         val references = existing.associateBy { Triple(it.source, it.albumId, it.id) }
         return incoming.map { track ->
             val old = references[Triple(track.source, track.albumId, track.id)] ?: return@map track
+            if (!compatibleLibraryCountries(track.country, old.country)) return@map track
             track.copy(
                 discNumber = track.discNumber.takeIf { it > 0 } ?: old.discNumber,
                 trackNumber = track.trackNumber.takeIf { it > 0 } ?: old.trackNumber,
+                country = track.country ?: old.country,
             )
         }
     }
 
+    private fun deduplicateTracks(tracks: List<Track>): List<Track> {
+        val first = LinkedHashMap<Triple<Source, String, String>, Track>()
+        tracks.forEach { track ->
+            val key = Triple(track.source, track.albumId, track.id)
+            val old = first[key]
+            first[key] = if (old == null) track else old.copy(country = old.country ?: track.country)
+        }
+        return first.values.toList()
+    }
+
     private fun repairSongOrderFromAlbumTracks(state: MusicLibrarySnapshot): MusicLibrarySnapshot =
         repairSongOrderFromReferences(state, state.items.asSequence().filter { it.hit.kind == "album" }
-            .flatMap { entry -> entry.albumTracks.asSequence().filter { it.source == entry.hit.source && it.albumId == entry.hit.id } }.toList())
+            .flatMap { entry -> entry.albumTracks.asSequence().filter { it.source == entry.hit.source && it.albumId == entry.hit.id } }.toList() +
+            state.albumMetadata.flatMap { it.tracks })
 
     private fun repairSongOrderFromReferences(state: MusicLibrarySnapshot, tracks: List<Track>): MusicLibrarySnapshot {
         if (tracks.isEmpty()) return state
-        val references = tracks.filter { it.discNumber > 0 || it.trackNumber > 0 }
-            .associateBy { Triple(it.source, it.albumId, it.id) }
-        if (references.isEmpty()) return state
+        val references = tracks.groupBy { Triple(it.source, it.albumId, it.id) }
         var changed = false
         val items = state.items.map { entry ->
             val track = entry.hit.track
             val reference = if (entry.hit.kind == "song" && track != null && track.albumId.isNotBlank() && track.albumId != "0")
-                references[Triple(track.source, track.albumId, track.id)] else null
-            if (reference == null) entry else {
+                references[Triple(track.source, track.albumId, track.id)]?.firstOrNull { compatibleLibraryCountries(track.country, it.country) } else null
+            if (reference == null || !compatibleLibraryCountries(track?.country, reference.country)) entry else {
                 val hit = mergeSongMetadata(entry.hit, SearchCatalog.trackHit(reference))
                 if (hit == entry.hit) entry else entry.copy(hit = hit).also { changed = true }
             }
@@ -221,13 +239,46 @@ class MusicLibrary(context: Context) {
                 val patch = patches[entry.key]
                 val albumId = entry.hit.track?.albumId
                 val patchAlbumId = patch?.track?.albumId
-                if (patch == null || (!albumId.isNullOrBlank() && albumId != "0" && albumId != patchAlbumId)) entry else {
+                if (patch == null || albumId.isNullOrBlank() || albumId == "0" || albumId != patchAlbumId || !compatibleLibraryCountries(entry.hit.country, patch.country)) entry else {
                     val hit = mergeSongMetadata(entry.hit, patch)
                     if (hit == entry.hit) entry else entry.copy(hit = hit).also { changed = true }
                 }
             }
             if (changed) state.copy(items = items) else state
         }
+    }
+
+    /** Reference responses only fill country, never replace a previously known storefront. */
+    internal fun updateAppleCountry(kind: String, id: String, country: String) {
+        val clean = country.normalizedAppleCountry() ?: return
+        if (kind !in KINDS || !validCatalogId(Source.Apple, kind, id)) return
+        fun patch(hit: CatalogHit): CatalogHit = if (hit.source == Source.Apple && hit.kind == kind && hit.id == id && hit.country == null)
+            hit.copy(country = clean, track = hit.track?.copy(country = hit.track.country ?: clean)) else hit
+        fun reference(track: Track): Track = if (kind == "song" && track.source == Source.Apple && track.id == id && track.country == null) track.copy(country = clean) else track
+        commands.trySend { state -> state.copy(
+            items = state.items.map { it.copy(hit = patch(it.hit), albumTracks = it.albumTracks.map(::reference)) },
+            playlists = state.playlists.map { list -> list.copy(tracks = list.tracks.map { it.copy(hit = patch(it.hit)) }) },
+        ) }
+    }
+
+    internal fun recordAlbumMetadata(metadata: LibraryAlbumMetadata): Boolean {
+        val clean = normalizeAlbumMetadata(metadata) ?: return false
+        return commands.trySend { state -> state.copy(albumMetadata = boundedAlbumMetadata(
+            state.albumMetadata.filterNot { it.source == clean.source && it.albumId == clean.albumId } + clean)) }.isSuccess
+    }
+
+    private fun normalizeAlbumMetadata(metadata: LibraryAlbumMetadata): LibraryAlbumMetadata? {
+        if (metadata.source == Source.Apple || metadata.albumId == "0" || !validCatalogId(metadata.source, "album", metadata.albumId) || metadata.trackCount == null || metadata.trackCount !in 0..100_000) return null
+        val tracks = metadata.tracks.asSequence().filter { it.source == metadata.source && it.albumId == metadata.albumId }
+            .mapNotNull { normalizeHit(SearchCatalog.trackHit(it))?.track }.distinctBy { it.id }.take(MAX_ITEMS).toList()
+        return metadata.copy(albumArtist = metadata.albumArtist.clean(300), tracks = tracks, country = null)
+    }
+
+    private fun boundedAlbumMetadata(records: List<LibraryAlbumMetadata>): List<LibraryAlbumMetadata> {
+        var first = 0
+        var tracks = records.sumOf { it.tracks.size }
+        while (records.size - first > MAX_ITEMS || tracks > MAX_TOTAL_TRACKS) tracks -= records[first++].tracks.size
+        return if (first == 0) records else records.subList(first, records.size).toList()
     }
 
     /** Add a playable song (or a catalog music video snapshot) once to a local playlist. */
@@ -239,7 +290,15 @@ class MusicLibrary(context: Context) {
             if (index < 0) return@trySend state
             val list = state.playlists[index]
             val key = LibraryKey(clean.source, clean.kind, clean.id)
-            if (list.tracks.any { LibraryKey(it.hit.source, it.hit.kind, it.hit.id) == key }) return@trySend state
+            val duplicate = list.tracks.indexOfFirst { LibraryKey(it.hit.source, it.hit.kind, it.hit.id) == key }
+            if (duplicate >= 0) {
+                val old = list.tracks[duplicate]
+                val country = clean.country ?: old.hit.country
+                val refreshed = old.hit.copy(country = country, track = old.hit.track?.copy(country = country))
+                if (refreshed == old.hit) return@trySend state
+                val tracks = list.tracks.toMutableList().apply { this[duplicate] = old.copy(hit = refreshed) }
+                return@trySend state.copy(playlists = state.playlists.toMutableList().apply { this[index] = list.copy(tracks = tracks) })
+            }
             if (list.tracks.size >= MAX_TRACKS_PER_PLAYLIST || state.playlists.sumOf { it.tracks.size } >= MAX_TOTAL_TRACKS) return@trySend state
             val updated = list.copy(tracks = list.tracks + LibraryPlaylistTrack(newUid(), now(), clean), updatedAt = now())
             state.copy(playlists = state.playlists.toMutableList().also { it[index] = updated })
@@ -393,7 +452,7 @@ class MusicLibrary(context: Context) {
                     input.bufferedReader(Charsets.UTF_8).readText()
                 }
                 val parsed = parseImport(text)
-                repairFolders(MusicLibrarySnapshot(parsed.items, parsed.playlists, parsed.folders, loading = false))
+                repairFolders(MusicLibrarySnapshot(parsed.items, parsed.playlists, parsed.folders, loading = false, albumMetadata = parsed.albumMetadata))
             }
         } catch (error: CancellationException) {
             throw error
@@ -422,6 +481,7 @@ class MusicLibrary(context: Context) {
         val playlists: List<LibraryPlaylist>,
         val folders: List<LibraryFolder>,
         val skipped: Int = 0,
+        val albumMetadata: List<LibraryAlbumMetadata> = emptyList(),
     )
 
     private fun mergeImport(current: MusicLibrarySnapshot, data: Imported, replace: Boolean): MusicLibrarySnapshot {
@@ -445,11 +505,18 @@ class MusicLibrary(context: Context) {
         val oldPlaylists = if (replace) emptyList() else current.playlists
         val playlistMap = oldPlaylists.associateBy { it.id }.toMutableMap()
         data.playlists.forEach { incoming ->
-            if (playlistMap[incoming.id]?.updatedAt?.let { it >= incoming.updatedAt } != true) playlistMap[incoming.id] = incoming
+            val old = playlistMap[incoming.id]
+            val winner = if (old == null || old.updatedAt < incoming.updatedAt) incoming else old
+            val other = if (winner === incoming) old else incoming
+            playlistMap[incoming.id] = fillPlaylistCountries(winner, other)
         }
         require(itemMap.size <= MAX_ITEMS && folderMap.size <= MAX_FOLDERS && playlistMap.size <= MAX_PLAYLISTS &&
             playlistMap.values.sumOf { it.tracks.size } <= MAX_TOTAL_TRACKS) { "Merged library exceeds storage limits" }
-        return repairSongOrderFromAlbumTracks(repairFolders(MusicLibrarySnapshot(itemMap.values.toList(), playlistMap.values.toList(), folderMap.values.toList(), loading = false)))
+        val metadata = LinkedHashMap<Pair<Source, String>, LibraryAlbumMetadata>()
+        if (!replace) current.albumMetadata.forEach { metadata[it.source to it.albumId] = it }
+        data.albumMetadata.forEach { metadata.remove(it.source to it.albumId); metadata[it.source to it.albumId] = it }
+        return repairSongOrderFromAlbumTracks(repairFolders(MusicLibrarySnapshot(itemMap.values.toList(), playlistMap.values.toList(), folderMap.values.toList(),
+            loading = false, albumMetadata = boundedAlbumMetadata(metadata.values.toList()))))
     }
 
     private fun parseImport(text: String): Imported {
@@ -466,35 +533,75 @@ class MusicLibrary(context: Context) {
         val rawItems = root.array("items").take(MAX_ITEMS)
         val rawLists = root.array("playlists").take(MAX_PLAYLISTS)
         val rawFolders = root.array("folders").take(MAX_FOLDERS)
-        val items = rawItems.mapNotNull { raw -> raw.objectOrNull()?.let { parseEntry(it, now) } }
-            .distinctBy { it.key }
+        val itemMap = LinkedHashMap<LibraryKey, LibraryEntry>()
+        rawItems.mapNotNull { raw -> raw.objectOrNull()?.let { parseEntry(it, now) } }.forEach { entry ->
+            val old = itemMap[entry.key]
+            itemMap[entry.key] = if (old == null) entry else old.copy(hit = fillHitCountry(old.hit, entry.hit),
+                albumTracks = mergeAlbumTracks(old.albumTracks, entry.albumTracks))
+        }
+        val items = itemMap.values.toList()
         val folders = rawFolders.mapNotNull { raw -> raw.objectOrNull()?.let { parseFolder(it, now) } }
             .distinctBy { it.id }
         var totalTracks = 0
-        val playlists = rawLists.mapNotNull { raw ->
+        val playlistMap = LinkedHashMap<String, LibraryPlaylist>()
+        rawLists.mapNotNull { raw ->
             raw.objectOrNull()?.let { obj ->
                 val list = parsePlaylist(obj, now, MAX_TOTAL_TRACKS - totalTracks)
                 totalTracks += list?.tracks?.size ?: 0
                 list
             }
-        }.distinctBy { it.id }
+        }.forEach { list -> playlistMap[list.id] = playlistMap[list.id]?.let { fillPlaylistCountries(it, list) } ?: list }
+        val playlists = playlistMap.values.toList()
+        val metadata = LinkedHashMap<Pair<Source, String>, LibraryAlbumMetadata>()
+        root.array("albumMetadata").forEach { raw -> raw.objectOrNull()?.let(::parseAlbumMetadata)?.let {
+            metadata.remove(it.source to it.albumId)
+            metadata[it.source to it.albumId] = it
+        } }
+        val albumMetadata = boundedAlbumMetadata(metadata.values.toList())
         val skipped = root.array("items").size - items.size + root.array("playlists").size - playlists.size +
             root.array("folders").size - folders.size + root.array("playlists").sumOf { raw ->
                 raw.objectOrNull()?.array("tracks")?.size ?: 0
             } - playlists.sumOf { it.tracks.size }
-        return repairFolders(MusicLibrarySnapshot(items, playlists, folders, loading = false)).let {
-            Imported(it.items, it.playlists, it.folders, skipped.coerceAtLeast(0))
+        return repairFolders(MusicLibrarySnapshot(items, playlists, folders, loading = false, albumMetadata = albumMetadata)).let {
+            Imported(it.items, it.playlists, it.folders, skipped.coerceAtLeast(0), it.albumMetadata)
         }
     }
 
     private fun parseEntry(raw: JsonObject, fallbackTime: Long): LibraryEntry? {
         val hit = parseHit(raw) ?: return null
-        val albumTracks = if (hit.kind == "album") raw.array("albumTracks").asSequence().take(MAX_ITEMS)
+        val albumTracks = if (hit.kind == "album") deduplicateTracks(raw.array("albumTracks").asSequence().take(MAX_ITEMS)
             .mapNotNull { it.objectOrNull()?.let(::parseHit)?.track }
-            .filter { it.source == hit.source && it.albumId == hit.id }.distinctBy { it.id }.toList() else emptyList()
+            .filter { it.source == hit.source && it.albumId == hit.id }.toList()) else emptyList()
         return LibraryEntry(hit, raw.long("addedAt")?.validTime() ?: fallbackTime,
             raw.long("favorite")?.validTime() ?: raw.long("favoriteAt")?.validTime() ?: 0,
             safeFolderRef(raw.string("folderId").orEmpty()), cleanMetadata(raw), albumTracks)
+    }
+
+    private fun parseAlbumMetadata(raw: JsonObject): LibraryAlbumMetadata? {
+        val source = Source.entries.firstOrNull { it.mediaPrefix == raw.string("source") && it != Source.Apple } ?: return null
+        val id = raw.string("albumId") ?: return null
+        val count = raw.int("trackCount") ?: return null
+        if (raw["tracks"] !is JsonArray || raw["albumArtist"] !is JsonPrimitive) return null
+        val tracks = raw.array("tracks").asSequence().take(MAX_ITEMS).mapNotNull { it.objectOrNull()?.let(::parseHit)?.track }.toList()
+        return normalizeAlbumMetadata(LibraryAlbumMetadata(source, id, raw.string("albumArtist").clean(300), tracks, count))
+    }
+
+    private fun fillHitCountry(hit: CatalogHit, reference: CatalogHit): CatalogHit {
+        if (hit.source != Source.Apple || hit.country != null || hit.source != reference.source || hit.kind != reference.kind || hit.id != reference.id) return hit
+        val country = reference.country ?: return hit
+        return hit.copy(country = country, track = hit.track?.copy(country = country))
+    }
+
+    private fun fillPlaylistCountries(winner: LibraryPlaylist, other: LibraryPlaylist?): LibraryPlaylist {
+        if (other == null) return winner
+        val references = other.tracks.associateBy { it.uid }
+        var changed = false
+        val tracks = winner.tracks.map { row ->
+            val reference = references[row.uid] ?: return@map row
+            val hit = fillHitCountry(row.hit, reference.hit)
+            if (hit == row.hit) row else row.copy(hit = hit).also { changed = true }
+        }
+        return if (changed) winner.copy(tracks = tracks) else winner
     }
 
     private fun parsePlaylist(raw: JsonObject, now: Long, availableTracks: Int): LibraryPlaylist? {
@@ -545,13 +652,24 @@ class MusicLibrary(context: Context) {
                     albumId = (extension?.string("albumId") ?: raw.string("albumId")).clean(128)
                         .takeIf { validCatalogId(source, "album", it) }.orEmpty(),
                 ) else null
-        return CatalogHit(source, kind, id, title, subtitle, art, track, explicit,
-            extension?.boolean("detailOnly") ?: raw.boolean("detailOnly") ?: true, boundedAttributes)
+        val country = if (source == Source.Apple) {
+            val supplied = (extension?.string("country") ?: raw.string("country")).normalizedAppleCountry()
+            val marked = (extension?.string("countrySource") ?: raw.string("countrySource")) == "catalog"
+            val type = when (kind) { "song" -> "songs"; "music-video" -> "music-videos"; else -> "${kind}s" }
+            val resourceHref = extension?.string("href") ?: raw.string("href")
+            val href = resourceHref?.takeUnless { it.removePrefix("/").startsWith("https://") }
+            val url = extension?.string("url") ?: raw.string("url") ?: (attributes as? JsonObject)?.string("url")
+                ?: resourceHref?.removePrefix("/")?.takeIf { it.startsWith("https://music.apple.com/") }
+            track?.country?.takeIf { kind == "song" } ?: supplied.takeIf { marked } ?: appleResourceCountry(type, id, href, url, null)
+                ?: supplied.takeUnless { it == "us" }
+        } else null
+        return CatalogHit(source, kind, id, title, subtitle, art, track?.copy(country = country), explicit,
+            extension?.boolean("detailOnly") ?: raw.boolean("detailOnly") ?: true, boundedAttributes, country)
     }
 
     private fun parseTrack(raw: JsonObject, expectedSource: Source, expectedId: String, title: String, subtitle: String, artwork: String?): Track? {
-        val source = raw.string("source")?.let { value -> Source.entries.firstOrNull { it.mediaPrefix == value || it.name == value } } ?: expectedSource
-        val id = raw.string("id")?.clean(128)?.takeIf { it.matches(ID_REGEX) } ?: expectedId
+        val source = raw.string("source")?.let { value -> Source.entries.firstOrNull { it.mediaPrefix == value || it.name == value } ?: return null } ?: expectedSource
+        val id = raw.string("id")?.clean(128)?.let { it.takeIf { it.matches(ID_REGEX) } ?: return null } ?: expectedId
         if (source != expectedSource || id != expectedId) return null
         return Track(
             id = id, source = source, title = raw.string("title").clean(300).ifBlank { title },
@@ -564,6 +682,7 @@ class MusicLibrary(context: Context) {
             albumArtist = raw.string("albumArtist").clean(300),
             discNumber = raw.int("discNumber")?.coerceAtLeast(0) ?: 0,
             trackNumber = raw.int("trackNumber")?.coerceAtLeast(0) ?: 0,
+            country = if (source == Source.Apple) raw.string("country").normalizedAppleCountry() else null,
         )
     }
 
@@ -571,6 +690,7 @@ class MusicLibrary(context: Context) {
         if (hit.kind !in KINDS || !validCatalogId(hit.source, hit.kind, hit.id)) return null
         val title = hit.title.clean(300).ifBlank { hit.id }
         val subtitle = hit.subtitle.clean(300)
+        val country = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() ?: hit.track?.takeIf { it.source == hit.source && it.id == hit.id }?.country.normalizedAppleCountry() else null
         val track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }?.let {
             Track(
                 id = it.id, source = it.source, title = it.title.clean(300).ifBlank { title }, artist = it.artist.clean(300),
@@ -580,11 +700,12 @@ class MusicLibrary(context: Context) {
                 albumId = it.albumId.clean(128).takeIf { id -> validCatalogId(it.source, "album", id) }.orEmpty(),
                 artistArtworkTemplate = cleanArtwork(it.artistArtworkTemplate), albumArtist = it.albumArtist.clean(300),
                 discNumber = it.discNumber.coerceAtLeast(0), trackNumber = it.trackNumber.coerceAtLeast(0),
+                country = country,
             )
         }
         val attrs = hit.attributes?.takeIf { it.toString().length <= MAX_ATTRIBUTES_CHARS }
         return CatalogHit(hit.source, hit.kind, hit.id, title, subtitle, cleanArtwork(hit.artwork), track,
-            hit.explicit, hit.detailOnly, attrs)
+            hit.explicit, hit.detailOnly, attrs, country)
     }
 
     private fun fallbackTrack(source: Source, id: String, title: String, artist: String, album: String, artwork: String?, durationMs: Long) =
@@ -643,12 +764,21 @@ class MusicLibrary(context: Context) {
                 put("createdAt", folder.createdAt); put("updatedAt", folder.updatedAt)
             }) }
         })
+        put("albumMetadata", buildJsonArray {
+            state.albumMetadata.forEach { metadata -> add(buildJsonObject {
+                put("source", metadata.source.mediaPrefix); put("albumId", metadata.albumId)
+                put("albumArtist", metadata.albumArtist); put("trackCount", metadata.trackCount)
+                put("tracks", buildJsonArray { metadata.tracks.forEach { add(encodeHit(SearchCatalog.trackHit(it))) } })
+            }) }
+        })
     }.toString()
 
     private fun encodeHit(hit: CatalogHit, addedAt: Long? = null, favoriteAt: Long? = null, folderId: String? = null, uid: String? = null, metadata: JsonObject? = null): JsonObject = buildJsonObject {
-        metadata?.forEach { (name, value) -> put(name, value) }
+        metadata?.forEach { (name, value) -> if (name != "country" && name != "countrySource") put(name, value) }
         put("kind", hit.kind); put("id", hit.id); put("source", hit.source.mediaPrefix)
-        put("country", metadata?.string("country") ?: "us"); put("name", hit.title); put("title", hit.title); put("subtitle", hit.subtitle)
+        val country = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() ?: hit.track?.country.normalizedAppleCountry() else null
+        if (country != null) { put("country", country); put("countrySource", "catalog") }
+        put("name", hit.title); put("title", hit.title); put("subtitle", hit.subtitle)
         put("artist", hit.subtitle); put("artwork", hit.artwork ?: ""); put("explicit", hit.explicit); put("detailOnly", hit.detailOnly)
         if (hit.kind == "playlist") put("curator", hit.subtitle)
         hit.track?.let { track ->
@@ -659,6 +789,7 @@ class MusicLibrary(context: Context) {
                 put("durationMs", track.durationMs); put("artistId", track.artistId); put("albumId", track.albumId)
                 put("artistArtworkTemplate", track.artistArtworkTemplate ?: ""); put("albumArtist", track.albumArtist)
                 put("discNumber", track.discNumber); put("trackNumber", track.trackNumber)
+                if (country != null) put("country", country)
             })
         }
         hit.attributes?.let { put("attributes", it) }
@@ -684,7 +815,6 @@ class MusicLibrary(context: Context) {
     private fun JsonPrimitive.longOrNullSafe(): Long? = longOrNull
 
     private fun cleanMetadata(raw: JsonObject): JsonObject = buildJsonObject {
-        raw.string("country")?.takeIf { it.matches(Regex("[A-Za-z]{2}")) }?.let { put("country", it.lowercase()) }
         for (name in listOf("album", "albumId", "releaseDate", "bgColor")) {
             raw.string(name)?.takeIf { it.length <= 300 }?.let { put(name, it) }
         }
