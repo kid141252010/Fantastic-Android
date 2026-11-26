@@ -2,6 +2,7 @@ package io.github.kid141252010.fantastic.playback
 
 import android.content.Context
 import android.util.AtomicFile
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.Format
@@ -57,6 +58,7 @@ internal data class PlaybackRendition(
     val appleMode: String? = null,
     val resolvedNetease: NeteaseAudio? = null,
     val neteaseRequestQuality: String? = null,
+    val resolvedApple: AppleResolvedSource? = null,
     val key: PlaybackCacheKey,
 )
 
@@ -92,6 +94,10 @@ internal data class PlaybackCacheEntry(
     val appleExplicitQuality: String? = null,
     val appleProfileQuality: String? = null,
 )
+
+internal val PlaybackCacheEntry.isCompleteAppleAlac: Boolean
+    get() = key.source == Source.Apple && actualQuality == "alac" && appleMode == "alac" &&
+        appleGroup?.contains("alac", true) == true
 
 internal class PlaybackCacheLease(val file: File, private val release: () -> Unit) : AutoCloseable {
     private val closed = AtomicBoolean()
@@ -256,7 +262,7 @@ internal class PlaybackCache(context: Context, private val prefs: Prefs, private
         for (signal in wake) {
             while (true) {
                 val next = synchronized(lock) {
-                    val first = pending.entries.firstOrNull() ?: return@synchronized null
+                    val first = pending.entries.maxByOrNull { it.value.lastUsed } ?: return@synchronized null
                     val work = first.value
                     pending.remove(first.key)
                     launch(start = CoroutineStart.LAZY) { complete(work) }.also { active = work to it }
@@ -284,13 +290,26 @@ internal class PlaybackCache(context: Context, private val prefs: Prefs, private
         val request = FullAudioRequest(rendition.track, key.server, key.storefront, rendition.actualQuality,
             prefs.playbackCacheLimit.bytes, appleGroup = rendition.appleGroup, appleCodecs = rendition.appleCodecs,
             resolvedNetease = rendition.resolvedNetease, strict = true, expectedDurationMs = rendition.durationMs,
-            requestedNeteaseQuality = rendition.neteaseRequestQuality)
-        if (write(entry) { part, reserve -> transfer.transfer(request, part, reserve) {} }) {
-            Log.i(TAG, "已缓存 ${key.source}/${key.trackId} ${rendition.actualQuality}")
+            requestedNeteaseQuality = rendition.neteaseRequestQuality, resolvedApple = rendition.resolvedApple)
+        val started = SystemClock.elapsedRealtime()
+        if (rendition.resolvedApple != null) {
+            Log.i(TAG, "apple-cache-start id=${key.trackId.appleLogToken()} occurrence=${rendition.occurrence} " +
+                "request=${rendition.requestId?.appleLogToken()} group=${rendition.appleGroup?.appleLogToken()} " +
+                "segments=${rendition.resolvedApple.track.media.segments.size} parallelCap=$AUDIO_LANES " +
+                "bufferBytes=$APPLE_ALAC_SEGMENT_BUFFER_BYTES reused=resolved")
+        }
+        val saved = write(entry) { part, reserve -> transfer.transfer(request, part, reserve) {} }
+        if (saved != null) {
+            if (rendition.resolvedApple != null) {
+                Log.i(TAG, "apple-cache-complete id=${key.trackId.appleLogToken()} occurrence=${rendition.occurrence} " +
+                    "request=${rendition.requestId?.appleLogToken()} group=${rendition.appleGroup?.appleLogToken()} " +
+                    "bytes=${saved.sizeBytes} durationMs=${saved.durationMs} elapsedMs=${SystemClock.elapsedRealtime() - started} " +
+                    "file=${saved.fileId}")
+            } else Log.i(TAG, "已缓存 ${key.source}/${key.trackId} ${rendition.actualQuality}")
         }
     }
 
-    suspend fun write(entry: PlaybackCacheEntry, transfer: suspend (File, (Long) -> Unit) -> AudioFileInfo): Boolean = writes.withLock {
+    suspend fun write(entry: PlaybackCacheEntry, transfer: suspend (File, (Long) -> Unit) -> AudioFileInfo): PlaybackCacheEntry? = writes.withLock {
         startup.join()
         val id = UUID.randomUUID().toString()
         val partial = File(directory, "$id.part")
@@ -328,17 +347,17 @@ internal class PlaybackCache(context: Context, private val prefs: Prefs, private
                     reserved = 0L
                     published = true
                     changed()
+                    saved
                 }
             }
-            true
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             Log.w(TAG, "未缓存 ${entry.key.source}/${entry.key.trackId}：${error.message}")
-            false
+            null
         } catch (error: OutOfMemoryError) {
             Log.w(TAG, "未缓存 ${entry.key.source}/${entry.key.trackId}：内存不足")
-            false
+            null
         } finally {
             withContext(NonCancellable + io) {
                 synchronized(lock) {

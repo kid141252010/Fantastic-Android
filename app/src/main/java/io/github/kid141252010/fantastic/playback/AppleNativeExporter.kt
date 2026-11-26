@@ -15,6 +15,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -34,6 +39,7 @@ internal class AppleNativeExporter(private val context: Context, private val api
         reserve: (Long) -> Unit,
         progress: (Int?) -> Unit,
     ): AudioFileInfo = withContext(Dispatchers.IO) {
+        request.resolvedApple?.let { return@withContext exportResolvedAlac(request, it, target, reserve, progress) }
         val wanted = normalizeWanted(request.quality)
         val profile = applePlaybackProfile(context.applicationContext, Prefs(context.applicationContext))
         val decrypt = AppleNativeDecrypt(context.applicationContext, api, request.server)
@@ -134,6 +140,117 @@ internal class AppleNativeExporter(private val context: Context, private val api
             throw error
         } finally {
             drm?.close()
+        }
+    }
+
+    private suspend fun exportResolvedAlac(
+        request: FullAudioRequest,
+        source: AppleResolvedSource,
+        target: File,
+        reserve: (Long) -> Unit,
+        progress: (Int?) -> Unit,
+    ): AudioFileInfo {
+        val track = source.track
+        if (track.media.adamId != request.track.id || !track.variant.groupId.contains("alac", true) ||
+            track.variant.widevine || track.variant.groupId != request.appleGroup ||
+            track.variant.codecs != request.appleCodecs || request.quality != "alac") {
+            throw IOException("Apple 缓存音质已变更")
+        }
+        val encryptedSize = track.media.totalBytes
+        if (encryptedSize <= 0 || encryptedSize > Long.MAX_VALUE - 1_048_576L ||
+            encryptedSize + 1_048_576L > request.maxBytes) throw IOException("下载文件过大")
+        val metadata = parseInit(track.initBytes)
+        if (metadata.timescale <= 0 || track.media.segments.isEmpty()) throw badMp4()
+        fun reserveEnd(end: Long) {
+            if (end <= 0 || end > request.maxBytes) throw IOException("下载文件过大")
+            reserve(end)
+        }
+        try {
+            var durationTicks = 0L
+            val chunks = ArrayList<Chunk>()
+            val samples = ArrayList<Sample>()
+            val offsets = ArrayList<Long>()
+            RandomAccessFile(target, "rw").use { file ->
+                file.setLength(0)
+                reserveEnd(48L)
+                file.write(box("ftyp", concat(bytes("M4A "), u32(1), bytes("M4A "), bytes("mp42"), bytes("isom"), bytes("iso5"))))
+                file.write(u32(1)); file.write(bytes("mdat")); file.write(u64(0))
+                supervisorScope {
+                    // The consuming fragment stays in the window until muxed, including its byte budget.
+                    val window = ArrayDeque<Pair<Int, Deferred<ByteArray>>>()
+                    var next = 0
+                    var buffered = 0L
+                    fun fill() {
+                        while (next < track.media.segments.size && window.size < AUDIO_LANES) {
+                            val length = track.media.segments[next].range.length
+                            if (length <= 0) throw badMp4()
+                            if (window.isNotEmpty() && (length > APPLE_ALAC_SEGMENT_BUFFER_BYTES ||
+                                    buffered > APPLE_ALAC_SEGMENT_BUFFER_BYTES - length)) break
+                            val index = next++
+                            buffered = Math.addExact(buffered, length)
+                            window.addLast(index to async(Dispatchers.IO) { source.decrypt.fetchSegment(track, index) })
+                        }
+                    }
+                    try {
+                        fill()
+                        while (window.isNotEmpty()) {
+                            coroutineContext.ensureActive()
+                            val (index, pending) = window.first()
+                            val raw = pending.await()
+                            val fragment = parseFragment(raw, metadata.trackId, false, null, metadata.ivSize)
+                            for (chunk in fragment.chunks) {
+                                if (chunk.samples.isEmpty()) continue
+                                var end = file.filePointer
+                                for (sample in chunk.samples) {
+                                    if (sample.size <= 0 || sample.duration <= 0) throw badMp4()
+                                    end = Math.addExact(end, sample.size.toLong())
+                                }
+                                reserveEnd(end)
+                                offsets += file.filePointer
+                                val written = ArrayList<Sample>(chunk.samples.size)
+                                for (sample in chunk.samples) {
+                                    coroutineContext.ensureActive()
+                                    val saved = Sample(sample.duration, sample.size, file.filePointer, samples.size)
+                                    file.write(raw, sample.offset, sample.size)
+                                    written += saved
+                                    samples += saved
+                                    durationTicks = Math.addExact(durationTicks, sample.duration.toLong())
+                                }
+                                chunks += Chunk(written)
+                            }
+                            window.removeFirst()
+                            buffered -= track.media.segments[index].range.length
+                            progress((index + 1) * 99 / track.media.segments.size)
+                            fill()
+                        }
+                    } finally {
+                        for ((_, pending) in window) pending.cancel()
+                        withContext(NonCancellable) { for ((_, pending) in window) pending.cancelAndJoin() }
+                    }
+                }
+                if (samples.isEmpty() || durationTicks <= 0) throw IOException("Apple 音频轨道为空")
+                val payloadEnd = file.filePointer
+                file.seek(40L)
+                file.write(u64(Math.addExact(16L, payloadEnd - 48L)))
+                file.seek(payloadEnd)
+                val moov = buildMoov(metadata, chunks, samples, offsets, offsets.any { it > 0xffff_ffffL }, durationTicks)
+                reserveEnd(Math.addExact(payloadEnd, moov.size.toLong()))
+                file.write(moov)
+                coroutineContext.ensureActive()
+                file.fd.sync()
+            }
+            val durationMs = Math.multiplyExact(durationTicks, 1000L) / metadata.timescale
+            val expected = maxOf(request.track.durationMs, request.expectedDurationMs)
+            if (durationMs <= 0) throw badMp4()
+            if (expected > 10_000L && durationMs + 5_000L < expected) {
+                throw IOException("音源仅返回试听片段，未保存为完整歌曲")
+            }
+            progress(100)
+            return AudioFileInfo(target.length(), durationMs, "audio/mp4",
+                track.variant.sampleRate.takeIf { it > 0 }, "alac")
+        } catch (error: Throwable) {
+            target.delete()
+            throw error
         }
     }
 
@@ -280,7 +397,6 @@ internal class AppleNativeExporter(private val context: Context, private val api
 
     private fun parseFragment(data: ByteArray, audioTrackId: Long, widevine: Boolean, keyId: ByteArray?, ivSize: Int): Fragment {
         val chunks = ArrayList<FragmentChunk>()
-        val samples = ArrayList<LocatedSample>()
         val all = ArrayList<LocatedSample>()
         val encryption = ArrayList<Int>()
         val ivs = ArrayList<ByteArray>()
@@ -325,6 +441,7 @@ internal class AppleNativeExporter(private val context: Context, private val api
             }
             var next = moof.start.toLong()
             for (trun in trafChildren.filter { it.type == "trun" }) {
+                val samples = ArrayList<LocatedSample>()
                 if (trun.body + 8 > trun.end) throw badMp4()
                 val f = u24(data, trun.body + 1)
                 val count = u32(data, trun.body + 4)

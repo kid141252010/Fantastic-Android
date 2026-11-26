@@ -16,7 +16,7 @@
 ## 项目取舍
 
 - Fantastic 提供 Apple Music、QQ 音乐和网易云音乐。各音源的设置提供该来源的音质选项，播放页依据实际报告的编码与规格显示徽标和详情。媒体输出使用 Android 系统入口。
-- 播放服务恢复队列后预加载配置的 Fantastic 播放页。实际请求 Apple 在线播放时才开始就绪检查，闲置期间的加载失败会释放页面，播放时可重新加载。
+- Apple 在线音频由原生播放引擎处理；ALAC 完整播放缓存由同一 JNI/AudioTrack 输出，不依赖设备 MediaCodec 的 ALAC 支持。Apple 媒体页仍保留 WebView。
 - 当前服务不提供推荐队列、协作、SharePlay 或人声衰减。自动播放入口显示禁用状态，其他缺少数据或处理能力的入口按实际能力显示。
 - 歌词可用时，歌曲菜单显示禁用的「分享歌词」。定时歌词仍可单点定位。歌词尾部创作者文字使用固定透明度，自动跟随由列表管理。
 - 「查看歌曲制作信息」按需读取当前录音的署名。Apple Music 通过配置服务读取人员和角色分组，缺少有效人员时使用 `composerName`。QQ 音乐读取官方歌曲详情中的明确角色。网易云音乐只显示官方 LRC 明确标注的「网易云音乐歌词署名」。[Apple Music 制作信息说明](https://support.apple.com/guide/music-web/view-song-credits-apdm3b93fb16/web)
@@ -29,7 +29,20 @@
 - AAC/Widevine 沿用 Media3 1.5.1 的原生 HLS/DRM 路径。仅当前请求的非占位 window 可接管位置；加载期多次定位只应用最后目标，保留播放/暂停意图。用户 seek 由 `SimpleBasePlayer` 发出 SEEK discontinuity，不再把小于一秒的位置伪装为自动循环。
 - 诊断标签 `FantasticPlayback` 每次接受定位记录 `apple-seek`，对应 ALAC 首输出或 Media3 READY 记录 `apple-seek-output`；包含安全曲目 ID、occurrence、request、seek 与绝对位置，不打印服务器、鉴权或 CDN URL。
 - 依据：[Apple Android 同步歌词说明（2025-09-17）](https://support.apple.com/en-us/109355)、[AudioTrack 播放头及 pause/flush 契约](https://developer.android.com/reference/android/media/AudioTrack#getPlaybackHeadPosition())、Media3 1.5.1 [MaskingMediaSource](https://github.com/androidx/media/blob/1.5.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/source/MaskingMediaSource.java) 与 [SimpleBasePlayer](https://github.com/androidx/media/blob/1.5.1/libraries/common/src/main/java/androidx/media3/common/SimpleBasePlayer.java)。10ms 写入背压轮询、100ms 输出采样是工程实现值，不是 Apple 参数。
-- 本次 ADB 无在线设备；真实在线 ALAC 与 AAC/Widevine 的 90s/180s 歌词点击、快速覆盖、暂停五秒后恢复、慢加载/再缓冲、分片边界/曲尾、切歌/音质切换均未设备验收。构建与包体核验不能证明声音、歌词、进度及 MediaSession 已对齐。
+- 上一轮在线任意位置播放与真实时钟已由用户实测正常；本轮新增完整 ALAC 缓存路径仍需单独设备验收，不能用旧路径的验收代替。
+
+## Apple 完整 ALAC 预缓存与复用
+
+- 仅当前实际输出的原生 ALAC 变体，在首个非零 PCM 写入后加入既有整曲缓存 worker；首响不等整曲下载。解析结果和 decrypt 仅在进程内传递，不再 prepare 第二次，不将 URL、密钥、模板或 cookie 写入索引和 MediaSession。入队身份使用全局队列 uid，不使用 Apple 连续 run 的局部 index。
+- 从第 0 片到末片按顺序封装原始压缩 packet 为完整 M4A，不先生成整曲 PCM、不重编码、不额外请求另一份 ALAC。复用已有 `AUDIO_LANES=3` 上限，待消费与当前消费分片合计最多 8 MiB 声明 range；超大单片独占。decrypt 的完成 LRU 最多 4 片且不超过 8 MiB，在线播放与缓存共享在途结果，取消一个等待者不取消另一个消费者。
+- 单文件 `.part` 直接写入 ftyp/64 位 mdat，追加样本表 moov 并同步关闭后，沿用 `.part → .audio` 原子移动及 AtomicFile 索引。逐次 reserve 计入该文件实际累计大小，没有未计预算的 ALAC payload spool。已知时长大于 10 秒且输出少于期望超过 5 秒的预览不得发布为整曲。
+- 沿用现有 200MB/500MB/1GB/5GB 容量与每曲一个当前变体、完整 profile 匹配、pin/lease 和 LRU 策略。只运行一个整曲 worker；最近播放的 pending 优先，同时间保留插入顺序。已启动任务切歌后继续，停止、清队列和服务释放仍取消；完成缓存只刷新 upcoming，不抢占当前声音或时钟。
+- 再次选歌、重播和恢复队列可优先读取匹配的完整 ALAC 缓存，包括原有完整条目；暂停恢复不打开文件或强制播放。Media3 1.5.1 `Mp4Extractor` 管理 MP4 样本表，用指定音轨的真实 seek point 定位，压缩 packet 交给现有 JNI 解码与 AudioTrack 输出。绝对时钟仍为目标位置加真实已播帧，保留请求/seek generation 隔离和曲尾排空。
+- 容器、文件读取或缓存 ALAC 解码失败时，仅当前请求保存实际位置和暂停意图，失效该 UUID 后跳过缓存恢复一次在线来源。硬件/AudioTrack 错误不认作缓存损坏；取消及旧请求错误不触发恢复。AAC、Widevine、空间音频及手动下载沿用既有选路，不因缓存任务降音质或改变网络偏好。
+- `FantasticPlaybackCache` 的 `apple-cache-start/complete` 记录安全曲目 ID、uid、request、group、真实文件 UUID、字节、时长和耗时；`FantasticPlayback` 的 `path=cache-alac` 只证明已 acquire 本地文件，首输出记录实际 rate/bits/channels。日志本身不证明出声或零网络请求。
+- 依据：[Apple 无损说明（2026-11-12）](https://support.apple.com/en-us/118295) 确认 Android 流播/下载音质分别选择及无损的流量/存储成本；[Media3 1.5.1 Mp4Extractor](https://github.com/androidx/media/blob/1.5.1/libraries/extractor/src/main/java/androidx/media3/extractor/mp4/Mp4Extractor.java) 与 [TrackOutput](https://github.com/androidx/media/blob/1.5.1/libraries/extractor/src/main/java/androidx/media3/extractor/TrackOutput.java) 提供本地 packet/seek 契约。3 槽、8 MiB、4 片和完整性容差均为项目实现值，不是 Apple 公布的缓存参数；不承诺整曲完成时限。
+- 本轮 `adb devices -l` 无设备。首次生成耗时、首尾实际无损输出、同音质二次试听无 prepare/CDN/模板请求、断网重启、本地 90s/180s 歌词定位与暂停恢复、生成中快速定位/切歌、空间不足/断网失败、随机混源 uid 和音质/profile 隔离均未运行真实设备验收；构建或包体核验不能代替这些证据。
+
 
 
 ## 设备验收
