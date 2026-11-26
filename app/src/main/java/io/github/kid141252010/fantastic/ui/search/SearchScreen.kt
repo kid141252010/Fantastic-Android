@@ -14,12 +14,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ArrowDropDown
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -50,14 +54,17 @@ import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.ui.browse.AppleDiscoveryScreen
 import io.github.kid141252010.fantastic.FantasticApp
+import io.github.kid141252010.fantastic.data.AppleStorefront
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
+import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
@@ -100,9 +107,20 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
     var editing by remember { mutableStateOf(false) }
     val term = query.trim()
     val selectedKind = kind
-    val search = remember(app) { SearchCatalog(app.apple, app.netease, app.qq, app.prefs) }
-    val overview = remember(term, source, app.prefs.baseUrl, app.prefs.storefront) { SearchResults() }
-    val category = remember(term, source, selectedKind, app.prefs.baseUrl, app.prefs.storefront) {
+    val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
+    val regions by app.appleRegions.state.collectAsStateWithLifecycle()
+    val requestStorefront = if (source == Source.Apple) storefront else ""
+    val server = SourceStatus.normalizeBaseUrl(app.prefs.baseUrl)
+    val regionEntry = regions.entries[server]
+    val storefronts = regionEntry?.storefronts
+    val wrapperRegions = regionEntry?.wrapperRegions
+    val sortedStorefronts = remember(storefronts, wrapperRegions) {
+        storefronts.orEmpty().sortedWith(compareByDescending<AppleStorefront> { it.id in wrapperRegions.orEmpty() }.thenBy { it.id })
+    }
+    var regionsOpen by remember { mutableStateOf(false) }
+    val search = remember(app) { SearchCatalog(app.apple, app.netease, app.qq) }
+    val overview = remember(term, source, app.prefs.baseUrl, requestStorefront) { SearchResults() }
+    val category = remember(term, source, selectedKind, app.prefs.baseUrl, requestStorefront) {
         val seed = selectedKind?.let { selected -> overview.groups.firstOrNull { it.kind == selected } }
         SearchResults(seed?.items.orEmpty(), seed?.next, seed != null)
     }
@@ -128,12 +146,12 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
         result.error = null
         try {
             if (selectedKind == null) {
-                val grouped = search.searchAll(source, term)
+                val grouped = search.searchAll(source, term, requestStorefront)
                 result.groups = grouped.groups
                 result.failures = grouped.failures
                 result.loaded = true
             } else if (!result.loaded) {
-                val page = search.search(source, selectedKind, term)
+                val page = search.search(source, selectedKind, term, requestStorefront)
                 result.items = page.items.distinctBy { "${it.kind}:${it.id}" }
                 result.next = page.next
                 result.loaded = true
@@ -156,7 +174,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
         if (!editing || term.isEmpty()) return@LaunchedEffect
         delay(220)
         try {
-            result.suggestions = search.suggestions(source, term)
+            result.suggestions = search.suggestions(source, term, requestStorefront)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -193,13 +211,52 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                         }
                     } else Icon(Icons.Rounded.Search, contentDescription = null)
                 },
-                trailingIcon = if (query.isNotEmpty()) {
-                    {
-                        IconButton(onClick = { query = ""; kind = null }) {
-                            Icon(Icons.Rounded.Close, "清除搜索")
+                trailingIcon = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = ""; kind = null }) {
+                                Icon(Icons.Rounded.Close, "清除搜索")
+                            }
+                        }
+                        if (source == Source.Apple) {
+                            Box {
+                                TextButton(
+                                    onClick = { focus.clearFocus(); regionsOpen = true },
+                                    modifier = Modifier.semantics { contentDescription = "Apple Music 搜索地区：${storefront.uppercase()}" },
+                                ) {
+                                    Text(storefront.uppercase())
+                                    Icon(Icons.Rounded.ArrowDropDown, contentDescription = null)
+                                }
+                                DropdownMenu(expanded = regionsOpen, onDismissRequest = { regionsOpen = false }) {
+                                    if (sortedStorefronts.isEmpty()) {
+                                        DropdownMenuItem(
+                                            text = { Text(if (regions.loading || regions.refreshingServer == server) "正在读取地区…" else "地区列表不可用，请到设置刷新") },
+                                            onClick = {}, enabled = false,
+                                        )
+                                    } else {
+                                        if (wrapperRegions == null) {
+                                            DropdownMenuItem(text = { Text("wrapper 支持状态未知") }, onClick = {}, enabled = false)
+                                        }
+                                        if (storefronts?.none { it.id == storefront } == true) {
+                                            DropdownMenuItem(text = { Text("当前地区不在地区列表中") }, onClick = {}, enabled = false)
+                                        }
+                                        sortedStorefronts.forEach { region ->
+                                            DropdownMenuItem(
+                                                text = { Text("${region.id.uppercase()} · ${region.name}" + if (region.id in wrapperRegions.orEmpty()) " · wrapper 支持" else "") },
+                                                modifier = Modifier.semantics { selected = region.id == storefront },
+                                                trailingIcon = if (region.id == storefront) ({ Icon(Icons.Rounded.Check, contentDescription = null) }) else null,
+                                                onClick = {
+                                                    regionsOpen = false
+                                                    if (region.id != app.prefs.storefront) app.prefs.storefront = region.id
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                } else null,
+                },
             )
         }
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 4.dp)) {
@@ -208,6 +265,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                     selected = source == choice,
                     onClick = {
                         if (choice == Source.Netease && kind == SearchCatalog.Kind.Video) kind = null
+                        regionsOpen = false
                         source = choice
                     },
                     shape = SegmentedButtonDefaults.itemShape(index, sources.size),
@@ -230,7 +288,9 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
         }
         if (term.isEmpty() && !editing && source == Source.Apple) {
             Box(Modifier.weight(1f)) {
-                AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = onOpen, searchLanding = true)
+                key(storefront) {
+                    AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = onOpen, searchLanding = true)
+                }
             }
             return@Column
         }
@@ -244,6 +304,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                             subtitle = suggestion.hit?.subtitle.orEmpty(),
                             leading = { Icon(Icons.Rounded.Search, contentDescription = null) },
                             onClick = {
+                                if (source == Source.Apple && requestStorefront != app.prefs.storefront) return@Md3MediaRow
                                 focus.clearFocus()
                                 val hit = suggestion.hit
                                 if (hit?.track != null) app.player.play(hit.track)
@@ -268,7 +329,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                             }
                         }
                         items(group.items.take(previewLimit), key = { "${group.key}:${it.kind}:${it.id}" }) { hit ->
-                            SearchHitRow(app, hit, player.mediaId, focus, onOpen)
+                            SearchHitRow(app, hit, player.mediaId, requestStorefront, focus, onOpen)
                         }
                     }
                     items(result.failures, key = { "failure:${it.kind.id}" }) { failure ->
@@ -279,7 +340,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                     }
                 } else {
                     items(result.items, key = { "${it.source}:${it.kind}:${it.id}" }) { hit ->
-                        SearchHitRow(app, hit, player.mediaId, focus, onOpen)
+                        SearchHitRow(app, hit, player.mediaId, requestStorefront, focus, onOpen)
                     }
                 }
                 val noResults = if (kind == null) result.groups.isEmpty() && result.failures.isEmpty() else result.items.isEmpty()
@@ -307,6 +368,7 @@ private fun SearchHitRow(
     app: FantasticApp,
     hit: CatalogHit,
     playingMediaId: String?,
+    storefront: String,
     focus: FocusManager,
     onOpen: (CatalogHit) -> Unit,
 ) {
@@ -320,6 +382,7 @@ private fun SearchHitRow(
         subtitle = subtitle,
         playing = track != null && playingMediaId == "${track.source.mediaPrefix}:${track.id}",
         onClick = {
+            if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@Md3MediaRow
             focus.clearFocus()
             if (track != null) app.player.play(track) else onOpen(hit)
         },
@@ -331,16 +394,25 @@ private fun SearchHitRow(
         },
         trailing = {
             if (track == null) Icon(Icons.Rounded.ChevronRight, contentDescription = null)
-            else IconButton(onClick = { focus.clearFocus(); actionsOpen = true }) {
+            else IconButton(onClick = {
+                if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@IconButton
+                focus.clearFocus(); actionsOpen = true
+            }) {
                 Icon(Icons.Rounded.MoreHoriz, "${hit.title}更多操作")
             }
         },
     )
-    if (track != null && actionsOpen) {
+    if (track != null && actionsOpen && (hit.source != Source.Apple || storefront == app.prefs.storefront)) {
         GlassSheet(hit.title, onDismissRequest = { actionsOpen = false }, showHeader = false) {
             MediaActionContent(hit, app.library, listOf(track),
-                onPlay = { actionsOpen = false; app.player.play(track) },
-                onView = { actionsOpen = false; onOpen(hit) },
+                onPlay = {
+                    actionsOpen = false
+                    if (hit.source != Source.Apple || storefront == app.prefs.storefront) app.player.play(track)
+                },
+                onView = {
+                    actionsOpen = false
+                    if (hit.source != Source.Apple || storefront == app.prefs.storefront) onOpen(hit)
+                },
                 onDismiss = { actionsOpen = false })
         }
     }

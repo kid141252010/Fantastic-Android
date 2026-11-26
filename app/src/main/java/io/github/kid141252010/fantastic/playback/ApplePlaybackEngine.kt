@@ -119,7 +119,7 @@ internal class ApplePlaybackEngine(
     private var activeProfile = ApplePlaybackProfile("wifi", "hires", "auto")
     private var activeServer = ""
     private var configuredServer = ""
-    private var activeStorefront = "us"
+    private var activeStorefront = Prefs.DEFAULT_STOREFRONT
     private var requestedQuality: String? = null
     private var pendingPositionMs = 0L
     private var timelineInstalled = false
@@ -189,7 +189,7 @@ internal class ApplePlaybackEngine(
             else songs.toMutableList().apply { this[index] = selected.copy(quality = quality) }
         occurrence = index
         requestedQuality = quality ?: selected.quality
-        activeStorefront = storefront.lowercase().takeIf(STORE_FRONT::matches) ?: "us"
+        activeStorefront = storefront.lowercase().takeIf(STORE_FRONT::matches) ?: Prefs.DEFAULT_STOREFRONT
         activeServer = server
         configuredServer = prefs.baseUrl
         pendingPositionMs = startPositionMs.coerceIn(0L, selected.track.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)

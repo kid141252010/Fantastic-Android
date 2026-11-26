@@ -31,7 +31,7 @@ class NeteaseApi(private val api: FantasticApi, @Suppress("unused") private val 
     }
     private val playClient by lazy { api.client.newBuilder().followRedirects(false).followSslRedirects(false).build() }
 
-    suspend fun capabilities(): NeteaseCapabilities = get("/ncm/capabilities", NeteaseCapabilities.serializer()).let { response ->
+    suspend fun capabilities(server: String = prefs.baseUrl): NeteaseCapabilities = get("/ncm/capabilities", NeteaseCapabilities.serializer(), server).let { response ->
         response.copy(qualities = response.qualities.filter { it.quality in Prefs.NETEASE_QUALITY_IDS })
     }
 

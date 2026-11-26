@@ -35,6 +35,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -112,8 +113,22 @@ fun AppShell(app: FantasticApp) {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+    val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
     var catalog by remember { mutableStateOf<CatalogHit?>(null) }
-    val appleMedia = catalog?.takeIf { it.source == Source.Apple && it.kind in setOf("music-video", "station", "post") }
+    var catalogStorefront by remember { mutableStateOf<String?>(null) }
+    fun openCatalog(hit: CatalogHit) {
+        catalogStorefront = if (hit.source == Source.Apple) app.prefs.storefront else null
+        catalog = hit
+    }
+    fun closeCatalog() {
+        catalog = null
+        catalogStorefront = null
+    }
+    val visibleCatalog = catalog?.takeIf { it.source != Source.Apple || catalogStorefront == storefront }
+    LaunchedEffect(storefront, catalog, catalogStorefront) {
+        if (catalog?.source == Source.Apple && catalogStorefront != storefront) closeCatalog()
+    }
+    val appleMedia = visibleCatalog?.takeIf { it.source == Source.Apple && it.kind in setOf("music-video", "station", "post") }
     val glassSheetState = remember { mutableStateOf(false) }
     val glassSheetVisibility = remember { { visible: Boolean -> glassSheetState.value = visible } }
     val player by playerConnection.state.collectAsStateWithLifecycle()
@@ -144,21 +159,25 @@ fun AppShell(app: FantasticApp) {
             Box(Modifier.fillMaxSize()) {
                 Box(
                     Modifier.fillMaxSize().haze(haze).statusBarsPadding()
-                        .then(if (playerExpanded || settings || catalog != null) Modifier.clearAndSetSemantics {} else Modifier),
+                        .then(if (playerExpanded || settings || visibleCatalog != null) Modifier.clearAndSetSemantics {} else Modifier),
                 ) {
                     when (tab) {
-                        Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
-                        Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest, onOpen = { catalog = it })
-                        Tab.New -> AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
-                        Tab.Radio -> AppleDiscoveryScreen(app, radio = true, rootNavigationRequest = rootNavigationRequest, onOpen = { catalog = it })
+                        Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest, onOpen = ::openCatalog)
+                        Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest, onOpen = ::openCatalog)
+                        Tab.New -> key(storefront) {
+                            AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = ::openCatalog)
+                        }
+                        Tab.Radio -> key(storefront) {
+                            AppleDiscoveryScreen(app, radio = true, rootNavigationRequest = rootNavigationRequest, onOpen = ::openCatalog)
+                        }
                         Tab.Home -> Placeholder(tab, onSettings = { settings = true })
                     }
                 }
-                catalog?.takeIf { appleMedia == null }?.let { hit ->
+                visibleCatalog?.takeIf { appleMedia == null }?.let { hit ->
                     CatalogDetails(app, hit.source, hit.kind, hit.id,
                         modifier = Modifier.fillMaxSize().haze(haze),
                         interactive = !playerExpanded && !settings && !glassSheetState.value,
-                        onClose = { catalog = null })
+                        onClose = ::closeCatalog)
                 }
 
                 PlayerSheetHost(
@@ -175,7 +194,7 @@ fun AppShell(app: FantasticApp) {
                     pronunciation = lyricPronunciation,
                     onTranslationChange = { lyricTranslation = it; app.prefs.lyricTranslation = it },
                     onPronunciationChange = { lyricPronunciation = it; app.prefs.lyricPronunciation = it },
-                    onOpenCatalog = { catalog = it },
+                    onOpenCatalog = ::openCatalog,
                     onOpenSettings = { settings = true },
                     initiallyExpanded = nowPlaying,
                     onExpandedChange = { isExpanded ->
@@ -192,7 +211,7 @@ fun AppShell(app: FantasticApp) {
                             TabBar(
                                 selected = tab,
                                 onSelect = {
-                                    catalog = null
+                                    closeCatalog()
                                     settings = false
                                     tab = it
                                     rootNavigationRequest++
@@ -209,7 +228,7 @@ fun AppShell(app: FantasticApp) {
                         onShowLibrarySourcesChange = { showLibrarySources = it; app.prefs.showLibrarySources = it },
                         onClose = { settings = false })
                 }
-                appleMedia?.let { hit -> AppleMediaScreen(app, hit, onClose = { catalog = null }) }
+                appleMedia?.let { hit -> AppleMediaScreen(app, hit, onClose = ::closeCatalog) }
             }
         }
     }

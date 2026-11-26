@@ -14,7 +14,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.longOrNull
 
 /** A search cursor belongs to one source, kind, query and storefront; it never stores a CDN play URL. */
-class SearchCatalog(private val apple: AppleCatalogApi, private val netease: NeteaseApi, private val qq: QqApi, private val prefs: Prefs) {
+class SearchCatalog(private val apple: AppleCatalogApi, private val netease: NeteaseApi, private val qq: QqApi) {
     enum class Kind(val id: String, val title: String, val appleType: AppleCatalogApi.Entity) {
         Song("song", "歌曲", AppleCatalogApi.Entity.Song),
         Artist("artist", "艺人", AppleCatalogApi.Entity.Artist),
@@ -27,21 +27,21 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
     data class Suggestion(val title: String, val query: String? = null, val hit: CatalogHit? = null)
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
-    suspend fun search(source: Source, kind: Kind, query: String): Page = load(Cursor(source, kind, query.trim(), 0, storefront = prefs.storefront))
+    suspend fun search(source: Source, kind: Kind, query: String, storefront: String): Page = load(Cursor(source, kind, query.trim(), 0, storefront = storefront))
 
     data class Group(val key: String, val title: String, val kind: Kind?, val items: List<CatalogHit>, val next: Cursor? = null)
     data class GroupFailure(val kind: Kind, val message: String)
     data class GroupedPage(val groups: List<Group>, val failures: List<GroupFailure>)
     private data class GroupOutcome(val kind: Kind, val page: Page? = null, val error: Exception? = null)
 
-    suspend fun searchAll(source: Source, query: String): GroupedPage {
+    suspend fun searchAll(source: Source, query: String, storefront: String): GroupedPage {
         val term = query.trim()
         require(term.isNotEmpty())
         if (source == Source.Apple) {
             val response = apple.search(term, listOf(
                 AppleCatalogApi.Entity.Song, AppleCatalogApi.Entity.Album, AppleCatalogApi.Entity.MusicVideo,
                 AppleCatalogApi.Entity.Playlist, AppleCatalogApi.Entity.Artist,
-            ), limit = 21, storefront = prefs.storefront)
+            ), limit = 21, storefront = storefront)
             val groups = response.groups.mapNotNull { group ->
                 if (group.key == "top") {
                     val hits = group.page.data.map(::appleHit).distinctBy { "${it.kind}:${it.id}" }.take(6)
@@ -52,7 +52,7 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
                     .distinctBy { "${it.kind}:${it.id}" }
                 if (hits.isEmpty()) return@mapNotNull null
                 val next = group.page.next?.takeIf(String::isNotBlank)?.let {
-                    Cursor(source, kind, term, hits.size, next = it, storefront = prefs.storefront)
+                    Cursor(source, kind, term, hits.size, next = it, storefront = storefront)
                 }
                 Group(kind.id, kind.title, kind, hits, next)
             }
@@ -63,7 +63,7 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
         val outcomes = supervisorScope {
             kinds.map { kind -> async {
                 try {
-                    GroupOutcome(kind, page = search(source, kind, term))
+                    GroupOutcome(kind, page = search(source, kind, term, storefront))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -133,10 +133,10 @@ class SearchCatalog(private val apple: AppleCatalogApi, private val netease: Net
         return Page(items, if (rawCount > 0 && hasMore && offset <= 10_000) cursor.copy(offset = offset) else null)
     }
 
-    suspend fun suggestions(source: Source, query: String): List<Suggestion> {
+    suspend fun suggestions(source: Source, query: String, storefront: String): List<Suggestion> {
         if (query.isBlank()) return emptyList()
         val values = when (source) {
-            Source.Apple -> apple.suggestions(query).mapNotNull { item ->
+            Source.Apple -> apple.suggestions(query, storefront = storefront).mapNotNull { item ->
                 item.content?.let { resource -> Suggestion(resource.name, hit = appleHit(resource)) }
                     ?: item.searchTerm?.let { Suggestion(item.displayTerm ?: it, query = it) }
             }

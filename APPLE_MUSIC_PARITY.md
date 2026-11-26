@@ -45,6 +45,17 @@
 
 
 
+## Apple Music 搜索选区
+
+- 这是用户指定的 Fantastic 集成功能，不声称是 Apple Music Android 7.0.0 / 1614 的原版控件。地区和语言契约依据 Apple 官方 [Get All Storefronts](https://developer.apple.com/documentation/applemusicapi/get-all-storefronts) 与 [Storefronts and Localization](https://developer.apple.com/documentation/applemusicapi/storefronts-and-localization)；菜单位置依据用户的搜索栏标记图，使用现有 Material3 下拉菜单模式。
+- 搜索与设置共用持久化 `storefront` 和只读 `storefrontState`，未保存时默认 `ca`，不迁移已有 `us` 或按 wrapper 首项换区。菜单保留清除按钮，列出全部实时取得的目录地区，wrapper 支持项优先并独立标注；勾选只标记当前选择。支持未知、目录缺失或当前代码不在目录时保留选择并说明，不生成假列表。
+- `AppleRegions` 在进程启动先用 IO 读取 AtomicFile `files/apple-regions.json`，以 normalized server 隔离两个可空列表；wrapper 空列表表示已确认没有支持项，null 表示从未成功。成功数据无 TTL；首次缺失的两路并行获取，只允许设置主动刷新，失败不覆盖成功缓存。只存目录四字段和支持代码，不存 endpoint、wrapperUrl、鉴权或错误。读盘、刷新和原子写入由同一 Mutex 串行；取消不合并旧结果，写失败保留内存并提示。
+- 搜索/建议保留 330ms / 220ms 防抖，入口显式传入地区快照，Cursor 保留 opaque next 的地区。Apple 切区重建结果、建议、滚动和行面板，旧回调检查实时选择；QQ/网易的地区 key 固定为空。五处 catalog 入口捕获地区，旧 Apple 详情/媒体页在渲染前失效，发现导航按地区重建，资料库仅重载在线参考，不更改收藏、队列或离线身份。
+- 设置只改地区时用已缓存 AM 目录验证，不要求 wrapper 支持；未编辑草稿采用实时 prefs，未改变地址或地区允许离线完成。检查新服务器用显式地址请求两路地区和网易能力，只接受本次有效 Fantastic 身份及包含请求地区的 AM 结果；失败不临时污染已保存服务器、不 fallback。普通地区刷新不请求网易、不写地区、不主动停止或重播音频。
+- 编译、APK 身份与真实页面/缓存/网络验收分别记录；构建通过不等于已验证切区音频连续性或所有手动场景。
+- 本任务验证：带私有字体的 fresh `compileDebugKotlin --offline --rerun-tasks` 13s 成功，17 项全部执行；`assembleDebug --offline` 8s 成功。验收 APK 沿用基线 `1.3.1 / 8`，正式 applicationId 加既有公开 Debug v2 签名（不是发行签名或 `.debug` 并存包）；25 字体逐项大小/SHA-256 匹配，三个 TTC 未压缩。未新增或运行自动化测试/断言。
+- 本机真实转发器以原 OkHttp UA 转发 `/status` 与 `/amp/v1/storefronts`，分别取得 HTTP 200、wrapper `[ca]` 及 172 个含 `ca/jp/us` 的目录条目；这不是 app 页面验收，也不是固定地区数。专用 API34 `emulator-5620` 于 32.5s 启动，新 APK 安装 Success 并启动；75.6s 观察到 app 创建 v1、单服务器条目的缓存文件，但两路仍未成功取得数据，列表均为 null。设备上游连通诊断 25s 超时，宿主 `screenLocked=true`；未操作页面、未取得本轮 UI 截图，菜单位置/滚动、切区请求/分页/建议、成功缓存重启复用、手动刷新及失败保留、草稿服务器隔离、旧详情销毁与音频连续性均未通过手动验收。日志位于任务树忽略目录 `.work/apple-search-region-qa/`；没有清理任何既有设备数据。
+
 ## 设备验收
 
 多数原先列为待实机验收的项目已由项目维护者在实机验收。下表汇总有具体曲目或操作记录的场景。
