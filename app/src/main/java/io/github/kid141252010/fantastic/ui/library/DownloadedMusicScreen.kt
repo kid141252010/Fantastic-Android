@@ -46,12 +46,14 @@ import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
+import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBack: () -> Unit,
     onOpenCatalog: (CatalogHit) -> Unit) {
     val records by app.downloads.entries.collectAsStateWithLifecycle()
+    val player by app.player.state.collectAsStateWithLifecycle()
     val ready = remember(records) { records.filter { it.status == DownloadStatus.Ready } }
     val bottom = LocalBarsPadding.current.calculateBottomPadding()
     var menuFileId by remember { mutableStateOf<String?>(null) }
@@ -93,6 +95,11 @@ internal fun DownloadedMusicScreen(app: FantasticApp, backEnabled: Boolean, onBa
                     onClick = if (record.status == DownloadStatus.Ready) ({
                         val index = ready.indexOf(record)
                         if (index >= 0) app.player.playQueue(ready.map { it.track }, index)
+                    }) else null,
+                    queueSwipeLabel = if (record.status == DownloadStatus.Ready)
+                        queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null,
+                    onQueueSwipe = if (record.status == DownloadStatus.Ready) ({
+                        app.player.insertQueueItemsFromSwipe(listOf(record.track))
                     }) else null,
                     trailing = {
                         Row(verticalAlignment = Alignment.CenterVertically) {

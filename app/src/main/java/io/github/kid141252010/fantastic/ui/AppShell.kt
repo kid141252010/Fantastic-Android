@@ -31,6 +31,8 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -72,6 +74,8 @@ import io.github.kid141252010.fantastic.ui.theme.TabAccent
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import io.github.kid141252010.fantastic.playback.QueueActionFeedback
+import kotlinx.coroutines.flow.collect
 import kotlin.math.exp
 enum class Tab(val label: String, val icon: ImageVector) {
     Home("主页", Icons.Rounded.Home),
@@ -98,6 +102,15 @@ fun AppShell(app: FantasticApp) {
     var lyricPronunciation by rememberSaveable { mutableStateOf(app.prefs.lyricPronunciation) }
     var showLibrarySources by rememberSaveable { mutableStateOf(app.prefs.showLibrarySources) }
     val playerConnection = app.player
+    val queueSnackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(playerConnection) {
+        playerConnection.queueFeedback.collect { feedback ->
+            queueSnackbarHostState.showSnackbar(when (feedback) {
+                QueueActionFeedback.PlayNext -> "待播清单"
+                QueueActionFeedback.AddToQueue -> "已添加到队列。"
+            })
+        }
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     val savedPane = rememberUpdatedState(playerPane)
     DisposableEffect(lifecycleOwner, app.prefs, playerConnection) {
@@ -246,6 +259,11 @@ fun AppShell(app: FantasticApp) {
                         onClose = { settings = false })
                 }
                 appleMedia?.let { hit -> AppleMediaScreen(app, hit, onClose = ::closeCatalog) }
+                SnackbarHost(
+                    hostState = queueSnackbarHostState,
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .padding(bottom = barsPadding.calculateBottomPadding() + 16.dp),
+                )
             }
         }
     }

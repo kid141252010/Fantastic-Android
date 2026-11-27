@@ -21,7 +21,12 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,6 +35,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -121,6 +128,7 @@ internal fun Md3MediaSectionHeader(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun Md3MediaRow(
     title: String,
@@ -130,6 +138,72 @@ internal fun Md3MediaRow(
     onClick: (() -> Unit)? = null,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
+    queueSwipeLabel: String? = null,
+    onQueueSwipe: (() -> Unit)? = null,
+) {
+    val swipeLabel = queueSwipeLabel?.takeIf { onQueueSwipe != null }
+    if (swipeLabel == null) {
+        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
+            mediaRowModifier(modifier, playing, onClick))
+        return
+    }
+
+    val latestQueueSwipe = rememberUpdatedState(onQueueSwipe)
+    val latestSwipeLabel = rememberUpdatedState(swipeLabel)
+    val dismiss = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
+        if (value == SwipeToDismissBoxValue.StartToEnd) latestQueueSwipe.value?.invoke()
+        false
+    })
+    SwipeToDismissBox(
+        state = dismiss,
+        modifier = modifier.fillMaxWidth(),
+        enableDismissFromStartToEnd = true,
+        enableDismissFromEndToStart = false,
+        backgroundContent = {
+            Box(
+                Modifier.fillMaxSize().background(Color(0xFF0088FF)).padding(horizontal = 20.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(latestSwipeLabel.value, color = Color.White, style = MaterialTheme.typography.labelLarge)
+            }
+        },
+    ) {
+        val action = CustomAccessibilityAction(latestSwipeLabel.value) {
+            latestQueueSwipe.value?.invoke()
+            true
+        }
+        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
+            mediaRowModifier(Modifier, playing, onClick, listOf(action)))
+    }
+}
+
+internal fun queueSwipeActionLabel(canEditQueue: Boolean, canAddToQueueSection: Boolean): String? = when {
+    !canEditQueue -> null
+    canAddToQueueSection -> "添加到队列"
+    else -> "插播"
+}
+
+@Composable
+private fun mediaRowModifier(
+    modifier: Modifier,
+    playing: Boolean,
+    onClick: (() -> Unit)?,
+    accessibilityActions: List<CustomAccessibilityAction> = emptyList(),
+): Modifier = modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+    .then(if (onClick == null) Modifier else Modifier.clickable(role = Role.Button, onClick = onClick))
+    .then(if (playing || accessibilityActions.isNotEmpty()) Modifier.semantics {
+        if (playing) stateDescription = "当前曲目"
+        if (accessibilityActions.isNotEmpty()) customActions = accessibilityActions
+    } else Modifier)
+
+@Composable
+private fun Md3MediaRowContent(
+    title: String,
+    subtitle: String,
+    playing: Boolean,
+    leading: (@Composable () -> Unit)?,
+    trailing: (@Composable () -> Unit)?,
+    modifier: Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
     ListItem(
@@ -143,9 +217,7 @@ internal fun Md3MediaRow(
             containerColor = if (playing) colors.surfaceContainerHigh else Color.Transparent,
             headlineColor = if (playing) colors.primary else colors.onSurface,
         ),
-        modifier = modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
-            .then(if (onClick == null) Modifier else Modifier.clickable(role = Role.Button, onClick = onClick))
-            .then(if (playing) Modifier.semantics { stateDescription = "当前曲目" } else Modifier),
+        modifier = modifier,
     )
 }
 

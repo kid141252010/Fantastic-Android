@@ -14,9 +14,17 @@ import io.github.kid141252010.fantastic.data.Track
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 
 /** A queue row retains its Media3 index, even if another item cannot be rendered. */
-data class QueueEntry(val index: Int, val track: Track, val occurrence: Int = index)
+data class QueueEntry(
+    val index: Int,
+    val track: Track,
+    val occurrence: Int = index,
+    val inQueueSection: Boolean = false,
+)
 
 data class PlayerState(
     val connected: Boolean = false,
@@ -55,18 +63,32 @@ data class PlayerState(
     val queueRevision: Long = 0L,
     internal val trackOccurrence: Int = -1,
     internal val repeatGeneration: Int = 0,
-)
+) {
+    val canAddToQueueSection: Boolean get() = canEditQueue && upNext.any { it.inQueueSection }
+}
+
+internal enum class QueueInsertion(val mediaValue: String) {
+    PlayNext("play_next"),
+    AddToQueue("add_to_queue"),
+}
+
+internal enum class QueueActionFeedback {
+    PlayNext,
+    AddToQueue,
+}
 
 /** UI-side controller for the single service-owned Media3 session. */
 class PlayerConnection(private val context: Context) {
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
+    private val _queueFeedback = MutableSharedFlow<QueueActionFeedback>(extraBufferCapacity = 4)
+    internal val queueFeedback: SharedFlow<QueueActionFeedback> = _queueFeedback.asSharedFlow()
     private var controller: MediaController? = null
     private var connectionFuture: ListenableFuture<MediaController>? = null
     private var pending: (() -> Unit)? = null
     private var seekGeneration = 0
     private var queueRevision = 0L
-    private var queueSignature: List<Int> = emptyList()
+    private var queueSignature: List<Pair<Int, Boolean>> = emptyList()
     private var currentIndex = -1
     private var lastMediaId: String? = null
     private var lastOccurrence = -1
@@ -154,10 +176,31 @@ class PlayerConnection(private val context: Context) {
         }
     }
 
-    fun enqueue(tracks: List<Track>, next: Boolean) = whenReady { player ->
-        if (tracks.isEmpty() || !player.isCommandAvailable(Player.COMMAND_CHANGE_MEDIA_ITEMS)) return@whenReady
-        val index = if (next && player.mediaItemCount > 0) player.currentMediaItemIndex + 1 else player.mediaItemCount
-        player.addMediaItems(index, tracks.map { it.toQueueItem() })
+    internal fun insertQueueItems(tracks: List<Track>, insertion: QueueInsertion) = whenReady { player ->
+        submitQueueItems(player, tracks, insertion)
+    }
+
+    internal fun insertQueueItemsFromSwipe(tracks: List<Track>) = whenReady { player ->
+        val insertion = if (_state.value.canAddToQueueSection) QueueInsertion.AddToQueue else QueueInsertion.PlayNext
+        submitQueueItems(player, tracks, insertion)
+    }
+
+    private fun submitQueueItems(player: MediaController, tracks: List<Track>, requested: QueueInsertion) {
+        if (tracks.isEmpty() || !player.isCommandAvailable(Player.COMMAND_CHANGE_MEDIA_ITEMS)) return
+        val latest = _state.value
+        val insertion = if (requested == QueueInsertion.AddToQueue && !latest.canAddToQueueSection)
+            QueueInsertion.PlayNext else requested
+        val currentIndex = player.currentMediaItemIndex.takeIf {
+            player.currentMediaItem != null && it in 0 until player.mediaItemCount
+        }
+        val index = when (insertion) {
+            QueueInsertion.PlayNext -> (currentIndex?.plus(1) ?: 0)
+            QueueInsertion.AddToQueue -> latest.upNext.lastOrNull { it.inQueueSection }?.index?.plus(1)
+                ?: (currentIndex?.plus(1) ?: 0)
+        }
+        player.addMediaItems(index, tracks.map { it.toQueueItem(queueInsertion = insertion) })
+        _queueFeedback.tryEmit(if (insertion == QueueInsertion.PlayNext)
+            QueueActionFeedback.PlayNext else QueueActionFeedback.AddToQueue)
     }
 
     fun clearUpcoming(expectedRevision: Long) = whenReady { player ->
@@ -229,9 +272,12 @@ class PlayerConnection(private val context: Context) {
         val metadata = item?.mediaMetadata
         val entries = (0 until player.mediaItemCount).mapNotNull { index ->
             val queued = player.getMediaItemAt(index)
-            queued.toTrack()?.let { QueueEntry(index, it, queued.mediaMetadata.extras?.getInt(KEY_OCCURRENCE, index) ?: index) }
+            queued.toTrack()?.let {
+                QueueEntry(index, it, queued.mediaMetadata.extras?.getInt(KEY_OCCURRENCE, index) ?: index,
+                    queued.mediaMetadata.extras?.getBoolean(KEY_QUEUE_SECTION, false) ?: false)
+            }
         }
-        val signature = entries.map { it.occurrence }
+        val signature = entries.map { it.occurrence to it.inQueueSection }
         val selected = player.currentMediaItemIndex
         if (signature != queueSignature || selected != currentIndex) {
             queueSignature = signature

@@ -84,6 +84,7 @@ internal class FantasticSessionPlayer(
     private val store = PlaybackStore(context, prefs)
     private var ordered = emptyList<QueuedSong>()
     private var traversal = emptyList<QueuedSong>()
+    private val queueSection = QueueSectionWindow()
     private var run = emptyList<Stream>()
     private var current: QueuedSong? = null
     private var nextUid = 0
@@ -212,6 +213,8 @@ internal class FantasticSessionPlayer(
         }
         val byUid = ordered.associateBy { it.uid }
         traversal = saved.order.map(byUid::getValue)
+        queueSection.startIndex = saved.queueSectionStartIndex
+        queueSection.endIndex = saved.queueSectionEndIndex
         nextUid = (ordered.maxOfOrNull { it.uid } ?: -1) + 1
         saved.current?.let { uid ->
             val song = byUid.getValue(uid)
@@ -245,6 +248,7 @@ internal class FantasticSessionPlayer(
         val old = current ?: return
         if (song.uid == old.uid) return
         run.firstOrNull { it.song.uid == old.uid }?.requestId?.let { requests.get(it)?.audio?.set(null) }
+        queueSection.onPlayingIndexChanged(indexOfCurrent(), traversal.indexOfFirst { it.uid == song.uid })
         current = song
         cacheRecovery = null
         audioRecovery = null
@@ -254,7 +258,15 @@ internal class FantasticSessionPlayer(
 
     private fun checkpoint() { current?.let { store.checkpoint(it.uid, position()) } }
     private fun persistQueue(positionOverride: Long? = null) {
-        store.save(PlaybackSnapshot(ordered, traversal.map { it.uid }, current?.uid, shuffle, repeat), positionOverride ?: position())
+        store.save(PlaybackSnapshot(
+            songs = ordered,
+            order = traversal.map { it.uid },
+            current = current?.uid,
+            shuffle = shuffle,
+            repeat = repeat,
+            queueSectionStartIndex = queueSection.startIndex,
+            queueSectionEndIndex = queueSection.endIndex,
+        ), positionOverride ?: position())
     }
     private fun publish() {
         invalidateState()
@@ -413,13 +425,17 @@ internal class FantasticSessionPlayer(
             hosted.buffering || (hosted.playWhenReady && !hosted.isPlaying) -> Player.STATE_BUFFERING
             else -> Player.STATE_READY
         }
-        val items = traversal.map { entry ->
+        val items = traversal.mapIndexed { index, entry ->
             val selected = entry.uid == song?.uid
             val base = entry.track.toQueueItem(entry.quality, occurrence = entry.uid)
-            val item = if (selected && appleActive && hosted.error != null) {
-                base.buildUpon().setMediaMetadata(base.mediaMetadata.buildUpon().setExtras(
-                    Bundle(base.mediaMetadata.extras).apply { putString(KEY_PLAYBACK_MESSAGE, hosted.error) },
-                ).build()).build()
+            val inQueueSection = queueSection.contains(index)
+            val playbackMessage = hosted.error?.takeIf { selected && appleActive }
+            val item = if (inQueueSection || playbackMessage != null) {
+                val extras = Bundle(checkNotNull(base.mediaMetadata.extras)).apply {
+                    if (inQueueSection) putBoolean(KEY_QUEUE_SECTION, true)
+                    playbackMessage?.let { putString(KEY_PLAYBACK_MESSAGE, it) }
+                }
+                base.buildUpon().setMediaMetadata(base.mediaMetadata.buildUpon().setExtras(extras).build()).build()
             } else base
             val window = if (selected && nativeMatches && !native.currentTimeline.isEmpty)
                 native.currentTimeline.getWindow(native.currentMediaItemIndex, Timeline.Window()) else null
@@ -550,12 +566,17 @@ internal class FantasticSessionPlayer(
         if (shuffle == shuffleModeEnabled) return Futures.immediateVoidFuture()
         shuffle = shuffleModeEnabled
         val throughCurrent = (indexOfCurrent() + 1).coerceAtLeast(0)
-        val upcoming = traversal.drop(throughCurrent)
-        traversal = if (shuffle) traversal.take(throughCurrent) + upcoming.shuffled() else {
-            // Restore catalogue order without replaying occurrences that have already been traversed.
-            val played = traversal.take(throughCurrent).mapTo(hashSetOf()) { it.uid }
-            traversal.take(throughCurrent) + ordered.filter { it.uid !in played }
-        }
+        val validSection = !queueSection.isEmpty() && queueSection.startIndex in traversal.indices &&
+            queueSection.endIndex in traversal.indices && queueSection.startIndex <= queueSection.endIndex
+        if (!queueSection.isEmpty() && !validSection) queueSection.reset()
+        val sectionStart = if (validSection) queueSection.startIndex else throughCurrent
+        val section = if (validSection) traversal.subList(queueSection.startIndex, queueSection.endIndex + 1) else emptyList()
+        val before = traversal.take(sectionStart)
+        val retained = before.mapTo(hashSetOf()) { it.uid }
+        section.forEach { retained.add(it.uid) }
+        val ordinary = traversal.drop(if (validSection) queueSection.endIndex + 1 else throughCurrent)
+        traversal = if (shuffle) before + section + ordinary.shuffled()
+        else before + section + ordered.filter { it.uid !in retained }
         syncUpcoming()
         persistQueue()
         return Futures.immediateVoidFuture()
@@ -574,6 +595,7 @@ internal class FantasticSessionPlayer(
         val extras = mediaItems.getOrNull(index)?.mediaMetadata?.extras
         if (extras?.containsKey(KEY_SHUFFLE_START) == true) shuffle = extras.getBoolean(KEY_SHUFFLE_START)
         val selected = items.getOrNull(index)
+        queueSection.reset()
         ordered = items
         traversal = if (shuffle && selected != null) listOf(selected) + items.filter { it.uid != selected.uid }.shuffled() else items
         if (selected == null) clearEngines() else start(selected, startPositionMs.coerceAtLeast(0L), playing)
@@ -582,9 +604,19 @@ internal class FantasticSessionPlayer(
     }
 
     override fun handleAddMediaItems(index: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
+        val insertionValue = mediaItems.firstOrNull()?.mediaMetadata?.extras?.getString(KEY_QUEUE_INSERTION)
+        if (mediaItems.any { it.mediaMetadata.extras?.getString(KEY_QUEUE_INSERTION) != insertionValue }) return rejectedQueue()
+        val insertion = QueueInsertion.entries.firstOrNull { it.mediaValue == insertionValue }
+        if (insertionValue != null && insertion == null) return rejectedQueue()
         val additions = mediaItems.mapNotNull(::queueSong)
         if (additions.size != mediaItems.size) return rejectedQueue()
-        editQueue(index, index, additions)
+        val currentInsertion = (indexOfCurrent() + 1).coerceAtLeast(0)
+        val insertionIndex = when (insertion) {
+            QueueInsertion.AddToQueue -> if (queueSection.isEmpty()) currentInsertion else queueSection.endIndex + 1
+            QueueInsertion.PlayNext -> currentInsertion
+            null -> index
+        }
+        editQueue(insertionIndex, insertionIndex, additions, insertion)
         return Futures.immediateVoidFuture()
     }
 
@@ -596,22 +628,39 @@ internal class FantasticSessionPlayer(
     override fun handleReplaceMediaItems(fromIndex: Int, toIndex: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
         val additions = mediaItems.mapNotNull(::queueSong)
         if (additions.size != mediaItems.size) return rejectedQueue()
-        editQueue(fromIndex, toIndex, additions)
+        editQueue(fromIndex, toIndex, additions, preserveReplacedSection = true)
         return Futures.immediateVoidFuture()
     }
 
-    private fun editQueue(from: Int, to: Int, additions: List<QueuedSong>) {
+    private fun editQueue(
+        from: Int,
+        to: Int,
+        additions: List<QueuedSong>,
+        sectionInsertion: QueueInsertion? = null,
+        preserveReplacedSection: Boolean = false,
+    ) {
         val f = from.coerceIn(0, traversal.size)
         val t = to.coerceIn(f, traversal.size)
+        val replacedSection = preserveReplacedSection && (f until t).any(queueSection::contains)
         val removed = traversal.subList(f, t).mapTo(hashSetOf()) { it.uid }
         val anchor = traversal.getOrNull(t)
+        repeat(t - f) { queueSection.onItemRemoved(f) }
         traversal = traversal.toMutableList().apply { subList(f, t).clear(); addAll(f, additions) }
+        if (additions.isNotEmpty()) {
+            if (sectionInsertion != null || replacedSection) queueSection.onItemsAdded(f, additions.size)
+            else if (!queueSection.isEmpty() && f <= queueSection.startIndex) {
+                queueSection.startIndex += additions.size
+                queueSection.endIndex += additions.size
+            }
+        }
         ordered = if (!shuffle) traversal else ordered.filter { it.uid !in removed }.toMutableList().apply {
             addAll(indexOf(anchor).takeIf { it >= 0 } ?: size, additions)
         }
         val active = current
-        if (traversal.isEmpty()) clearEngines()
-        else if (active == null || active.uid in removed) start(traversal[f.coerceAtMost(traversal.lastIndex)], 0L, wantsPlay())
+        if (traversal.isEmpty()) {
+            queueSection.reset()
+            clearEngines()
+        } else if (active == null || active.uid in removed) start(traversal[f.coerceAtMost(traversal.lastIndex)], 0L, wantsPlay())
         else syncUpcoming()
         persistQueue()
     }
@@ -620,9 +669,12 @@ internal class FantasticSessionPlayer(
         val from = fromIndex.coerceIn(0, traversal.size)
         val to = toIndex.coerceIn(from, traversal.size)
         val moved = traversal.subList(from, to).toList()
+        val destination = newIndex.coerceIn(0, traversal.size - moved.size)
+        if (destination < from) repeat(moved.size) { queueSection.onItemMoved(to - 1, destination) }
+        else if (destination > from) repeat(moved.size) { offset -> queueSection.onItemMoved(from, destination + offset) }
         traversal = traversal.toMutableList().apply {
             subList(from, to).clear()
-            addAll(newIndex.coerceIn(0, size), moved)
+            addAll(destination, moved)
         }
         if (!shuffle) ordered = traversal
         syncUpcoming()
@@ -744,6 +796,7 @@ internal class FantasticSessionPlayer(
         checkpoint()
         switching = true
         try {
+            queueSection.onPlayingIndexChanged(indexOfCurrent(), index)
             current = song
             stopped = false
             run = before.map(::withRequest) + selected + after.map(::withRequest)
@@ -882,6 +935,7 @@ internal class FantasticSessionPlayer(
     private fun clearEngines() {
         switching = true
         current = null
+        queueSection.reset()
         cache.cancelPending()
         cache.pinCurrent(null)
         cacheRecovery = null

@@ -68,6 +68,7 @@ import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.playback.validSongId
+import io.github.kid141252010.fantastic.playback.QueueInsertion
 import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.CancellationException
@@ -97,6 +98,7 @@ internal fun MediaActionContent(
     val context = LocalContext.current
     val app = context.applicationContext as FantasticApp
     val downloads by app.downloads.entries.collectAsStateWithLifecycle()
+    val playerState by app.player.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var resolving by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
@@ -289,12 +291,12 @@ internal fun MediaActionContent(
             null -> SheetAction("下载", Icons.Outlined.Download,
                 onClick = if (resolving) null else ({ withSongs { app.downloads.enqueue(it) } }))
         }
-        if (!nowPlaying) {
+        if (!nowPlaying && playerState.canEditQueue) {
             SheetDivider()
             SheetAction("插播", Icons.AutoMirrored.Outlined.PlaylistPlay,
-                onClick = if (resolving) null else ({ withSongs { app.player.enqueue(it, next = true) } }))
-            SheetAction("添加到队列", Icons.AutoMirrored.Outlined.PlaylistAdd,
-                onClick = if (resolving) null else ({ withSongs { app.player.enqueue(it, next = false) } }))
+                onClick = if (resolving) null else ({ withSongs { app.player.insertQueueItems(it, QueueInsertion.PlayNext) } }))
+            if (playerState.canAddToQueueSection) SheetAction("添加到队列", Icons.AutoMirrored.Outlined.PlaylistAdd,
+                onClick = if (resolving) null else ({ withSongs { app.player.insertQueueItems(it, QueueInsertion.AddToQueue) } }))
         }
     }
     SheetDivider()
