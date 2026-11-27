@@ -16,7 +16,6 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -111,6 +110,10 @@ fun AppleMediaScreen(app: FantasticApp, hit: CatalogHit, onClose: () -> Unit) {
     }
 
     fun handleBack() {
+        if (showActions) {
+            showActions = false
+            return
+        }
         if (ui.fullScreen) {
             host?.hideCustomView()
             return
@@ -127,15 +130,14 @@ fun AppleMediaScreen(app: FantasticApp, hit: CatalogHit, onClose: () -> Unit) {
         onClose()
     }
 
-    BackHandler(enabled = true) { if (showActions) showActions = false else handleBack() }
-
     val title = when (hit.kind) {
         "station" -> "Apple Music 电台"
         else -> "Apple Music 视频"
     }
     Dialog(
-        onDismissRequest = onClose,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+        onDismissRequest = ::handleBack,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false,
+            dismissOnBackPress = true, dismissOnClickOutside = false),
     ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.fillMaxSize()) {

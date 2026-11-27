@@ -1,5 +1,6 @@
 package io.github.kid141252010.fantastic.ui.library
 
+import io.github.kid141252010.fantastic.data.fillRelationCountriesFrom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -121,7 +122,7 @@ internal fun orderLibraryAlbumTracks(savedTracks: List<Track>, referenceTracks: 
             discNumber = track.discNumber.takeIf { it > 0 } ?: reference.discNumber,
             trackNumber = track.trackNumber.takeIf { it > 0 } ?: reference.trackNumber,
             country = track.country ?: reference.country,
-        )
+        ).fillRelationCountriesFrom(reference)
     }
     val compatibleOrder = tracks.associate { track ->
         val key = Triple(track.source, track.albumId, track.id)

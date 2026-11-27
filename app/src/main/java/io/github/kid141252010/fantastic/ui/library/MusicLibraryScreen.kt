@@ -63,6 +63,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
@@ -134,6 +135,9 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     var menuEntry by remember { mutableStateOf<LibraryEntry?>(null) }
     var overflowOpen by remember { mutableStateOf(false) }
     var handledRootNavigationRequest by rememberSaveable { mutableStateOf(rootNavigationRequest) }
+    val latestBackEnabled by rememberUpdatedState(backEnabled)
+    val latestRootRequest by rememberUpdatedState(rootNavigationRequest)
+    val latestOnOpen by rememberUpdatedState(onOpen)
     LaunchedEffect(rootNavigationRequest) {
         if (handledRootNavigationRequest != rootNavigationRequest) {
             category = null
@@ -154,7 +158,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     }
     val currentCategory = category
     if (currentCategory == LibraryCategory.Downloads) {
-        DownloadedMusicScreen(app, backEnabled = backEnabled, onBack = { category = null })
+        DownloadedMusicScreen(app, backEnabled = backEnabled, onBack = { category = null }, onOpenCatalog = onOpen)
         return
     }
     val albums = remember(snapshot.items) { libraryAlbums(snapshot.items) }
@@ -435,7 +439,8 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                                 PlaylistRow(playlist) { playlistId = playlist.id }
                             }
                             if (!showFavoritePlaylist && playlists.isEmpty() && folders.isEmpty() && visibleItems.isEmpty()) item("empty") {
-                                LibraryEmptyCategory(currentCategory, favoritesOnly || favoriteSongs, onCreate = { dialog = "playlist" })
+                                if (favoriteSongs) Md3EmptyState("未添加歌曲", "喜爱的歌曲将在这里显示。", icon = LibraryCategory.Songs.icon)
+                                else LibraryEmptyCategory(currentCategory, favoritesOnly, onCreate = { dialog = "playlist" })
                             }
                             items(visibleItems, key = { it.stableKey }) { entry ->
                                 LibraryItemRow(
@@ -475,7 +480,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         deletingFolder && currentFolder != null -> AlertDialog(
             onDismissRequest = ::dismissSheet,
             title = { Text("删除文件夹？") },
-            text = { Text("将同时删除这个文件夹下的子文件夹和本地歌单。") },
+            text = { Text("将同时移除这个文件夹下的子文件夹、本地歌单和已保存的目录歌单，仅影响本机资料库；不会删除线上歌单或独立保存的歌曲。") },
             dismissButton = { TextButton(onClick = ::dismissSheet) { Text("取消") } },
             confirmButton = {
                 TextButton(onClick = {
@@ -525,7 +530,8 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         }
         dialog == "move-playlist" || dialog == "move-folder" -> {
             val movingFolder = dialog == "move-folder"
-            val destinations = snapshot.folders.filter { !movingFolder || canMoveFolder(snapshot, folderId, it.id) }
+            val foldersById = remember(snapshot.folders) { snapshot.folders.associateBy { it.id } }
+            val destinations = snapshot.folders.filter { !movingFolder || canMoveFolder(foldersById, folderId, it.id) }
                 .sortedBy { it.name.lowercase() }
             fun moveTo(destination: String) {
                 if (movingFolder) currentFolder?.let { app.library.moveFolder(it.id, destination) }
@@ -536,10 +542,10 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                 onDismissRequest = ::dismissSheet,
                 title = { Text("移动到文件夹") },
                 text = {
-                    Column {
-                        TextButton(onClick = { moveTo("") }) { Text("资料库顶层") }
-                        destinations.forEach { folder ->
-                            TextButton(onClick = { moveTo(folder.id) }) { Text(folderLabel(snapshot, folder)) }
+                    LazyColumn(Modifier.fillMaxWidth()) {
+                        item(key = "root") { TextButton(onClick = { moveTo("") }) { Text("资料库顶层") } }
+                        items(destinations, key = { it.id }) { folder ->
+                            TextButton(onClick = { moveTo(folder.id) }) { Text(folderLabel(foldersById, folder)) }
                         }
                     }
                 },
@@ -548,6 +554,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         }
         menuEntry != null -> {
             val entry = menuEntry!!
+            val menuRootRequest = remember(entry) { rootNavigationRequest }
             val songs = when (entry.hit.kind) {
                 "song" -> listOf(asTrack(entry.hit))
                 "album" -> remember(entry, snapshot.items) { libraryAlbumTracks(entry, snapshot.items) }
@@ -556,7 +563,14 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
             GlassSheet(entry.hit.title, onDismissRequest = ::dismissSheet, showHeader = false) {
                 MediaActionContent(entry.hit, app.library, songs,
                     onPlay = if (songs.isNotEmpty()) ({ app.player.playQueue(songs, 0); dismissSheet() }) else null,
-                    onView = { dismissSheet(); openLibraryHit(entry.hit) }, onDismiss = ::dismissSheet)
+                    onView = { dismissSheet(); openLibraryHit(entry.hit) },
+                    onOpenRelated = if (entry.hit.kind == "song") ({ related ->
+                        if (menuEntry?.stableKey == entry.stableKey && latestBackEnabled && latestRootRequest == menuRootRequest) {
+                            dismissSheet()
+                            latestOnOpen(related)
+                        }
+                    }) else null,
+                    onDismiss = ::dismissSheet)
             }
         }
     }
@@ -763,8 +777,7 @@ internal fun Source.libraryName(): String = when (this) {
     Source.QQ -> "QQ音乐"
 }
 
-private fun canMoveFolder(snapshot: MusicLibrarySnapshot, id: String, target: String): Boolean {
-    val folders = snapshot.folders.associateBy { it.id }
+private fun canMoveFolder(folders: Map<String, LibraryFolder>, id: String, target: String): Boolean {
     val seen = mutableSetOf<String>()
     var folder = folders[target]
     while (folder != null && seen.add(folder.id)) {
@@ -774,8 +787,7 @@ private fun canMoveFolder(snapshot: MusicLibrarySnapshot, id: String, target: St
     return true
 }
 
-private fun folderLabel(snapshot: MusicLibrarySnapshot, folder: LibraryFolder): String {
-    val folders = snapshot.folders.associateBy { it.id }
+private fun folderLabel(folders: Map<String, LibraryFolder>, folder: LibraryFolder): String {
     val path = mutableListOf(folder.name)
     val seen = mutableSetOf(folder.id)
     var ancestor = folders[folder.parentId]

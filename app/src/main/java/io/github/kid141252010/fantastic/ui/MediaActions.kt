@@ -3,6 +3,7 @@ package io.github.kid141252010.fantastic.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +32,16 @@ import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.semantics.Role
+import io.github.kid141252010.fantastic.data.SongRelations
+import io.github.kid141252010.fantastic.data.songRelations
+import io.github.kid141252010.fantastic.data.resolveSongRelations
+import io.github.kid141252010.fantastic.data.validCatalogId
+import kotlinx.coroutines.ensureActive
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -79,6 +90,7 @@ internal fun MediaActionContent(
     onTranslation: (() -> Unit)? = null,
     resolveTracks: (suspend () -> List<Track>)? = null,
     saveParentAlbum: (suspend () -> Unit)? = null,
+    onOpenRelated: ((CatalogHit) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -112,6 +124,73 @@ internal fun MediaActionContent(
     val favoriteEntity = media || hit.kind == "artist"
     var playlists by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
     var showCredits by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
+    val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
+    val relationSeed = remember(hit, tracks, onOpenRelated != null) {
+        if (onOpenRelated == null || hit.kind != "song") null else
+            (hit.track ?: tracks.singleOrNull())?.takeIf { it.source == hit.source && it.id == hit.id }?.let { song ->
+                if (song.source == Source.Apple && song.country.normalizedAppleCountry() == null && hit.country.normalizedAppleCountry() != null)
+                    song.copy(country = hit.country.normalizedAppleCountry()) else song
+            }
+    }
+    val relationServer = app.prefs.baseUrl
+    val relationCountry = if (relationSeed?.source == Source.Apple)
+        relationSeed.country.normalizedAppleCountry() ?: storefront.normalizedAppleCountry() else null
+    val relationIdentity = remember(relationSeed, relationServer, relationCountry) { Any() }
+    var relationActive by remember(relationIdentity) { mutableStateOf(true) }
+    var relationResult by remember(relationIdentity) { mutableStateOf<SongRelations?>(null) }
+    var relationIntent by remember(relationIdentity) { mutableStateOf<String?>(null) }
+    var relationPending by remember(relationIdentity) { mutableStateOf<Any?>(null) }
+    var relationError by remember(relationIdentity) { mutableStateOf<String?>(null) }
+    var relationAttempt by remember(relationIdentity) { mutableStateOf(0) }
+    val latestSeed by rememberUpdatedState(relationSeed)
+    val latestRelated by rememberUpdatedState(onOpenRelated)
+    val seedRelations = remember(relationSeed, relationCountry) { relationSeed?.songRelations(relationCountry) ?: SongRelations() }
+    val relations = relationResult ?: seedRelations
+    val canQueryRelations = relationSeed?.let { it.id.isNotBlank() && it.id != "0" && validCatalogId(it.source, "song", it.id) } == true
+    fun relationContextCurrent(): Boolean = relationActive && !playlists && !showCredits && latestSeed == relationSeed &&
+        latestRelated != null && app.prefs.baseUrl == relationServer &&
+        (relationSeed?.source != Source.Apple ||
+            (relationSeed.country.normalizedAppleCountry() ?: app.prefs.storefront.normalizedAppleCountry()) == relationCountry)
+    fun targetFor(result: SongRelations, intent: String): CatalogHit? = if (intent == "artist") result.artist else result.album
+    fun openRelation(intent: String) {
+        if (!relationContextCurrent()) return
+        val target = targetFor(relations, intent)
+        if (target != null) {
+            relationPending = null
+            latestRelated?.invoke(target)
+        } else if (relationPending == null || relationIntent != intent) {
+            relationIntent = intent
+            if (relationResult == null && relationError == null && canQueryRelations) relationPending = Any()
+        }
+    }
+    DisposableEffect(relationIdentity, playlists, showCredits) {
+        relationActive = true
+        onDispose { relationActive = false; relationPending = null }
+    }
+    LaunchedEffect(relationIdentity, relationPending, relationAttempt, playlists, showCredits) {
+        val token = relationPending ?: return@LaunchedEffect
+        val intent = relationIntent ?: return@LaunchedEffect
+        val seed = relationSeed ?: return@LaunchedEffect
+        if (!relationContextCurrent()) return@LaunchedEffect
+        try {
+            val result = app.resolveSongRelations(seed, relationCountry)
+            ensureActive()
+            if (!relationContextCurrent() || relationPending !== token || relationIntent != intent) return@LaunchedEffect
+            relationResult = result
+            relationPending = null
+            targetFor(result, intent)?.let { latestRelated?.invoke(it) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            ensureActive()
+            if (relationContextCurrent() && relationPending === token && relationIntent == intent) {
+                relationPending = null
+                relationError = failure.message ?: "读取失败"
+            }
+        }
+    }
+    val albumLink: (() -> Unit)? = if (relationSeed != null && (relations.album != null || canQueryRelations)) ({ openRelation("album") }) else null
+    val artistLink: (() -> Unit)? = if (relationSeed != null && (relations.artist != null || canQueryRelations)) ({ openRelation("artist") }) else null
     if (playlists) {
         BackHandler { playlists = false }
         SheetAction("返回${hit.title}", onClick = { playlists = false })
@@ -128,15 +207,30 @@ internal fun MediaActionContent(
     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
         Artwork(hit.artwork, 80.dp, 5.dp)
         Column(Modifier.weight(1f).padding(start = 16.dp)) {
-            Text(hit.title, color = palette.label,
+            Text(hit.title, modifier = if (albumLink != null) Modifier.clickable(role = Role.Button, onClickLabel = "前往专辑", onClick = albumLink) else Modifier, color = palette.label,
                 style = LocalTextStyle.current.copy(fontSize = 17.sp, fontWeight = FontWeight.Bold).withUserFontWeight(FontWeightRole.Title),
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (hit.subtitle.isNotBlank()) Text(hit.subtitle, Modifier.padding(top = 4.dp),
+            if (hit.subtitle.isNotBlank()) Text(hit.subtitle, Modifier.padding(top = 4.dp).then(
+                if (artistLink != null) Modifier.clickable(role = Role.Button, onClickLabel = "前往艺人", onClick = artistLink) else Modifier),
                 color = palette.secondary, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
     if (resolving) Text("正在加载歌曲…", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = palette.secondary)
     actionError?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.error) }
+    when {
+        relationPending != null -> Text("正在读取关系信息…", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = palette.secondary)
+        relationError != null -> {
+            Text("无法读取关系信息：$relationError", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = palette.secondary)
+            TextButton(onClick = {
+                if (relationContextCurrent() && relationIntent != null && relationPending == null) {
+                    relationError = null; relationAttempt++; relationPending = Any()
+                }
+            }) { Text("重试", color = palette.label) }
+        }
+        relationResult != null && relationIntent != null && targetFor(relations, relationIntent!!) == null ->
+            Text(if (relationIntent == "artist") "暂无可跳转的艺人信息" else "暂无可跳转的专辑信息",
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = palette.secondary)
+    }
     if (media) {
         if (saved != null && hit.kind != "song") SheetAction("置顶${catalogKindLabel(hit.kind)}", Icons.Outlined.PushPin,
             detail = "Fantastic 未提供目录置顶")
@@ -162,7 +256,7 @@ internal fun MediaActionContent(
                 snapshot.playlists.isEmpty() -> "请先在资料库新建本地播放列表"
                 hit.kind !in setOf("song", "music-video") -> "添加当前已载入的 ${tracks.size} 首歌曲"
                 else -> "本地播放列表，不同步 Apple 账号"
-            }, onClick = if (canAdd) ({ playlists = true }) else null)
+            }, onClick = if (canAdd) ({ relationPending = null; playlists = true }) else null)
     }
     if (playable && hit.kind != "music-video") {
         val single = if (hit.kind == "song") tracks.singleOrNull() else null
@@ -207,7 +301,7 @@ internal fun MediaActionContent(
             "查看歌曲制作信息",
             Icons.Outlined.Info,
             detail = if (validId) null else "缺少有效的歌曲 ID",
-            onClick = if (validId) ({ showCredits = true }) else null,
+            onClick = if (validId) ({ relationPending = null; showCredits = true }) else null,
         )
         if (onPronunciation != null) SheetAction(if (pronunciation) "隐藏音译" else "显示音译", Icons.Outlined.RecordVoiceOver, onClick = onPronunciation)
         if (onTranslation != null) SheetAction(if (translation) "隐藏翻译" else "显示翻译", Icons.Outlined.Translate, onClick = onTranslation)

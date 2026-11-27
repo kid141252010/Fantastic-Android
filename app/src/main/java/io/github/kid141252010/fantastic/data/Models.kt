@@ -28,6 +28,9 @@ data class Track(
     val discNumber: Int = 0,
     val trackNumber: Int = 0,
     val country: String? = null,
+    /** Apple relation resource evidence; never the song or preference fallback. */
+    val artistCountry: String? = null,
+    val albumCountry: String? = null,
 ) {
     fun artwork(size: Int): String? {
         // QQ 封面只有固定几档尺寸，其他尺寸（如 600、120）返回 404；取不小于所需的最小一档

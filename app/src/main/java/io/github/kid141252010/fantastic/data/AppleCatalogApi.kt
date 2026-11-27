@@ -656,17 +656,26 @@ data class AppleCatalogResource(
     val explicit: Boolean get() = attributes.text("contentRating") == "explicit"
 
     /** Non-song catalogue entries must remain navigable entities, not fake playable audio tracks. */
-    fun toTrack(fallbackCountry: String? = null): Track? = if (type == "songs") Track(
-        id, Source.Apple, name, artist, album,
-        artwork?.text("url")?.replace("{c}", "bb"), durationMs,
-        artistId = relationships["artists"]?.data?.firstOrNull()?.id.orEmpty(),
-        albumId = relationships["albums"]?.data?.firstOrNull()?.id.orEmpty(),
-        artistArtworkTemplate = relationships["artists"]?.data?.firstOrNull()?.artwork?.text("url")?.replace("{c}", "bb"),
-        albumArtist = attributes.text("albumArtistName").orEmpty().ifBlank { relationships["albums"]?.data?.firstOrNull()?.artist.orEmpty() },
-        discNumber = attributes.text("discNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-        trackNumber = attributes.text("trackNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-        country = catalogCountry(fallbackCountry),
-    ) else null
+    fun toTrack(fallbackCountry: String? = null): Track? {
+        if (type != "songs") return null
+        val primaryArtist = relationships["artists"]?.data?.firstOrNull()?.takeIf {
+            it.type == "artists" && it.id != "0" && validCatalogId(Source.Apple, "artist", it.id)
+        }
+        val primaryAlbum = relationships["albums"]?.data?.firstOrNull()?.takeIf {
+            it.type == "albums" && it.id != "0" && validCatalogId(Source.Apple, "album", it.id)
+        }
+        return Track(
+            id, Source.Apple, name, artist, album,
+            artwork?.text("url")?.replace("{c}", "bb"), durationMs,
+            artistId = primaryArtist?.id.orEmpty(), albumId = primaryAlbum?.id.orEmpty(),
+            artistArtworkTemplate = primaryArtist?.artwork?.text("url")?.replace("{c}", "bb"),
+            albumArtist = attributes.text("albumArtistName").orEmpty().ifBlank { primaryAlbum?.artist.orEmpty() },
+            discNumber = attributes.text("discNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+            trackNumber = attributes.text("trackNumber")?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+            country = catalogCountry(fallbackCountry),
+            artistCountry = primaryArtist?.catalogCountry(null), albumCountry = primaryAlbum?.catalogCountry(null),
+        )
+    }
 
     fun artworkUrl(width: Int, height: Int = width, crop: String = "bb", format: String = "jpg"): String? =
         artwork?.text("url")?.expandArtworkUrl(width, height, crop, format)

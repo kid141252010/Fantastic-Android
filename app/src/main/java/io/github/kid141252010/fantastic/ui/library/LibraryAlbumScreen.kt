@@ -155,11 +155,14 @@ internal fun LibraryAlbumScreen(
     }
     val readyCount = displayTracks.count { downloadFor(it)?.status == DownloadStatus.Ready }
     val hasMultipleDiscs = remember(displayTracks) { displayTracks.any { it.discNumber > 1 } }
-    var menuTrackId by remember { mutableStateOf<String?>(null) }
+    var menuTrackId by remember(albumEntry.stableKey) { mutableStateOf<String?>(null) }
     val menuTrack = displayTracks.firstOrNull { it.id == menuTrackId }
     val latestBackEnabled by rememberUpdatedState(backEnabled)
     val latestAlbum by rememberUpdatedState(album)
     val latestMenuTrackId by rememberUpdatedState(menuTrackId)
+    val latestMenuTrack by rememberUpdatedState(menuTrack)
+    val latestAlbumKey by rememberUpdatedState(albumEntry.stableKey)
+    val latestOnOpenCatalog by rememberUpdatedState(onOpenCatalog)
     LaunchedEffect(album.source, album.id, server, storefront, revision, artistOpenCommit, loadingMetadata, backEnabled, menuTrackId) {
         if (artistOpenCommit == null) return@LaunchedEffect
         if (!backEnabled || menuTrackId != null) {
@@ -303,9 +306,16 @@ internal fun LibraryAlbumScreen(
     if (menuTrack != null) {
         val hit = SearchCatalog.trackHit(menuTrack)
         val dismiss = { menuTrackId = null }
+        val menuAlbumKey = remember(menuTrack) { albumEntry.stableKey }
         GlassSheet(hit.title, onDismissRequest = dismiss, showHeader = false) {
             MediaActionContent(hit, app.library, listOf(menuTrack),
-                onView = { dismiss(); onOpenCatalog(hit) }, onDismiss = dismiss)
+                onView = { dismiss(); onOpenCatalog(hit) },
+                onOpenRelated = { related ->
+                    if (menuTrackId == menuTrack.id && latestMenuTrack == menuTrack && latestAlbumKey == menuAlbumKey && latestBackEnabled) {
+                        dismiss()
+                        latestOnOpenCatalog(related)
+                    }
+                }, onDismiss = dismiss)
         }
     }
 }

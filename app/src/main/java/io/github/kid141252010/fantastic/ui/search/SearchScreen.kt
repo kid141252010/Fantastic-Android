@@ -47,6 +47,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
@@ -374,6 +375,8 @@ private fun SearchHitRow(
 ) {
     val track = hit.track
     var actionsOpen by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
+    val latestHit by rememberUpdatedState(hit)
+    val latestOnOpen by rememberUpdatedState(onOpen)
     val subtitle = if (track != null) track.artist else {
         listOf(searchKindLabel(hit.kind), hit.subtitle).filter { it.isNotBlank() }.distinct().joinToString(" · ")
     }
@@ -412,6 +415,13 @@ private fun SearchHitRow(
                 onView = {
                     actionsOpen = false
                     if (hit.source != Source.Apple || storefront == app.prefs.storefront) onOpen(hit)
+                },
+                onOpenRelated = { related ->
+                    if (actionsOpen && latestHit == hit && hit.kind == "song" &&
+                        (hit.source != Source.Apple || storefront == app.prefs.storefront)) {
+                        actionsOpen = false
+                        latestOnOpen(related)
+                    }
                 },
                 onDismiss = { actionsOpen = false })
         }
