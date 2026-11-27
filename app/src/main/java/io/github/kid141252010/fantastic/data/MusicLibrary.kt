@@ -8,6 +8,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -138,6 +140,67 @@ class MusicLibrary(context: Context) {
 
     /** Favorite is an offline library action: favoriting also adds the item to the library. */
     fun toggleFavorite(hit: CatalogHit, albumTracks: List<Track> = emptyList()) = save(hit, albumTracks, toggleFavorite = true)
+
+    /** Accept a whole album in one command; completion does not guarantee disk persistence. */
+    internal suspend fun addAlbum(hit: CatalogHit, albumTracks: List<Track>, toggleFavorite: Boolean = false) {
+        currentCoroutineContext().ensureActive()
+        val result = CompletableDeferred<Unit>()
+        if (commands.trySend { state ->
+            try {
+                require(hit.kind == "album" && hit.id.isNotBlank() && hit.id != "0" && validCatalogId(hit.source, "album", hit.id)) {
+                    "缺少有效专辑 ID"
+                }
+                val clean = normalizeHit(hit) ?: throw IllegalArgumentException("缺少有效专辑 ID")
+                check(albumTracks.isNotEmpty()) { "没有可添加的专辑歌曲。" }
+                val tracks = deduplicateTracks(albumTracks.map { track ->
+                    check(track.source == clean.source && track.albumId == clean.id) { "专辑曲目与所选专辑不匹配。" }
+                    check(track.id.isNotBlank() && track.id != "0" && validCatalogId(track.source, "song", track.id)) {
+                        "专辑包含无效歌曲，未添加。"
+                    }
+                    val song = normalizeHit(SearchCatalog.trackHit(track))
+                        ?: throw IllegalStateException("专辑包含无效歌曲，未添加。")
+                    val normalized = song.track ?: throw IllegalStateException("专辑包含无效歌曲，未添加。")
+                    check(song.kind == "song" && song.source == clean.source && song.id == track.id &&
+                        normalized.source == clean.source && normalized.id == track.id && normalized.albumId == clean.id) {
+                        "专辑包含无效歌曲，未添加。"
+                    }
+                    normalized
+                })
+                val entries = LinkedHashMap<LibraryKey, LibraryEntry>(state.items.size)
+                state.items.forEach { entries[it.key] = it }
+                val albumKey = LibraryKey(clean.source, "album", clean.id)
+                val oldAlbum = entries[albumKey]
+                val references = mergeAlbumTracks(tracks, oldAlbum?.albumTracks.orEmpty())
+                val timestamp = now()
+                val favoriteAt = if (toggleFavorite) {
+                    if (oldAlbum?.isFavorite == true) 0 else timestamp
+                } else oldAlbum?.favoriteAt ?: 0
+                entries[albumKey] = LibraryEntry(mergeSongMetadata(clean, oldAlbum?.hit), oldAlbum?.addedAt ?: timestamp,
+                    favoriteAt, oldAlbum?.folderId.orEmpty(), oldAlbum?.metadata, references)
+                val affectedAlbums = mutableSetOf<String>()
+                appleAlbumId(clean)?.let { affectedAlbums.add(it) }
+                tracks.forEach { track ->
+                    val key = LibraryKey(track.source, "song", track.id)
+                    val old = entries[key]
+                    val refreshed = mergeSongMetadata(SearchCatalog.trackHit(track), old?.hit)
+                    entries[key] = old?.copy(hit = refreshed) ?: LibraryEntry(refreshed, timestamp)
+                    if (old != null && appleAlbumId(old.hit) != appleAlbumId(refreshed)) {
+                        appleAlbumId(old.hit)?.let { affectedAlbums.add(it) }
+                    }
+                }
+                check(entries.size <= MAX_ITEMS) { "资料库容量不足，未添加专辑。" }
+                val next = invalidateAppleAlbumMetadata(
+                    repairSongOrderFromReferences(state.copy(items = entries.values.toList()), references), affectedAlbums)
+                result.complete(Unit)
+                next
+            } catch (error: Exception) {
+                result.completeExceptionally(error)
+                if (error is CancellationException) throw error
+                state
+            }
+        }.isFailure) throw IllegalStateException("资料库暂时不可用，请重试。")
+        result.await()
+    }
 
     private fun save(hit: CatalogHit, albumTracks: List<Track>, toggleFavorite: Boolean) {
         val clean = normalizeHit(hit) ?: return

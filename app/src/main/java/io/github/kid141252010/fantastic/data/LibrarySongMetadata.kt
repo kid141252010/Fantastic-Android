@@ -56,61 +56,73 @@ internal fun albumArtistHits(source: Source, artists: List<NeteaseArtistCredit>)
     }.toList()
 }
 
+private suspend fun FantasticApp.loadLibraryAlbumMetadata(
+    source: Source, albumId: String, requestCountry: String?,
+): LibraryAlbumMetadata = when (source) {
+    Source.Apple -> {
+        val album = apple.entity(AppleCatalogApi.Entity.Album, albumId, storefront = requestCountry!!,
+            params = mapOf("include" to "tracks,artists,record-labels"))
+        require(album.id == albumId && album.type == "albums") { "服务器返回了其他专辑" }
+        val albumCountry = album.catalogCountry(requestCountry)
+        require(albumCountry == requestCountry) { "服务器返回了其他国家的专辑" }
+        val resources = album.relationships["tracks"]?.data.orEmpty().toMutableList()
+        var next = album.relationships["tracks"]?.next?.takeIf { it.isNotBlank() }
+        val visited = mutableSetOf<String>()
+        while (next != null) {
+            check(visited.add(next)) { "服务器重复返回同一分页链接，无法继续加载。" }
+            val page = apple.trackPage(next)
+            val following = page.next?.takeIf { it.isNotBlank() }
+            check(following !in visited) { "服务器分页没有前进，请稍后重试。" }
+            resources += page.data
+            next = following
+        }
+        val tracks = resources.mapNotNull { it.toTrack(albumCountry) }.filter { it.albumId.isBlank() || it.albumId == albumId }.map { song ->
+            song.copy(albumId = albumId, album = song.album.ifBlank { album.name },
+                albumCountry = if (song.albumId == albumId && song.albumId != "0") song.albumCountry ?: album.catalogCountry(null)
+                    else album.catalogCountry(null),
+                artist = song.artist.ifBlank { album.artist }, albumArtist = song.albumArtist.ifBlank { album.artist },
+                artworkTemplate = song.artworkTemplate ?: (album.artwork?.get("url") as? JsonPrimitive)?.contentOrNull?.replace("{c}", "bb"))
+        }
+        LibraryAlbumMetadata(source, albumId, album.artist, tracks,
+            (album.attributes["trackCount"] as? JsonPrimitive)?.intOrNull?.takeIf { it in 0..100_000 }, albumCountry,
+            album.albumArtistHits(requestCountry))
+    }
+    Source.QQ -> {
+        val response = qq.album(albumId)
+        val album = libraryAlbumJson.decodeFromJsonElement<NeteaseAlbum>(response.getValue("album"))
+        require(album.mid == albumId) { "服务器返回了其他专辑" }
+        val artist = album.artists.joinToString(" / ") { it.name }
+        val songs = (response["songs"] as? JsonArray).orEmpty().map { libraryAlbumJson.decodeFromJsonElement<QqSong>(it).toTrack() }
+        val tracks = songs.filter { it.albumId.isBlank() || it.albumId == albumId }.map { song ->
+            song.copy(albumId = albumId, album = song.album.ifBlank { album.name },
+                artist = song.artist.ifBlank { artist }, albumArtist = song.albumArtist.ifBlank { artist },
+                artworkTemplate = song.artworkTemplate?.takeIf { it.isNotBlank() } ?: album.cover.ifBlank { null })
+        }
+        LibraryAlbumMetadata(source, albumId, artist, tracks, album.size.libraryTrackCount(songs.size),
+            artists = albumArtistHits(source, album.artists))
+    }
+    Source.Netease -> {
+        val response = netease.album(albumId)
+        require(response.album.mid == albumId) { "服务器返回了其他专辑" }
+        val tracks = response.toLibraryTracks(albumId).filter { it.albumId == albumId }
+        LibraryAlbumMetadata(source, albumId, response.album.artists.joinToString(" / ") { it.name }, tracks,
+            response.album.size.libraryTrackCount(response.songs.size), artists = albumArtistHits(source, response.album.artists))
+    }
+}
+
+/** Explicit whole-album saves must not use the member-filtered reference cache. */
+internal suspend fun FantasticApp.libraryAlbumForSave(hit: CatalogHit): LibraryAlbumMetadata {
+    require(hit.kind == "album" && hit.id.isNotBlank() && hit.id != "0" && validCatalogId(hit.source, "album", hit.id)) {
+        "缺少有效专辑 ID"
+    }
+    val requestCountry = albumRequestCountry(hit.source, hit.country)
+    return withContext(Dispatchers.IO) { loadLibraryAlbumMetadata(hit.source, hit.id, requestCountry) }
+}
+
 /** A complete provider response is reference metadata, never a request to add its members. */
 internal suspend fun FantasticApp.libraryAlbumMetadata(source: Source, albumId: String, country: String?): LibraryAlbumMetadata = withContext(Dispatchers.IO) {
     require(albumId.isNotBlank() && albumId != "0") { "缺少有效专辑 ID" }
     val requestCountry = albumRequestCountry(source, country)
-    suspend fun load(): LibraryAlbumMetadata = when (source) {
-        Source.Apple -> {
-            val album = apple.entity(AppleCatalogApi.Entity.Album, albumId, storefront = requestCountry!!,
-                params = mapOf("include" to "tracks,artists,record-labels"))
-            require(album.id == albumId && album.type == "albums") { "服务器返回了其他专辑" }
-            val albumCountry = album.catalogCountry(requestCountry)
-            require(albumCountry == requestCountry) { "服务器返回了其他国家的专辑" }
-            val resources = album.relationships["tracks"]?.data.orEmpty().toMutableList()
-            var next = album.relationships["tracks"]?.next?.takeIf { it.isNotBlank() }
-            val visited = mutableSetOf<String>()
-            while (next != null) {
-                check(visited.add(next)) { "服务器重复返回同一分页链接，无法继续加载。" }
-                val page = apple.trackPage(next)
-                val following = page.next?.takeIf { it.isNotBlank() }
-                check(following !in visited) { "服务器分页没有前进，请稍后重试。" }
-                resources += page.data
-                next = following
-            }
-            val tracks = resources.mapNotNull { it.toTrack(albumCountry) }.filter { it.albumId.isBlank() || it.albumId == albumId }.map { song ->
-                song.copy(albumId = albumId, album = song.album.ifBlank { album.name },
-                    albumCountry = if (song.albumId == albumId && song.albumId != "0") song.albumCountry ?: album.catalogCountry(null)
-                        else album.catalogCountry(null),
-                    artist = song.artist.ifBlank { album.artist }, albumArtist = song.albumArtist.ifBlank { album.artist },
-                    artworkTemplate = song.artworkTemplate ?: (album.artwork?.get("url") as? JsonPrimitive)?.contentOrNull?.replace("{c}", "bb"))
-            }
-            LibraryAlbumMetadata(source, albumId, album.artist, tracks,
-                (album.attributes["trackCount"] as? JsonPrimitive)?.intOrNull?.takeIf { it in 0..100_000 }, albumCountry,
-                album.albumArtistHits(requestCountry))
-        }
-        Source.QQ -> {
-            val response = qq.album(albumId)
-            val album = libraryAlbumJson.decodeFromJsonElement<NeteaseAlbum>(response.getValue("album"))
-            require(album.mid == albumId) { "服务器返回了其他专辑" }
-            val artist = album.artists.joinToString(" / ") { it.name }
-            val songs = (response["songs"] as? JsonArray).orEmpty().map { libraryAlbumJson.decodeFromJsonElement<QqSong>(it).toTrack() }
-            val tracks = songs.filter { it.albumId.isBlank() || it.albumId == albumId }.map { song ->
-                song.copy(albumId = albumId, album = song.album.ifBlank { album.name },
-                    artist = song.artist.ifBlank { artist }, albumArtist = song.albumArtist.ifBlank { artist },
-                    artworkTemplate = song.artworkTemplate?.takeIf { it.isNotBlank() } ?: album.cover.ifBlank { null })
-            }
-            LibraryAlbumMetadata(source, albumId, artist, tracks, album.size.libraryTrackCount(songs.size),
-                artists = albumArtistHits(source, album.artists))
-        }
-        Source.Netease -> {
-            val response = netease.album(albumId)
-            require(response.album.mid == albumId) { "服务器返回了其他专辑" }
-            val tracks = response.toLibraryTracks(albumId).filter { it.albumId == albumId }
-            LibraryAlbumMetadata(source, albumId, response.album.artists.joinToString(" / ") { it.name }, tracks,
-                response.album.size.libraryTrackCount(response.songs.size), artists = albumArtistHits(source, response.album.artists))
-        }
-    }
     library.albumMetadataMutex.withLock {
         var expectedRevision: Long
         var loaded: LibraryAlbumMetadata
@@ -118,7 +130,7 @@ internal suspend fun FantasticApp.libraryAlbumMetadata(source: Source, albumId: 
             val state = library.snapshot.first { !it.loading }
             state.albumMetadata.firstOrNull { it.matchesAlbum(source, albumId, requestCountry) }?.let { return@withLock it }
             expectedRevision = state.albumMetadataRevision(source, albumId)
-            loaded = load()
+            loaded = loadLibraryAlbumMetadata(source, albumId, requestCountry)
             if (library.recordAlbumMetadata(loaded, expectedRevision)) {
                 library.snapshot.first { current ->
                     current.albumMetadataRevision(source, albumId) != expectedRevision || current.albumMetadata.any {

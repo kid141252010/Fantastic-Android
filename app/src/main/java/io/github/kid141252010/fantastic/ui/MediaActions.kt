@@ -62,6 +62,7 @@ import io.github.kid141252010.fantastic.data.MusicLibrary
 import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.Track
+import io.github.kid141252010.fantastic.data.libraryAlbumForSave
 import io.github.kid141252010.fantastic.data.librarySongHit
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.playback.DownloadStatus
@@ -117,6 +118,17 @@ internal fun MediaActionContent(
         val songs = resolveTracks?.invoke() ?: tracks
         if (songs.isEmpty()) error("没有可用的歌曲")
         action(songs)
+    }
+    fun saveWholeAlbum(toggleFavorite: Boolean = false) {
+        val capturedAlbum = if (hit.source == Source.Apple) hit.copy(
+            country = hit.country.normalizedAppleCountry() ?: app.prefs.storefront.normalizedAppleCountry(),
+        ) else hit
+        val resolver = resolveTracks
+        runAction {
+            require(capturedAlbum.source != Source.Apple || capturedAlbum.country != null) { "缺少有效 Apple Music 国家" }
+            val songs = resolver?.invoke() ?: app.libraryAlbumForSave(capturedAlbum).tracks
+            library.addAlbum(capturedAlbum, songs, toggleFavorite)
+        }
     }
     val snapshot by library.snapshot.collectAsStateWithLifecycle()
     val saved = snapshot.items.firstOrNull { it.key.source == hit.source && it.key.kind == hit.kind && it.key.id == hit.id }
@@ -234,11 +246,11 @@ internal fun MediaActionContent(
     if (media) {
         if (saved != null && hit.kind != "song") SheetAction("置顶${catalogKindLabel(hit.kind)}", Icons.Outlined.PushPin,
             detail = "Fantastic 未提供目录置顶")
-        if (saved == null || (hit.kind == "album" && resolveTracks != null)) SheetAction(
+        if (saved == null || hit.kind == "album") SheetAction(
             if (saved == null) "添加到资料库" else "更新资料库专辑", Icons.Outlined.LibraryAdd,
             detail = "仅保存到本机，不同步 Apple 账号", onClick = if (resolving) null else ({
                 when {
-                    hit.kind == "album" && resolveTracks != null -> runAction { library.add(hit, resolveTracks.invoke()) }
+                    hit.kind == "album" -> saveWholeAlbum()
                     hit.kind == "song" -> runAction {
                         library.add(app.librarySongHit(hit))
                         saveParentAlbum?.invoke()
@@ -313,8 +325,7 @@ internal fun MediaActionContent(
             if (saved?.isFavorite == true) Icons.Outlined.Star else Icons.Outlined.StarBorder,
             detail = "仅保存到本机资料库", onClick = if (resolving) null else ({
                 when {
-                    hit.kind == "album" && resolveTracks != null && saved?.isFavorite != true ->
-                        runAction { library.toggleFavorite(hit, resolveTracks.invoke()) }
+                    hit.kind == "album" && saved?.isFavorite != true -> saveWholeAlbum(toggleFavorite = true)
                     hit.kind == "song" && saved?.isFavorite != true -> runAction {
                         library.toggleFavorite(app.librarySongHit(hit))
                         saveParentAlbum?.invoke()
