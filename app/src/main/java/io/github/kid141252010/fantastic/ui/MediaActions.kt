@@ -73,7 +73,7 @@ import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** C3469t.h/b/d/f/g/a ordering, with local-library actions explicitly distinguished from Apple sync. */
+/** Media action ordering, with local-library actions explicitly distinguished from cloud sync. */
 @Composable
 internal fun MediaActionContent(
     hit: CatalogHit,

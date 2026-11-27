@@ -61,7 +61,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
-/** Original fragment fade for cover, lyrics and queue pane switches. */
+/** Fade for cover, lyrics and queue pane switches. */
 private val PlayerFragmentMotion = tween<Float>(500, easing = CubicBezierEasing(.25f, .1f, .25f, 1f))
 enum class PlayerPane { Cover, Lyrics, Queue }
 

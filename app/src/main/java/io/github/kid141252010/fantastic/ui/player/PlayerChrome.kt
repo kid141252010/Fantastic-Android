@@ -111,7 +111,7 @@ internal fun HeaderAction(
     }
 }
 
-/** Native marquee, like music_player/fragment_player_lyrics_sheet; each pass has one repeat. */
+/** Native marquee; each pass has one repeat. */
 @Composable
 internal fun PlayerMetadataText(
     title: String,

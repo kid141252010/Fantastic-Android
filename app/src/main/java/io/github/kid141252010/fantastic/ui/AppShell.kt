@@ -251,7 +251,7 @@ fun AppShell(app: FantasticApp) {
     }
 }
 
-/** 悬浮玻璃标签栏：选中项用系统强调色（Material You 动态取色，录屏里是蓝色） */
+/** 悬浮玻璃标签栏：选中项用系统强调色（Material You 动态取色） */
 @Composable
 private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit, enabled: Boolean = true) {
     Glass(CircleShape, Modifier.fillMaxWidth().height(Dimens.TabBarHeight)) {

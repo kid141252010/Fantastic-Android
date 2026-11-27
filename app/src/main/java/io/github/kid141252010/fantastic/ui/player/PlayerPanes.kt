@@ -68,7 +68,7 @@ private val ControlsFadeOut = fadeOut(tween(500, easing = Easing { 1f - (1f - it
 private val ControlsMaskFade = tween<Float>(500,
     easing = Easing(AccelerateDecelerateInterpolator()::getInterpolation))
 
-/** music_player.xml: the square fits between the 24dp guides and the title's −44dp barrier. */
+/** The square fits between the 24dp guides and the title's −44dp barrier. */
 @Composable
 internal fun CoverPane(
     state: PlayerState,
@@ -94,7 +94,7 @@ internal fun CoverPane(
         val artworkMaxWidth = (width - 2 * 24.dp.roundToPx()).coerceAtLeast(0)
         val barrier = 44.dp.roundToPx()
 
-        // Metadata is always two single-line labels. The wide resource ties its width to the square,
+        // Metadata is always two single-line labels. The wide layout ties its width to the square,
         // so read their height before solving the square and measuring the actual metadata/buttons.
         val wideArtwork = if (wide) {
             val labels = subcompose(CoverSlot.MetadataProbe) {

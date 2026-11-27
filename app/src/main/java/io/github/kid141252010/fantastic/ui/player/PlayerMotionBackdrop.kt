@@ -63,7 +63,7 @@ internal fun PlayerMotionBackdrop(
     })
 }
 
-// The blur rectangle is flipped vertically around its midpoint, as in view_motion_container.
+// The blur rectangle is flipped vertically around its midpoint.
 private class MotionBackdropGeometry(val width: Float, bottom: Float, val videoBottom: Float, val overlap: Float) {
     val height = bottom - videoBottom + overlap
     val left = -.125f * width

@@ -80,7 +80,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.runtime.snapshotFlow
 
-/** Geometry: APK new_fragment_player_queue_view, layout_player_buttons and small_list_d_upnext_item. */
+/** Queue pane geometry. */
 @Composable
 internal fun QueuePane(
     state: PlayerState,

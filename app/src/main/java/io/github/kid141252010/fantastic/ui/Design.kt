@@ -53,7 +53,7 @@ internal fun CircularIconButton(
 }
 
 /**
- * 统一的尺寸与动效。数值来自 Apple Music 安卓版录屏（1080×2400，按 2.625 换算 dp），
+ * 统一的尺寸与动效。数值按设计规格定义，具体 dp 值见各处声明，
  * 动效曲线与时长用 Material 3 的 emphasized 规范。
  */
 object Dimens {
