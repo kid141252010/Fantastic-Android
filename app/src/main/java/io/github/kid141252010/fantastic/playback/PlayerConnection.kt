@@ -57,6 +57,10 @@ data class PlayerState(
     internal val repeatGeneration: Int = 0,
 )
 
+/** Output clock corrections are not user seeks; media/occurrence changes still advance in refresh. */
+internal fun shouldIncrementLyricSeekGeneration(mediaId: String?, reason: Int): Boolean =
+    mediaId?.startsWith("apple:") != true || reason != Player.DISCONTINUITY_REASON_INTERNAL
+
 /** UI-side controller for the single service-owned Media3 session. */
 class PlayerConnection(private val context: Context) {
     private val _state = MutableStateFlow(PlayerState())
@@ -81,7 +85,7 @@ class PlayerConnection(private val context: Context) {
         }
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
-            refresh(discontinuity = true)
+            refresh(discontinuity = shouldIncrementLyricSeekGeneration(new.mediaItem?.mediaId, reason))
         }
     }
 

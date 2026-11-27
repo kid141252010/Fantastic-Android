@@ -121,4 +121,6 @@ dependencies {
     // 玻璃效果：背后内容模糊（API 31+ RenderEffect，低版本退化为半透明底色）
     implementation("dev.chrisbanes.haze:haze:1.1.1")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
+
+    testImplementation("junit:junit:4.13.2")
 }

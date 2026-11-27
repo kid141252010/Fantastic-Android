@@ -30,6 +30,7 @@ internal class AppleSegmentWindow(
     private var heldIndex = -1
     private var heldBytes = 0L
     private var next = 0
+    private var urgentIndex = -1
     private var closed = false
 
     init { require(legacyLookahead in 1..AUDIO_LANES) }
@@ -60,17 +61,17 @@ internal class AppleSegmentWindow(
                 fill()
             }
             val pending = queued.first
-            val bytes = if (priority == AppleSegmentPriority.Playback) {
-                decrypt.prioritizeSegment(track, index)
-                try { pending.result.await() }
-                finally { decrypt.releaseSegmentPriority(track, index) }
-            } else pending.result.await()
+            val bytes = pending.result.await()
             queued.removeFirst()
             queuedBytes -= pending.length
+            setUrgentSegment(queued.peekFirst()?.index ?: -1)
             hold(index, bytes)
             // Replenish before parsing/muxing so that one writer overlaps network work.
             fill()
             return bytes
+        } catch (error: Throwable) {
+            setUrgentSegment(-1)
+            throw error
         } finally {
             if (BuildConfig.DEBUG) {
                 Log.d("FantasticPlayback", "apple-window role=$priority index=$index queued=${queued.size} " +
@@ -86,6 +87,13 @@ internal class AppleSegmentWindow(
         heldBytes = declaredLength(index)
     }
 
+    private fun setUrgentSegment(index: Int) {
+        if (priority != AppleSegmentPriority.Playback || index == urgentIndex) return
+        if (urgentIndex >= 0) decrypt.releaseSegmentPriority(track, urgentIndex)
+        urgentIndex = index
+        if (index >= 0) decrypt.prioritizeSegment(track, index)
+    }
+
     private suspend fun fill() {
         currentCoroutineContext().ensureActive()
         scope.coroutineContext.ensureActive()
@@ -95,6 +103,7 @@ internal class AppleSegmentWindow(
             maxOf(1, legacyLookahead - 1)
         } else legacyLookahead
         val limit = decrypt.segmentLookahead(track, legacy)
+        setUrgentSegment(queued.peekFirst()?.index ?: -1)
         while (next < track.media.segments.size && queued.size < limit) {
             currentCoroutineContext().ensureActive()
             scope.coroutineContext.ensureActive()
@@ -104,6 +113,8 @@ internal class AppleSegmentWindow(
             if (occupied > 0L && (length > APPLE_ALAC_SEGMENT_BUFFER_BYTES ||
                     occupied > APPLE_ALAC_SEGMENT_BUFFER_BYTES - length)) break
             val index = next++
+            // Register the nearest successor before its producer can reach admission.
+            if (queued.isEmpty()) setUrgentSegment(index)
             queuedBytes = Math.addExact(queuedBytes, length)
             queued.addLast(Pending(index, length, scope.async(Dispatchers.IO) {
                 decrypt.fetchSegment(track, index, AppleSegmentPriority.Background)
@@ -119,6 +130,7 @@ internal class AppleSegmentWindow(
 
     suspend fun reset() {
         withContext(NonCancellable) {
+            setUrgentSegment(-1)
             for (pending in queued) pending.result.cancel()
             try {
                 for (pending in queued) pending.result.join()
