@@ -298,7 +298,12 @@ internal suspend fun parseNativeTtml(xml: String, preferredLanguage: String, qrc
     }
 
     val preferred = normalizedLanguage(preferredLanguage).split('-').filter(String::isNotEmpty)
-    val translationNodes = metadata?.first("translations")?.elements("translation").orEmpty()
+    val translationNodes = ArrayList<TtmlElement>()
+    for (block in headMetadata?.elements("iTunesMetadata").orEmpty()) {
+        for (group in block.elements("translations")) {
+            translationNodes.addAll(group.elements("translation"))
+        }
+    }
     val (replacements, translations) = translationNodes.partition { it.attr("type") == "replacement" }
     val translation = LocalizedRecords(chooseLanguage(translations, preferred))
     val replacement = LocalizedRecords(chooseLanguage(replacements, preferred))

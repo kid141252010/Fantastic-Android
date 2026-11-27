@@ -8,8 +8,9 @@
 
 - 默认参数下并行请求 Apple 官方歌词与 AMLL TTML。AMLL 按 `appleMusicId` 匹配。若结果可用，则显示该结果并取消尚未完成的官方请求。若未收录、请求失败或内容无效，则读取已发起的官方请求。切歌取消两路请求。AMLL 地址取自当前 Fantastic `/assets/host.js` 的 `amllApi`。缺省时使用公共词库地址。[AMLL 接口](https://amll.dev/reference/http-api/native.html)
 - Apple 官方歌词默认使用 `language=zh-Hans-CN`、`script=zh-Latn`。自定义语言或字形以及修改设置后的同曲刷新走官方接口。暂停或缓冲时将同曲刷新合并到恢复播放。`language` 用于选择 TTML 译文，`script` 作为请求参数传给服务端。
+- TTML 译文按 XML 顺序收集 `head/metadata` 下所有同级 `iTunesMetadata/translations/translation`，与 `replacement` 分开后沿用既有语言评分选择；同分取第一轨，不跨轨拼接。词曲作者、音译和音频偏移仍读取首块元数据。找不到对应行键时继续使用内联译文；只有非空且与原文忽略大小写不同时才启用翻译入口和绘制。
 - QQ 的有效 AMLL 候选优先于待补注释的 QRC。走 QRC 时按返回的标志补取可用音译和译文，再由 `NativeQrcAnnotations` 对齐。网易云歌词使用返回的 YRC、LRC 及其注释。
-- 成功解析的整首歌词保存到 `lyrics-v1` 磁盘缓存，总容量 16 MiB，单文档上限 4 MiB。缓存区分音源、服务地址、曲目以及 Apple 店面、语言、字形和来源策略。命中旧缓存时直接读取 `LyricSong`。「设置 → 歌词诊断」和 `FantasticLyrics` 记录缓存、来源、耗时及回退原因。单次解析超时为 15 秒。
+- 成功解析的整首歌词保存到 `lyrics-v1` 磁盘缓存，总容量 16 MiB，单文档上限 4 MiB。缓存区分音源、服务地址、曲目以及 Apple 店面、语言、字形和来源策略。命中旧缓存时直接读取 `LyricSong`，随后继续网络刷新；成功结果的译文变化会重新发布并写回，网络失败保留缓存。「设置 → 歌词诊断」和 `FantasticLyrics` 记录缓存、来源、耗时及回退原因。单次解析超时为 15 秒。
 
 ## 时间轴与排版
 
