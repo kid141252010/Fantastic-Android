@@ -20,12 +20,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Person
@@ -91,6 +93,10 @@ import io.github.kid141252010.fantastic.data.libraryTrackCount
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.data.toLibraryTracks
+import io.github.kid141252010.fantastic.ui.CollectionActions
+import io.github.kid141252010.fantastic.ui.CollectionHeader
+import io.github.kid141252010.fantastic.ui.SongListRow
+import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.MediaActionContent
@@ -111,6 +117,7 @@ import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -303,31 +310,84 @@ private fun DetailBody(
         }
         return
     }
-    val playableSection = remember(loaded) {
-        loaded.sections.firstOrNull { section -> section.entries.any { it.track != null } }
+    val collectionPage = target.kind == "album" || target.kind == "playlist"
+    val entityTracksKey = if (target.source == Source.Apple) "relationship:tracks" else "tracks"
+    val entityTracksSection = remember(loaded, collectionPage, entityTracksKey) {
+        loaded.sections.firstOrNull { collectionPage && it.key == entityTracksKey }
     }
-    val playable = remember(loaded) {
+    val playableSection = remember(loaded, entityTracksSection, collectionPage) {
+        if (collectionPage) entityTracksSection
+        else loaded.sections.firstOrNull { section -> section.entries.any { it.track != null } }
+    }
+    val playable = remember(loaded.song, playableSection) {
         loaded.song?.let(::listOf) ?: playableSection?.entries?.mapNotNull { it.track }.orEmpty()
     }
+    val terminalCollectionTracks = playable.takeIf {
+        entityTracksSection != null && entityTracksSection.next == null && !entityTracksSection.truncated
+    }
+    var resolvedCollectionTracks by remember(repository, entityTracksKey) {
+        mutableStateOf(terminalCollectionTracks?.takeIf { it.isNotEmpty() })
+    }
+    val collectionComplete = resolvedCollectionTracks != null || terminalCollectionTracks != null
+    val collectionDownloads = if (collectionPage) {
+        rememberCollectionDownloads(app, resolvedCollectionTracks ?: playable)
+    } else null
+    val favoriteMediaIds = if (target.kind == "playlist") {
+        val snapshot by app.library.snapshot.collectAsStateWithLifecycle()
+        remember(snapshot.items) {
+            snapshot.items.asSequence().filter { it.key.kind == "song" && it.isFavorite }
+                .map { "${it.key.source.mediaPrefix}:${it.key.id}" }.toSet()
+        }
+    } else emptySet()
     var collectionPlayBusy by remember { mutableStateOf<String?>(null) }
     var collectionPlayError by remember { mutableStateOf<String?>(null) }
     var collectionPlayRequest by remember { mutableStateOf(0) }
-    fun loadCollection(section: DetailSection, action: (List<Track>) -> Unit) {
+    suspend fun resolveCollectionTracks(section: DetailSection): List<Track> {
+        val ownCollection = collectionPage && section.key == entityTracksKey
+        val tracks = if (ownCollection) resolvedCollectionTracks ?: terminalCollectionTracks ?: repository.completeTracks(section)
+            else repository.completeTracks(section)
+        currentCoroutineContext().ensureActive()
+        if (!frameActive || page?.sections?.none { it.key == section.key } != false) {
+            throw CancellationException("详情页面已离开。")
+        }
+        if (tracks.isEmpty()) throw DetailUnavailable("服务器未返回歌曲。")
+        if (ownCollection) resolvedCollectionTracks = tracks
+        return tracks
+    }
+    suspend fun resolveCollectionRequest(
+        section: DetailSection,
+        action: (List<Track>) -> Unit = {},
+    ): List<Track> {
         val request = collectionPlayRequest + 1
         collectionPlayRequest = request
         collectionPlayBusy = section.key
         collectionPlayError = null
+        try {
+            val tracks = resolveCollectionTracks(section)
+            currentCoroutineContext().ensureActive()
+            if (!frameActive || request != collectionPlayRequest) throw CancellationException("曲目操作已失效。")
+            action(tracks)
+            return tracks
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            if (!frameActive || request != collectionPlayRequest) throw CancellationException("曲目操作已失效。")
+            val message = "无法加载完整曲目列表：${detailError(e)}"
+            collectionPlayError = message
+            throw DetailUnavailable(message)
+        } finally {
+            if (frameActive && request == collectionPlayRequest) collectionPlayBusy = null
+        }
+    }
+    fun loadCollection(section: DetailSection, action: (List<Track>) -> Unit) {
         scope.launch {
             try {
-                val tracks = repository.completeTracks(section)
-                if (tracks.isEmpty()) throw DetailUnavailable("服务器未返回歌曲。")
-                if (request == collectionPlayRequest) action(tracks)
+                resolveCollectionRequest(section, action)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                if (request == collectionPlayRequest) collectionPlayError = "无法加载完整曲目列表：${detailError(e)}"
-            } finally {
-                if (request == collectionPlayRequest) collectionPlayBusy = null
+            } catch (_: Exception) {
+                // The request publishes its error without submitting an incomplete collection.
             }
         }
     }
@@ -370,7 +430,42 @@ private fun DetailBody(
     LazyColumn(Modifier.fillMaxSize().then(if (moreEntry != null) Modifier.clearAndSetSemantics {} else Modifier),
         contentPadding = PaddingValues(bottom = LocalBarsPadding.current.calculateBottomPadding() + 24.dp)) {
         item("header") {
-            DetailHero(
+            if (collectionDownloads != null) {
+                val artist = artists.singleOrNull()
+                val caption = remember(loaded.facts) {
+                    loaded.facts.filter { it.first in heroFactNames && it.second.isNotBlank() }
+                        .joinToString(" · ") { it.second }
+                }
+                CollectionHeader(
+                    title = loaded.title,
+                    artwork = { artworkModifier -> Md3MediaArtwork(loaded.artwork, artworkModifier, shape = RoundedCornerShape(10.dp)) },
+                    subtitle = if (loaded.subtitle.isNotBlank()) ({
+                        if (artist != null) TextButton(onClick = { navigate(artist.target) }) {
+                            Text(loaded.subtitle, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        } else Text(loaded.subtitle, style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                    }) else null,
+                    caption = if (caption.isNotBlank()) ({
+                        Text(caption, style = MaterialTheme.typography.labelMedium,
+                            textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }) else null,
+                ) {
+                    CollectionActions(
+                        downloads = collectionDownloads,
+                        complete = collectionComplete,
+                        playEnabled = playable.isNotEmpty(),
+                        downloadEnabled = entityTracksSection != null &&
+                            if (collectionComplete) collectionDownloads.tracks.isNotEmpty()
+                            else playable.isNotEmpty() || entityTracksSection.next != null,
+                        resolving = collectionPlayBusy != null,
+                        onPlay = { playableSection?.let { playCollection(it, firstPlayable, false) } },
+                        onShuffle = { playableSection?.let { playCollection(it, firstPlayable, true) } },
+                        onDownload = { entityTracksSection?.let { section ->
+                            loadCollection(section) { tracks -> app.downloads.enqueue(tracks) }
+                        } },
+                    )
+                }
+            } else DetailHero(
                 page = loaded,
                 artist = artistPage,
                 video = target.kind == "music-video",
@@ -419,7 +514,7 @@ private fun DetailBody(
                 }
             }
         }
-        if (loaded.sections.none { it.entries.any { entry -> entry.track != null } } && loaded.song == null &&
+        if (playable.isEmpty() && loaded.song == null &&
             target.kind in setOf("album", "artist", "playlist")) {
             item("no-songs") { Text("当前没有可播放的音频曲目；可继续浏览下方关联内容。",
                 Modifier.padding(Dimens.Page), color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -443,6 +538,23 @@ private fun DetailBody(
                     val number = track.trackNumber.takeIf { target.kind == "album" && it > 0 }?.let {
                         if (multipleDiscs && track.discNumber > 0) "${track.discNumber}-$it" else it.toString()
                     }
+                    if (target.kind == "playlist") SongListRow(
+                        title = track.title,
+                        subtitle = track.artist,
+                        artwork = entry.artwork ?: track.artwork(120),
+                        favorite = track.mediaId in favoriteMediaIds,
+                        playing = player.mediaId == track.mediaId,
+                        downloadStatus = collectionDownloads?.status(track),
+                        collection = true,
+                        queueSwipeLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection),
+                        onQueueSwipe = { app.player.insertQueueItemsFromSwipe(listOf(track)) },
+                        onClick = { playCollection(section, index, false) },
+                        trailing = {
+                            IconButton(onClick = { moreEntry = entry; moreSection = section; moreIndex = index }) {
+                                Icon(Icons.Rounded.MoreVert, "${entry.title}更多操作")
+                            }
+                        },
+                    ) else
                     Md3MediaRow(
                         title = track.title,
                         subtitle = if (number == null) track.artist else "",
@@ -527,8 +639,8 @@ private fun DetailBody(
         val hit = CatalogHit(entry.target.source, entry.target.kind, entry.target.id, entry.title, entry.subtitle, entry.artwork, entry.track,
             country = if (entry.target == target) loaded.country else entry.track?.country ?: entry.target.country)
         val queue = if (entry.target == target) playable else listOfNotNull(entry.track)
-        val resolverSection = (if (target.kind == "album") loaded.sections.firstOrNull {
-            it.key == "tracks" || it.key == "relationship:tracks"
+        val resolverSection = (if (collectionPage) entityTracksSection?.takeIf {
+            it.entries.any { entry -> entry.track != null } || it.next != null
         } else playableSection)?.takeIf { entry.target == target && loaded.song == null }
         val sectionForSong = moreSection
         val indexForSong = moreIndex
@@ -547,11 +659,13 @@ private fun DetailBody(
                 }) else null,
                 onView = if (entry.target != target) ({ closeMore(); navigate(entry.target) }) else null,
                 onQuality = quality?.let { song -> { closeMore(); onQualityOpen(song) } },
-                resolveTracks = resolverSection?.let { section -> { repository.completeTracks(section) } },
-                saveParentAlbum = sectionForSong?.takeIf { target.kind == "album" && entry.track?.albumId == target.id }?.let { section ->
+                resolveTracks = resolverSection?.let { section -> { resolveCollectionRequest(section) } },
+                saveParentAlbum = sectionForSong?.takeIf {
+                    target.kind == "album" && it.key == entityTracksKey && entry.track?.albumId == target.id
+                }?.let { section ->
                     {
                         val album = CatalogHit(target.source, "album", target.id, loaded.title, loaded.subtitle, loaded.artwork, country = loaded.country)
-                        app.library.add(album, repository.completeTracks(section))
+                        resolveCollectionRequest(section) { tracks -> app.library.add(album, tracks) }
                     }
                 },
                 onOpenRelated = if (entry.target.kind == "song") ({ related ->

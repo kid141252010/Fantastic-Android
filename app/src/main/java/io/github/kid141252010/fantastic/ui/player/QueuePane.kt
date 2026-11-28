@@ -66,6 +66,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.appAccentColors
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -256,6 +257,7 @@ private fun QueueRow(
     onSelect: () -> Unit,
     onRemove: () -> Unit,
 ) {
+    val accent = appAccentColors()
     val remove by rememberUpdatedState(onRemove)
     val dismiss = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
         if (value != SwipeToDismissBoxValue.Settled) remove()
@@ -270,9 +272,9 @@ private fun QueueRow(
             Box(Modifier.fillMaxSize(), contentAlignment =
                 if (direction == SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart else Alignment.CenterEnd) {
                 Box(Modifier.width(width).height(60.dp).clipToBounds()
-                    .background(Color(0xFF0088FF)).padding(horizontal = 16.dp),
+                    .background(accent.primary).padding(horizontal = 16.dp),
                     contentAlignment = if (direction == SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart else Alignment.CenterEnd) {
-                    Icon(Icons.Default.Delete, "移除", tint = Color.White)
+                    Icon(Icons.Default.Delete, "移除", tint = accent.onPrimary)
                 }
             }
         }) {

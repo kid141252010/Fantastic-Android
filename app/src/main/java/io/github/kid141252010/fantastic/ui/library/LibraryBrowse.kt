@@ -1,6 +1,8 @@
 package io.github.kid141252010.fantastic.ui.library
 
 import io.github.kid141252010.fantastic.data.fillRelationCountriesFrom
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +13,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
@@ -31,6 +36,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
@@ -38,6 +44,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -63,12 +73,12 @@ import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 internal enum class LibraryCategory(val title: String, val kind: String?, val icon: ImageVector) {
-    Playlists("歌单", "playlist", Icons.AutoMirrored.Rounded.QueueMusic),
+    Playlists("播放列表", "playlist", Icons.AutoMirrored.Rounded.QueueMusic),
     Artists("艺人", "artist", Icons.Rounded.Person),
     Albums("专辑", "album", Icons.Rounded.Album),
     Songs("歌曲", "song", Icons.Rounded.MusicNote),
-    Videos("音乐视频", "music-video", Icons.Rounded.VideoLibrary),
     Downloads("已下载", null, Icons.Rounded.Download),
+    Videos("音乐视频", "music-video", Icons.Rounded.VideoLibrary),
 }
 
 /** Album entries include saved songs with a known album ID. The projection never alters the snapshot. */
@@ -180,7 +190,10 @@ internal fun LibraryHome(
     }
     val gridState = rememberLazyGridState()
     val floatingActions by remember(gridState) { derivedStateOf { gridState.firstVisibleItemIndex > 0 } }
-    val horizontalPadding = if (LocalConfiguration.current.screenWidthDp < 360) 16.dp else Dimens.Page
+    val configuration = LocalConfiguration.current
+    val horizontalPadding = if (configuration.screenWidthDp < 360) 16.dp else Dimens.Page
+    val categoryTextPadding = if (configuration.screenWidthDp >= 600) 12.dp else 10.dp
+    val dividerColor = if (isSystemInDarkTheme()) Color(0xA6545458) else Color(0x4A3C3C43)
     Box(modifier.fillMaxSize()) {
         LibraryCoverGrid(Modifier, state = gridState, topPadding = 0.dp, horizontalPadding = horizontalPadding) {
             item(key = "library_title_key", span = { GridItemSpan(maxLineSpan) }) {
@@ -190,18 +203,27 @@ internal fun LibraryHome(
                     if (!floatingActions) actions()
                 }
             }
-            items(categories, key = { "category:${it.name}" }) { category ->
-                LibraryCoverCard(
-                    title = category.title,
-                    subtitle = "",
-                    artwork = null,
-                    icon = category.icon,
-                    onClick = { onCategory(category) },
-                )
+            item(key = "library-categories", span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.fillMaxWidth()) {
+                    categories.forEach { category ->
+                        Row(Modifier.fillMaxWidth().clickable(role = Role.Button) { onCategory(category) },
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Icon(category.icon, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurface)
+                            Spacer(Modifier.width(5.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(category.title, Modifier.padding(vertical = categoryTextPadding),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 22.sp).withUserFontWeight())
+                                HorizontalDivider(thickness = 0.5.dp, color = dividerColor)
+                            }
+                        }
+                    }
+                }
             }
             if (notice != null) item(key = "notice", span = { GridItemSpan(maxLineSpan) }) { notice() }
             item(key = "recent-title", span = { GridItemSpan(maxLineSpan) }) {
-                Md3MediaSectionHeader("最近添加", modifier = Modifier)
+                Text("最近添加", Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp).semantics { heading() },
+                    style = MaterialTheme.typography.titleLarge)
             }
             if (snapshot.loading) item(key = "loading", span = { GridItemSpan(maxLineSpan) }) { LibraryLoading() }
             else if (recent.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {

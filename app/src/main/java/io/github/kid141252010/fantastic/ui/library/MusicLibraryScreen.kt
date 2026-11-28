@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -16,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -28,12 +29,14 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.ImportExport
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material3.Button
@@ -46,6 +49,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -71,7 +75,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.kid141252010.fantastic.FantasticApp
@@ -98,6 +101,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.playback.DownloadStatus
+import io.github.kid141252010.fantastic.ui.CollectionActions
+import io.github.kid141252010.fantastic.ui.CollectionHeader
+import io.github.kid141252010.fantastic.ui.SongListRow
+import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
+import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
+import kotlinx.coroutines.delay
+import io.github.kid141252010.fantastic.playback.mediaId
 import java.text.Collator
 
 /** Offline catalog library, favorites, local playlists and nested playlist folders. */
@@ -119,6 +139,10 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         })
     }
     var favoriteSongs by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable(category, favoriteSongs, rootNavigationRequest) { mutableStateOf("") }
+    var debouncedQuery by rememberSaveable(category, favoriteSongs, rootNavigationRequest) { mutableStateOf("") }
+    var searchEditing by remember { mutableStateOf(false) }
+    val focus = LocalFocusManager.current
     val pageState = rememberSaveableStateHolder()
     var folderId by rememberSaveable { mutableStateOf("") }
     var playlistId by rememberSaveable { mutableStateOf("") }
@@ -155,6 +179,10 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
             menuEntry = null
             message = ""
             handledRootNavigationRequest = rootNavigationRequest
+            query = ""
+            debouncedQuery = ""
+            searchEditing = false
+            focus.clearFocus()
         }
     }
     val currentCategory = category
@@ -257,7 +285,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
 
 
     val title = selectedPlaylist?.name ?: currentFolder?.name ?: when {
-        favoriteSongs -> "收藏的歌曲"
+        favoriteSongs -> "喜爱的歌曲"
         currentCategory != null -> currentCategory.title
         else -> "资料库"
     }
@@ -269,6 +297,19 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         favoriteSongs -> "favorite-songs"
         else -> currentCategory?.name ?: "home"
     }
+    val songsPage = currentCategory == LibraryCategory.Songs && selectedPlaylist == null && !favoriteSongs
+    LaunchedEffect(category, folderId, playlistId, favoriteSongs) {
+        searchEditing = false
+        focus.clearFocus()
+    }
+    LaunchedEffect(songsPage, query) {
+        if (!songsPage) {
+            debouncedQuery = ""
+            return@LaunchedEffect
+        }
+        delay(250)
+        debouncedQuery = query.trim()
+    }
     val notice: (@Composable () -> Unit)? = if (snapshot.persistenceError || message.isNotBlank()) {
         {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -277,7 +318,9 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
             }
         }
     } else null
-    val locale = LocalConfiguration.current.locales[0]
+    val configuration = LocalConfiguration.current
+    val pagePadding = if (configuration.screenWidthDp < 360) 16.dp else Dimens.Page
+    val locale = configuration.locales[0]
     val collator = remember(locale) { Collator.getInstance(locale) }
     val visibleItems = remember(snapshot.items, albums, currentCategory, folderId, favoriteSongs, favoritesOnly, newestFirst, collator) {
         val entries = if (currentCategory == LibraryCategory.Albums) albums else snapshot.items
@@ -289,6 +332,24 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
         }
         if (newestFirst || favoriteSongs) filtered.sortedByDescending { if (favoriteSongs) it.favoriteAt else it.addedAt }
         else filtered.sortedWith { left, right -> collator.compare(left.hit.title, right.hit.title) }
+    }
+    val matchedItems = remember(visibleItems, debouncedQuery, songsPage) {
+        if (!songsPage || debouncedQuery.isBlank()) visibleItems else visibleItems.filter { entry ->
+            val artist = entry.hit.track?.artist ?: entry.hit.subtitle
+            entry.hit.title.contains(debouncedQuery, ignoreCase = true) || artist.contains(debouncedQuery, ignoreCase = true)
+        }
+    }
+    val matchedTracks = remember(matchedItems, songsPage) {
+        if (songsPage) matchedItems.map { asTrack(it.hit) } else emptyList()
+    }
+    val collectionTracks = remember(selectedPlaylist, visibleItems) {
+        if (selectedPlaylist != null) selectedPlaylist.tracks.mapNotNull { if (it.hit.kind == "song") asTrack(it.hit) else null }
+        else visibleItems.mapNotNull { if (it.hit.kind == "song") asTrack(it.hit) else null }
+    }
+    val collectionDownloads = rememberCollectionDownloads(app, collectionTracks)
+    val playlistFavoriteByMediaId = remember(snapshot.items) {
+        snapshot.items.asSequence().filter { it.hit.kind == "song" }
+            .associate { asTrack(it.hit).mediaId to it.isFavorite }
     }
 
     val actions: @Composable RowScope.() -> Unit = {
@@ -367,7 +428,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            if (!isHome) TopAppBar(title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            if (!isHome) TopAppBar(title = { if (!songsPage) Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = { Md3BackButton(::goBack) }, actions = actions, windowInsets = WindowInsets(0, 0, 0, 0))
         },
     ) { innerPadding ->
@@ -394,15 +455,91 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                         if (notice != null) item("notice") {
                             Box(Modifier.padding(horizontal = Dimens.Page, vertical = 8.dp)) { notice() }
                         }
-                        if (snapshot.loading) item("loading") { LibraryLoading() }
-                        else if (selectedPlaylist != null) {
-                            item("playlist-header") { LibraryPlaylistHeader(app, selectedPlaylist) }
+                        if (songsPage) {
+                            item("songs-title") {
+                                Text("歌曲", Modifier.fillMaxWidth().padding(horizontal = pagePadding).padding(top = 20.dp, bottom = 8.dp),
+                                    style = MaterialTheme.typography.headlineLarge.copy(fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                                        .withUserFontWeight(FontWeightRole.Title), maxLines = 1)
+                            }
+                            item("songs-search") {
+                                LibrarySongSearchField(query, searchEditing, onQueryChange = { query = it },
+                                    onClear = { query = "" }, onSearch = { focus.clearFocus() },
+                                    onEditingChanged = { searchEditing = it })
+                            }
+                            item("songs-actions") {
+                                Row(Modifier.fillMaxWidth().padding(horizontal = pagePadding, vertical = 16.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                    val colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                        contentColor = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Button(onClick = { app.player.playQueue(matchedTracks, 0) },
+                                        enabled = !snapshot.loading && matchedTracks.isNotEmpty(),
+                                        modifier = Modifier.weight(1f).heightIn(min = 48.dp), shape = CircleShape,
+                                        colors = colors) {
+                                        Icon(Icons.Rounded.PlayArrow, contentDescription = null, Modifier.size(22.dp))
+                                        Text("播放", Modifier.padding(start = 8.dp), fontSize = 18.sp)
+                                    }
+                                    Button(onClick = { app.player.playQueue(matchedTracks, 0, shuffle = true) },
+                                        enabled = !snapshot.loading && matchedTracks.isNotEmpty(),
+                                        modifier = Modifier.weight(1f).heightIn(min = 48.dp), shape = CircleShape,
+                                        colors = colors) {
+                                        Icon(Icons.Rounded.Shuffle, contentDescription = null, Modifier.size(22.dp))
+                                        Text("随机播放", Modifier.padding(start = 8.dp), fontSize = 18.sp)
+                                    }
+                                }
+                            }
+                            if (snapshot.loading) item("songs-loading") { LibraryLoading() }
+                            else if (matchedItems.isEmpty()) item("songs-empty") {
+                                if (visibleItems.isEmpty()) LibraryEmptyCategory(LibraryCategory.Songs, favoritesOnly, onCreate = { dialog = "playlist" })
+                                else Md3EmptyState("没有匹配的歌曲", "请尝试其他标题或艺人。", icon = LibraryCategory.Songs.icon)
+                            }
+                            else items(matchedItems, key = { it.stableKey }) { entry ->
+                                LibraryItemRow(
+                                    entry = entry,
+                                    collection = false,
+                                    downloadStatus = collectionDownloads.status(asTrack(entry.hit)),
+                                    showLibrarySources = showLibrarySources,
+                                    playing = player.mediaId == "${entry.hit.source.mediaPrefix}:${entry.hit.id}",
+                                    queueSwipeLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection),
+                                    onQueueSwipe = { app.player.insertQueueItemsFromSwipe(listOf(asTrack(entry.hit))) },
+                                    onClick = { playLibraryHit(app, entry, matchedItems) },
+                                    onOptions = { menuEntry = entry },
+                                )
+                            }
+                        } else if (selectedPlaylist != null) {
+                            val playlistSongs = collectionTracks
+                            item("playlist-header") {
+                                CollectionHeader(
+                                    title = selectedPlaylist.name,
+                                    artwork = { modifier ->
+                                        Md3MediaArtwork(selectedPlaylist.coverUrl(), modifier,
+                                            shape = RoundedCornerShape(10.dp), icon = Icons.AutoMirrored.Rounded.QueueMusic)
+                                    },
+                                    subtitle = selectedPlaylist.description.takeIf { it.isNotBlank() }?.let { description ->
+                                        { Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                    },
+                                    caption = { Text(selectedPlaylist.caption(), color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                ) {
+                                    CollectionActions(collectionDownloads, complete = true,
+                                        playEnabled = !snapshot.loading && playlistSongs.isNotEmpty(),
+                                        downloadEnabled = !snapshot.loading && collectionDownloads.tracks.isNotEmpty(),
+                                        resolving = false,
+                                        onPlay = { app.player.playQueue(playlistSongs, 0) },
+                                        onShuffle = { app.player.playQueue(playlistSongs, 0, shuffle = true) },
+                                        onDownload = { app.downloads.enqueue(collectionDownloads.tracks) },
+                                    )
+                                }
+                            }
                             if (selectedPlaylist.tracks.isEmpty()) item("empty") {
                                 Md3EmptyState("歌单为空", "在歌曲的更多菜单中选择“添加到歌单”。")
                             } else item("tracks-heading") { Md3MediaSectionHeader("曲目") }
                             itemsIndexed(selectedPlaylist.tracks, key = { _, track -> track.uid }) { index, track ->
                                 PlaylistTrackRow(
                                     track = track,
+                                    favorite = track.hit.kind == "song" && playlistFavoriteByMediaId[asTrack(track.hit).mediaId] == true,
+                                    downloadStatus = if (track.hit.kind == "song") collectionDownloads.status(asTrack(track.hit)) else null,
+                                    showLibrarySources = showLibrarySources,
                                     playing = track.hit.kind == "song" && player.mediaId == "${track.hit.source.mediaPrefix}:${track.hit.id}",
                                     queueSwipeLabel = if (track.hit.kind == "song") queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null,
                                     onQueueSwipe = if (track.hit.kind == "song") ({
@@ -417,7 +554,52 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                                     onRemove = { app.library.removeFromPlaylist(selectedPlaylist.id, track.uid) },
                                 )
                             }
+                        } else if (favoriteSongs) {
+                            val favoriteTracks = collectionTracks
+                            item("favorite-header") {
+                                CollectionHeader(
+                                    title = "喜爱的歌曲",
+                                    titleTrailing = { Icon(Icons.Rounded.Star, "喜爱的歌曲", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    artwork = { modifier ->
+                                        Surface(modifier = modifier,
+                                            color = if (isSystemInDarkTheme()) Color(0xFF262629) else Color(0xFFE9E9EB)) {
+                                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                Icon(Icons.Rounded.Star, contentDescription = null,
+                                                    modifier = Modifier.fillMaxWidth(.60f).aspectRatio(1f), tint = Color(0xFFFA233B))
+                                            }
+                                        }
+                                    },
+                                    caption = { Text("${favoriteTracks.size} 首歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                ) {
+                                    CollectionActions(collectionDownloads, complete = true,
+                                        playEnabled = !snapshot.loading && favoriteTracks.isNotEmpty(),
+                                        downloadEnabled = !snapshot.loading && collectionDownloads.tracks.isNotEmpty(),
+                                        resolving = false,
+                                        onPlay = { app.player.playQueue(favoriteTracks, 0) },
+                                        onShuffle = { app.player.playQueue(favoriteTracks, 0, shuffle = true) },
+                                        onDownload = { app.downloads.enqueue(collectionDownloads.tracks) },
+                                    )
+                                }
+                            }
+                            if (snapshot.loading) item("favorite-loading") { LibraryLoading() }
+                            else if (favoriteTracks.isEmpty()) item("empty") {
+                                Md3EmptyState("未添加歌曲", "喜爱的歌曲将在这里显示。", icon = LibraryCategory.Songs.icon)
+                            } else item("tracks-heading") { Md3MediaSectionHeader("曲目") }
+                            items(visibleItems, key = { it.stableKey }) { entry ->
+                                LibraryItemRow(
+                                    entry = entry,
+                                    collection = true,
+                                    downloadStatus = collectionDownloads.status(asTrack(entry.hit)),
+                                    showLibrarySources = showLibrarySources,
+                                    playing = player.mediaId == "${entry.hit.source.mediaPrefix}:${entry.hit.id}",
+                                    queueSwipeLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection),
+                                    onQueueSwipe = { app.player.insertQueueItemsFromSwipe(listOf(asTrack(entry.hit))) },
+                                    onClick = { playLibraryHit(app, entry, visibleItems) },
+                                    onOptions = { menuEntry = entry },
+                                )
+                            }
                         } else {
+                            if (snapshot.loading) item("loading") { LibraryLoading() }
                             val playlists = if (playlistBrowser) snapshot.playlists.filter {
                                 it.folderId == folderId && (!favoritesOnly || it.favoriteAt > 0)
                             }.let { lists ->
@@ -431,9 +613,9 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                             }
                             if (showFavoritePlaylist) item("favorite-songs") {
                                 Md3MediaRow(
-                                    "收藏的歌曲",
+                                    "喜爱的歌曲",
                                     onClick = { favoriteSongs = true },
-                                    leading = { Icon(Icons.Rounded.Favorite, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                    leading = { Icon(Icons.Rounded.Star, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface) },
                                     trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
                                 )
                             }
@@ -444,22 +626,20 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                                 PlaylistRow(playlist) { playlistId = playlist.id }
                             }
                             if (!showFavoritePlaylist && playlists.isEmpty() && folders.isEmpty() && visibleItems.isEmpty()) item("empty") {
-                                if (favoriteSongs) Md3EmptyState("未添加歌曲", "喜爱的歌曲将在这里显示。", icon = LibraryCategory.Songs.icon)
-                                else LibraryEmptyCategory(currentCategory, favoritesOnly, onCreate = { dialog = "playlist" })
+                                LibraryEmptyCategory(currentCategory, favoritesOnly, onCreate = { dialog = "playlist" })
                             }
                             items(visibleItems, key = { it.stableKey }) { entry ->
                                 LibraryItemRow(
                                     entry = entry,
+                                    collection = false,
+                                    downloadStatus = null,
                                     showLibrarySources = showLibrarySources,
                                     playing = entry.hit.kind == "song" && player.mediaId == "${entry.hit.source.mediaPrefix}:${entry.hit.id}",
                                     queueSwipeLabel = if (entry.hit.kind == "song") queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null,
                                     onQueueSwipe = if (entry.hit.kind == "song") ({
                                         app.player.insertQueueItemsFromSwipe(listOf(asTrack(entry.hit)))
                                     }) else null,
-                                    onClick = {
-                                        if (entry.hit.kind == "song") playLibraryHit(app, entry, visibleItems)
-                                        else openLibraryHit(entry.hit)
-                                    },
+                                    onClick = { openLibraryHit(entry.hit) },
                                     onOptions = { menuEntry = entry },
                                 )
                             }
@@ -585,6 +765,39 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LibrarySongSearchField(
+    query: String,
+    editing: Boolean,
+    onQueryChange: (String) -> Unit,
+    onClear: () -> Unit,
+    onSearch: () -> Unit,
+    onEditingChanged: (Boolean) -> Unit,
+) {
+    val horizontalPadding = if (LocalConfiguration.current.screenWidthDp < 360) 16.dp else Dimens.Page
+    Box(Modifier.fillMaxWidth().padding(horizontal = horizontalPadding).padding(bottom = 14.dp).heightIn(min = 64.dp)) {
+        Surface(
+            Modifier.fillMaxWidth().padding(top = 8.dp).height(48.dp),
+            shape = RoundedCornerShape(10.dp),
+            color = if (isSystemInDarkTheme()) Color(0x3D767680) else Color(0x1F767680),
+        ) {
+            SearchBarDefaults.InputField(
+                query = query,
+                onQueryChange = onQueryChange,
+                onSearch = { onSearch() },
+                expanded = editing,
+                onExpandedChange = { if (!it) onSearch() },
+                modifier = Modifier.fillMaxSize().onFocusChanged { onEditingChanged(it.isFocused) },
+                placeholder = { Text("在歌曲中搜索", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                trailingIcon = if (query.isNotEmpty()) {
+                    { IconButton(onClick = onClear) { Icon(Icons.Rounded.Close, "清除搜索") } }
+                } else null,
+            )
+        }
+    }
+}
+
 @Composable
 private fun LibraryNotice(message: String, isError: Boolean = false) {
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -646,6 +859,8 @@ private fun LibraryEmptyCategory(category: LibraryCategory?, favoritesOnly: Bool
 @Composable
 private fun LibraryItemRow(
     entry: LibraryEntry,
+    collection: Boolean,
+    downloadStatus: DownloadStatus?,
     playing: Boolean,
     queueSwipeLabel: String?,
     onQueueSwipe: (() -> Unit)?,
@@ -654,24 +869,40 @@ private fun LibraryItemRow(
     onOptions: () -> Unit,
 ) {
     val hit = entry.hit
-    Md3MediaRow(
-        title = hit.title,
-        subtitle = hit.source.librarySubtitle(hit.subtitle, showSource = hit.kind != "song" || showLibrarySources),
-        playing = playing,
-        queueSwipeLabel = queueSwipeLabel,
-        onQueueSwipe = onQueueSwipe,
-        onClick = onClick,
-        leading = {
-            Md3MediaArtwork(hit.artwork ?: hit.track?.artwork(120), Modifier.size(48.dp),
-                shape = if (hit.kind == "artist") CircleShape else MaterialTheme.shapes.small)
-        },
-        trailing = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (entry.isFavorite) Icon(Icons.Rounded.Favorite, contentDescription = "已收藏", tint = MaterialTheme.colorScheme.primary)
-                IconButton(onClick = onOptions) { Icon(Icons.Rounded.MoreVert, "${hit.title}更多操作") }
-            }
-        },
-    )
+    if (hit.kind == "song") {
+        SongListRow(
+            title = hit.title,
+            subtitle = hit.source.librarySubtitle(hit.track?.artist ?: hit.subtitle, showSource = showLibrarySources),
+            artwork = hit.artwork ?: hit.track?.artwork(120),
+            favorite = entry.isFavorite,
+            playing = playing,
+            downloadStatus = downloadStatus,
+            collection = collection,
+            queueSwipeLabel = queueSwipeLabel,
+            onQueueSwipe = onQueueSwipe,
+            onClick = onClick,
+            trailing = { IconButton(onClick = onOptions) { Icon(Icons.Rounded.MoreVert, "${hit.title}更多操作") } },
+        )
+    } else {
+        Md3MediaRow(
+            title = hit.title,
+            subtitle = hit.source.librarySubtitle(hit.subtitle, showSource = true),
+            playing = playing,
+            queueSwipeLabel = queueSwipeLabel,
+            onQueueSwipe = onQueueSwipe,
+            onClick = onClick,
+            leading = {
+                Md3MediaArtwork(hit.artwork ?: hit.track?.artwork(120), Modifier.size(48.dp),
+                    shape = if (hit.kind == "artist") CircleShape else MaterialTheme.shapes.small)
+            },
+            trailing = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (entry.isFavorite) Icon(Icons.Rounded.Favorite, contentDescription = "已收藏", tint = MaterialTheme.colorScheme.primary)
+                    IconButton(onClick = onOptions) { Icon(Icons.Rounded.MoreVert, "${hit.title}更多操作") }
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -698,42 +929,13 @@ private fun FolderRow(folder: LibraryFolder, onClick: () -> Unit) {
     )
 }
 
-@Composable
-private fun LibraryPlaylistHeader(app: FantasticApp, playlist: LibraryPlaylist) {
-    val playable = remember(playlist.tracks) { playlist.tracks.any { it.hit.kind == "song" } }
-    val cover = remember(playlist.tracks) { playlist.coverUrl() }
-    Box(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 12.dp), Alignment.Center) {
-        Surface(Modifier.widthIn(max = 480.dp).fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surfaceContainerLow) {
-            Column(
-                Modifier.fillMaxWidth().padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Md3MediaArtwork(cover, Modifier.widthIn(max = 224.dp).fillMaxWidth(.7f).aspectRatio(1f),
-                    shape = MaterialTheme.shapes.large, icon = Icons.AutoMirrored.Rounded.QueueMusic)
-                Text(playlist.name, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
-                Text(playlist.caption(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (playlist.description.isNotBlank()) Text(playlist.description, style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (playable) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { playPlaylist(app, playlist, shuffle = false) }) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = null)
-                        Text("播放", Modifier.padding(start = 8.dp))
-                    }
-                    FilledTonalButton(onClick = { playPlaylist(app, playlist, shuffle = true) }) {
-                        Icon(Icons.Rounded.Shuffle, contentDescription = null)
-                        Text("随机播放", Modifier.padding(start = 8.dp))
-                    }
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun PlaylistTrackRow(
     track: LibraryPlaylistTrack,
+    favorite: Boolean,
+    downloadStatus: DownloadStatus?,
+    showLibrarySources: Boolean,
     playing: Boolean,
     canMoveUp: Boolean,
     queueSwipeLabel: String?,
@@ -746,26 +948,43 @@ private fun PlaylistTrackRow(
     onRemove: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    Md3MediaRow(
-        title = track.hit.title,
-        subtitle = track.hit.source.librarySubtitle(track.hit.subtitle, showSource = true),
-        playing = playing,
-        queueSwipeLabel = queueSwipeLabel,
-        onQueueSwipe = onQueueSwipe,
-        onClick = if (track.hit.kind == "song") onPlay else onOpen,
-        leading = { Md3MediaArtwork(track.hit.artwork ?: track.hit.track?.artwork(120), Modifier.size(48.dp), shape = MaterialTheme.shapes.small) },
-        trailing = {
-            Box {
-                IconButton(onClick = { menuOpen = true }) { Icon(Icons.Rounded.MoreVert, "${track.hit.title}更多操作") }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("查看详情") }, onClick = { menuOpen = false; onOpen() })
-                    DropdownMenuItem(text = { Text("上移") }, enabled = canMoveUp, onClick = { menuOpen = false; onUp() })
-                    DropdownMenuItem(text = { Text("下移") }, enabled = canMoveDown, onClick = { menuOpen = false; onDown() })
-                    DropdownMenuItem(text = { Text("从歌单移除") }, onClick = { menuOpen = false; onRemove() })
-                }
+    val trailing: @Composable () -> Unit = {
+        Box {
+            IconButton(onClick = { menuOpen = true }) { Icon(Icons.Rounded.MoreVert, "${track.hit.title}更多操作") }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(text = { Text("查看详情") }, onClick = { menuOpen = false; onOpen() })
+                DropdownMenuItem(text = { Text("上移") }, enabled = canMoveUp, onClick = { menuOpen = false; onUp() })
+                DropdownMenuItem(text = { Text("下移") }, enabled = canMoveDown, onClick = { menuOpen = false; onDown() })
+                DropdownMenuItem(text = { Text("从歌单移除") }, onClick = { menuOpen = false; onRemove() })
             }
-        },
-    )
+        }
+    }
+    if (track.hit.kind == "song") {
+        SongListRow(
+            title = track.hit.title,
+            subtitle = track.hit.source.librarySubtitle(track.hit.track?.artist ?: track.hit.subtitle, showLibrarySources),
+            artwork = track.hit.artwork ?: track.hit.track?.artwork(120),
+            favorite = favorite,
+            playing = playing,
+            downloadStatus = downloadStatus,
+            collection = true,
+            queueSwipeLabel = queueSwipeLabel,
+            onQueueSwipe = onQueueSwipe,
+            onClick = onPlay,
+            trailing = trailing,
+        )
+    } else {
+        Md3MediaRow(
+            title = track.hit.title,
+            subtitle = track.hit.source.librarySubtitle(track.hit.subtitle, showLibrarySources),
+            playing = playing,
+            queueSwipeLabel = queueSwipeLabel,
+            onQueueSwipe = onQueueSwipe,
+            onClick = onOpen,
+            leading = { Md3MediaArtwork(track.hit.artwork ?: track.hit.track?.artwork(120), Modifier.size(48.dp), shape = MaterialTheme.shapes.small) },
+            trailing = trailing,
+        )
+    }
 }
 
 private fun playLibraryHit(app: FantasticApp, entry: LibraryEntry, visibleItems: List<LibraryEntry>) {
@@ -774,10 +993,6 @@ private fun playLibraryHit(app: FantasticApp, entry: LibraryEntry, visibleItems:
     if (index >= 0) app.player.playQueue(songs.map { asTrack(it.hit) }, index)
 }
 
-private fun playPlaylist(app: FantasticApp, playlist: LibraryPlaylist, shuffle: Boolean) {
-    val songs = playlist.tracks.filter { it.hit.kind == "song" }
-    if (songs.isNotEmpty()) app.player.playQueue(songs.map { asTrack(it.hit) }, 0, shuffle = shuffle)
-}
 
 private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: String) {
     val songs = playlist.tracks.filter { it.hit.kind == "song" }
@@ -785,8 +1000,18 @@ private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: 
     if (selected >= 0) app.player.playQueue(songs.map { asTrack(it.hit) }, selected)
 }
 
-private fun asTrack(hit: CatalogHit): Track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
-    ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0, country = hit.country)
+private fun asTrack(hit: CatalogHit): Track {
+    val existing = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
+    if (existing != null) {
+        if (existing.source == Source.Apple && existing.country.normalizedAppleCountry() == null) {
+            val country = hit.country.normalizedAppleCountry()
+            if (country != null) return existing.copy(country = country)
+        }
+        return existing
+    }
+    return Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0,
+        country = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() else hit.country)
+}
 
 internal fun Source.librarySubtitle(subtitle: String, showSource: Boolean): String = when {
     !showSource -> subtitle

@@ -6,10 +6,19 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.unit.sp
+import io.github.kid141252010.fantastic.playback.DownloadStatus
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -30,10 +39,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
@@ -45,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.appAccentColors
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 @Composable
@@ -128,7 +140,6 @@ internal fun Md3MediaSectionHeader(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun Md3MediaRow(
     title: String,
@@ -141,10 +152,23 @@ internal fun Md3MediaRow(
     queueSwipeLabel: String? = null,
     onQueueSwipe: (() -> Unit)? = null,
 ) {
+    QueueSwipeRow(queueSwipeLabel, onQueueSwipe, modifier) { rowModifier ->
+        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
+            mediaRowModifier(rowModifier, playing, onClick))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun QueueSwipeRow(
+    queueSwipeLabel: String?,
+    onQueueSwipe: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    content: @Composable (Modifier) -> Unit,
+) {
     val swipeLabel = queueSwipeLabel?.takeIf { onQueueSwipe != null }
     if (swipeLabel == null) {
-        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
-            mediaRowModifier(modifier, playing, onClick))
+        content(modifier)
         return
     }
 
@@ -154,17 +178,26 @@ internal fun Md3MediaRow(
         if (value == SwipeToDismissBoxValue.StartToEnd) latestQueueSwipe.value?.invoke()
         false
     })
+    val accent = appAccentColors()
     SwipeToDismissBox(
         state = dismiss,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().clipToBounds(),
         enableDismissFromStartToEnd = true,
         enableDismissFromEndToStart = false,
         backgroundContent = {
-            Box(
-                Modifier.fillMaxSize().background(Color(0xFF0088FF)).padding(horizontal = 20.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Text(latestSwipeLabel.value, color = Color.White, style = MaterialTheme.typography.labelLarge)
+            val offset = if (dismiss.dismissDirection == SwipeToDismissBoxValue.Settled) 0f else {
+                try { dismiss.requireOffset() } catch (_: IllegalStateException) { 0f }
+            }
+            val width = with(LocalDensity.current) { kotlin.math.abs(offset).toDp() }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                if (width > 0.dp) Box(
+                    Modifier.width(width).fillMaxHeight().clipToBounds()
+                        .background(accent.primary).padding(horizontal = 20.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(latestSwipeLabel.value, color = accent.onPrimary,
+                        style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
+                }
             }
         },
     ) {
@@ -172,8 +205,7 @@ internal fun Md3MediaRow(
             latestQueueSwipe.value?.invoke()
             true
         }
-        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
-            mediaRowModifier(Modifier, playing, onClick, listOf(action)))
+        content(Modifier.semantics { customActions = listOf(action) })
     }
 }
 
@@ -188,13 +220,9 @@ private fun mediaRowModifier(
     modifier: Modifier,
     playing: Boolean,
     onClick: (() -> Unit)?,
-    accessibilityActions: List<CustomAccessibilityAction> = emptyList(),
 ): Modifier = modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
     .then(if (onClick == null) Modifier else Modifier.clickable(role = Role.Button, onClick = onClick))
-    .then(if (playing || accessibilityActions.isNotEmpty()) Modifier.semantics {
-        if (playing) stateDescription = "当前曲目"
-        if (accessibilityActions.isNotEmpty()) customActions = accessibilityActions
-    } else Modifier)
+    .then(if (playing) Modifier.semantics { stateDescription = "当前曲目" } else Modifier)
 
 @Composable
 private fun Md3MediaRowContent(
@@ -214,7 +242,7 @@ private fun Md3MediaRowContent(
         leadingContent = leading,
         trailingContent = trailing,
         colors = ListItemDefaults.colors(
-            containerColor = if (playing) colors.surfaceContainerHigh else Color.Transparent,
+            containerColor = if (playing) colors.surfaceVariant else colors.background,
             headlineColor = if (playing) colors.primary else colors.onSurface,
         ),
         modifier = modifier,
@@ -236,6 +264,51 @@ internal fun Md3MediaArtwork(
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             AsyncImage(url, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        }
+    }
+}
+
+@Composable
+internal fun SongListRow(
+    title: String,
+    subtitle: String,
+    artwork: String?,
+    favorite: Boolean,
+    playing: Boolean,
+    downloadStatus: DownloadStatus?,
+    collection: Boolean,
+    queueSwipeLabel: String?,
+    onQueueSwipe: (() -> Unit)?,
+    onClick: () -> Unit,
+    trailing: @Composable () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val textGap = if (collection) 12.dp else 16.dp
+    val divider = if (isSystemInDarkTheme()) Color(0xA6545458) else Color(0x4A3C3C43)
+    QueueSwipeRow(queueSwipeLabel, onQueueSwipe) { rowModifier ->
+        Column(rowModifier.fillMaxWidth().background(if (playing) colors.surfaceVariant else colors.background)
+            .clickable(role = Role.Button, onClick = onClick)
+            .then(if (playing) Modifier.semantics { stateDescription = "当前曲目" } else Modifier)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = if (collection) 56.dp else 64.dp)
+                .padding(start = 16.dp, end = 8.dp, top = if (collection) 4.dp else 8.dp,
+                    bottom = if (collection) 4.dp else 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(16.dp), contentAlignment = Alignment.Center) {
+                    if (favorite) Icon(Icons.Rounded.Star, "喜爱", Modifier.size(10.dp),
+                        tint = if (collection) colors.onSurfaceVariant else Color(0xFFFFCC00))
+                }
+                Md3MediaArtwork(artwork, Modifier.size(48.dp), shape = RoundedCornerShape(5.dp))
+                Column(Modifier.weight(1f).padding(start = textGap)) {
+                    Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.onSurface,
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 22.sp).withUserFontWeight())
+                    Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = colors.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 16.sp).withUserFontWeight())
+                }
+                Box(Modifier.width(32.dp), contentAlignment = Alignment.Center) { DownloadStatusMark(downloadStatus) }
+                trailing()
+            }
+            HorizontalDivider(Modifier.padding(start = 16.dp + 16.dp + 48.dp + textGap),
+                thickness = 0.5.dp, color = divider)
         }
     }
 }
