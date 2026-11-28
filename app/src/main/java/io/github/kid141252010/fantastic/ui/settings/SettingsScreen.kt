@@ -82,13 +82,7 @@ fun SettingsScreen(
     val regionEntry = regions.entries[savedServer]
     val cachedWrapper = regionEntry?.wrapperRegions
     val selectedStorefront = storefront.trim().lowercase()
-    val storefrontValidationError = when {
-        !selectedStorefront.matches(Regex("[a-z]{2}")) ->
-            "Apple Music 地区必须是两位小写英文字母代码，例如 ca、tr 或 jp。"
-        cachedWrapper != null && selectedStorefront !in cachedWrapper ->
-            "地区 $selectedStorefront 不在此服务器缓存的 wrapper 支持地区中。"
-        else -> null
-    }
+    val storefrontValidationError = storefrontErrorFor(selectedStorefront, cachedWrapper)
     var qqQuality by remember { mutableStateOf(prefs.qqQuality) }
     var neteaseQuality by remember { mutableStateOf(prefs.neteaseQuality) }
     var appleDownloadQuality by remember { mutableStateOf(prefs.appleQuality) }
@@ -112,7 +106,15 @@ fun SettingsScreen(
     var neteaseCapabilities by remember { mutableStateOf<NeteaseCapabilities?>(null) }
     var neteaseError by remember { mutableStateOf<String?>(null) }
     var choicePanel by remember { mutableStateOf<SettingsChoicePanel?>(null) }
-    val serverRequestBusy = checking || regions.refreshingServer != null
+    var serverRequestGeneration by remember { mutableStateOf(0) }
+    val serverRequestBusy = checking
+
+    fun saveStorefrontIfValid(value: String, wrapperRegions: List<String>?) {
+        val normalized = value.trim().lowercase()
+        if (storefrontErrorFor(normalized, wrapperRegions) == null) {
+            prefs.storefront = normalized
+        }
+    }
 
     fun checkServer() {
         if (serverRequestBusy) return
@@ -121,6 +123,7 @@ fun SettingsScreen(
             saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
             return
         }
+        val requestGeneration = ++serverRequestGeneration
         saveError = null
         wrapperStatus = null
         wrapperError = null
@@ -130,11 +133,11 @@ fun SettingsScreen(
         checking = true
         scope.launch {
             try {
-                val result = app.appleRegions.refresh(normalized)
-                val status = result.wrapper.getOrNull()
+                val statusResult = sourceResult { SourceStatus.wrapper(app.api.client, normalized) }
+                val status = statusResult.getOrNull()
                 wrapperStatus = status
                 if (status == null) {
-                    wrapperError = result.wrapper.exceptionOrNull()?.message ?: "无法读取 /status"
+                    wrapperError = statusResult.exceptionOrNull()?.message ?: "无法读取 /status"
                     return@launch
                 }
                 if (!status.serverReachable || status.httpCode !in 200..299) {
@@ -143,10 +146,30 @@ fun SettingsScreen(
                 }
                 prefs.baseUrl = normalized
                 checkedAddress = normalized
-                sourceResult { app.netease.capabilities(normalized) }.fold(
-                    onSuccess = { neteaseCapabilities = it },
-                    onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
-                )
+                app.appleRegions.refreshAfterStatusInBackground(normalized, status) { refreshResult ->
+                    scope.launch regionsUi@ {
+                        if (SourceStatus.normalizeBaseUrl(prefs.baseUrl) != normalized) return@regionsUi
+                        if (serverRequestGeneration == requestGeneration) {
+                            refreshResult.exceptionOrNull()?.let {
+                                saveError = "服务器已保存，但地区缓存刷新失败：${it.message ?: "未知错误"}"
+                            }
+                        }
+                        if (storefrontEdited) {
+                            val supported = app.appleRegions.state.value.entries[normalized]?.wrapperRegions
+                            saveStorefrontIfValid(storefrontDraft, supported)
+                        }
+                    }
+                    val capabilitiesResult = sourceResult { app.netease.capabilities(normalized) }
+                    scope.launch capabilitiesUi@ {
+                        if (serverRequestGeneration != requestGeneration ||
+                            SourceStatus.normalizeBaseUrl(prefs.baseUrl) != normalized
+                        ) return@capabilitiesUi
+                        capabilitiesResult.fold(
+                            onSuccess = { neteaseCapabilities = it },
+                            onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
+                        )
+                    }
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -199,12 +222,7 @@ fun SettingsScreen(
                         onValueChange = {
                             storefrontDraft = it
                             storefrontEdited = true
-                            val normalized = it.trim().lowercase()
-                            if (normalized.matches(Regex("[a-z]{2}")) &&
-                                (cachedWrapper == null || normalized in cachedWrapper)
-                            ) {
-                                prefs.storefront = normalized
-                            }
+                            saveStorefrontIfValid(it, cachedWrapper)
                         },
                         label = { Text("Apple Music 地区（默认 ca）") },
                         singleLine = true,
@@ -491,6 +509,14 @@ private suspend fun <T> sourceResult(block: suspend () -> T): Result<T> = try {
     throw e
 } catch (e: Exception) {
     Result.failure(e)
+}
+
+private fun storefrontErrorFor(value: String, wrapperRegions: List<String>?): String? = when {
+    !value.matches(Regex("[a-z]{2}")) ->
+        "Apple Music 地区必须是两位小写英文字母代码，例如 ca、tr 或 jp。"
+    wrapperRegions != null && value !in wrapperRegions ->
+        "地区 $value 不在此服务器缓存的 wrapper 支持地区中。"
+    else -> null
 }
 
 @Composable

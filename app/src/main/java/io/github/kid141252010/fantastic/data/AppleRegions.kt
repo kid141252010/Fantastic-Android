@@ -70,11 +70,38 @@ internal class AppleRegions(context: Context, private val apple: AppleCatalogApi
         }
     }
 
-    suspend fun refresh(baseUrl: String): AppleRegionRefresh = withContext(Dispatchers.IO) {
+    // Refresh and follow-up requests survive the settings screen's coroutine scope.
+    fun refreshAfterStatusInBackground(
+        baseUrl: String,
+        status: SourceStatus.Wrapper,
+        onComplete: suspend (Result<AppleRegionRefresh>) -> Unit,
+    ) {
+        scope.launch {
+            val result = try {
+                Result.success(refresh(baseUrl, status))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Result.failure(error)
+            }
+            withContext(Dispatchers.Main.immediate) { onComplete(result) }
+        }
+    }
+
+    suspend fun refresh(
+        baseUrl: String,
+        checkedWrapper: SourceStatus.Wrapper? = null,
+    ): AppleRegionRefresh = withContext(Dispatchers.IO) {
         val server = SourceStatus.normalizeBaseUrl(baseUrl) ?: throw IOException("服务器地址无效")
         mutex.withLock {
             load()
-            val (storefronts, wrapper) = fetch(server, fetchStorefronts = true, fetchWrapper = true)
+            val knownWrapper = checkedWrapper?.let { Result.success(it) }
+            val (storefronts, wrapper) = fetch(
+                server,
+                fetchStorefronts = true,
+                fetchWrapper = knownWrapper == null,
+                knownWrapper = knownWrapper,
+            )
             AppleRegionRefresh(checkNotNull(storefronts), checkNotNull(wrapper))
         }
     }
@@ -84,6 +111,7 @@ internal class AppleRegions(context: Context, private val apple: AppleCatalogApi
         server: String,
         fetchStorefronts: Boolean,
         fetchWrapper: Boolean,
+        knownWrapper: Result<SourceStatus.Wrapper>? = null,
     ): Pair<Result<List<AppleStorefront>>?, Result<SourceStatus.Wrapper>?> {
         mutableState.value = mutableState.value.copy(refreshingServer = server)
         try {
@@ -95,7 +123,7 @@ internal class AppleRegions(context: Context, private val apple: AppleCatalogApi
                     }
                 } else null
                 val wrapper = if (fetchWrapper) async { attempt { SourceStatus.wrapper(client, server) } } else null
-                storefronts?.await() to wrapper?.await()
+                storefronts?.await() to (knownWrapper ?: wrapper?.await())
             }
             currentCoroutineContext().ensureActive()
             val (storefronts, wrapper) = results
