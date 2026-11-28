@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
+import androidx.media3.datasource.DataSpec
 import java.io.EOFException
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope

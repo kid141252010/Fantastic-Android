@@ -751,7 +751,7 @@ internal class FantasticSessionPlayer(
         val storefront = if (track.source == Source.Apple) track.country.normalizedAppleCountry() ?: prefs.storefront else prefs.storefront
         val key = PlaybackCacheKey.from(prefs.baseUrl, storefront, track.source, track.id)
         val server = key?.server ?: prefs.baseUrl
-        val offline = localAudio(track, song.quality)
+        val offline = downloads.audio(track, song.quality)
         val preferred = song.quality ?: prefs.preferredQuality(track.source)
         if (offline != null || key == null) return Stream(song, server, key, preferred, offline?.quality ?: preferred, offline, null)
         if (track.source != Source.Apple) {

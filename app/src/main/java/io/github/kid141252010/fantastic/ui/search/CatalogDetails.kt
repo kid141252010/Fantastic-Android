@@ -69,6 +69,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -594,7 +595,7 @@ private fun DetailBody(
             if (!hideHeading) {
                 item("${section.key}:heading") {
                     if (artistPage) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page,
+                        Row(Modifier.fillMaxWidth().padding(start = Dimens.Page, end = Dimens.Page,
                             top = if (sectionIndex <= 0) 0.dp else 18.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Row(Modifier.weight(1f).then(if (isArtistSongSection) Modifier.clickable(

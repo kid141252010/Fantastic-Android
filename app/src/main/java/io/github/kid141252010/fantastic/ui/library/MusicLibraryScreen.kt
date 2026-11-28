@@ -594,7 +594,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                                 FolderRow(folder) { folderId = folder.id }
                             }
                             items(playlists, key = { "local:${it.id}" }) { playlist ->
-                                PlaylistRow(playlist) { playlistId = it.id }
+                                PlaylistRow(playlist) { playlistId = playlist.id }
                             }
                             if (!showFavoritePlaylist && playlists.isEmpty() && folders.isEmpty() && visibleItems.isEmpty()) item("empty") {
                                 LibraryEmptyCategory(currentCategory, favoritesOnly, onCreate = { dialog = "playlist" })

@@ -9,12 +9,14 @@ import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.SimpleCache
+import io.github.kid141252010.fantastic.BuildConfig
 import io.github.kid141252010.fantastic.data.NeteaseAudio
 import io.github.kid141252010.fantastic.data.Prefs
 import io.github.kid141252010.fantastic.data.PlaybackCacheLimit
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.Track
+import java.io.DataInputStream
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.zip.CRC32
@@ -103,6 +105,7 @@ internal val PlaybackCacheEntry.isCompleteAppleAlac: Boolean
 
 internal class PlaybackCacheLease(val file: File, private val release: () -> Unit) : AutoCloseable {
     private val closed = AtomicBoolean()
+    override fun close() { if (closed.compareAndSet(false, true)) release() }
 }
 internal enum class AppleSegmentRangeMode { Verified, Serial }
 
@@ -268,6 +271,26 @@ internal class PlaybackCache(context: Context, private val prefs: Prefs, private
                 null
             }
         }
+
+    fun appleNetwork(key: PlaybackCacheKey): String? = synchronized(lock) { byKey[key]?.entry?.appleNetwork }
+
+    fun openAppleSegments(key: PlaybackCacheKey, track: AppleResolvedTrack): AppleSegmentCache {
+        require(key.source == Source.Apple && key.trackId == track.media.adamId)
+        val namespace = AppleSegmentNamespace(
+            id = UUID.randomUUID().toString(),
+            key = key,
+            adamId = track.media.adamId,
+            groupId = track.variant.groupId,
+            codecs = track.variant.codecs,
+            sampleRate = track.variant.sampleRate,
+            bitDepth = track.variant.bitDepth,
+            resourceUrl = track.media.resourceUrl.toString(),
+            segments = track.media.segments.map { segment ->
+                AppleSegmentRequestIdentity(segment.range.start, segment.range.end, segment.keyKind, segment.keyUri)
+            },
+        )
+        return AppleSegmentCache(this, namespace, track)
+    }
 
     private class SegmentCacheException(val safeReason: String) : IOException()
 
