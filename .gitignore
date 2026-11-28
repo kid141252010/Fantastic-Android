@@ -7,4 +7,13 @@ local.properties
 captures/
 .kotlin/
 .work/
-/applemusic.apk
+
+# 安装包、第三方应用分析与抓包产物，永不入库
+**/*.apk
+*.har
+*.pcap*
+**/ja[d]x-out/
+**/decompiled/
+**/*-reverse/
+# 仅忽略根目录日志；工作目录日志由上方 .work/ 规则覆盖
+/*.log

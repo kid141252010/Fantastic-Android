@@ -113,8 +113,7 @@ fun FantasticTheme(prefs: Prefs, content: @Composable () -> Unit) {
 }
 
 /**
- * 标签栏选中色：Android 12+ 用 Material You 动态取色（录屏里 Apple Music 跟随系统强调色，是蓝色），
- * 低版本用 Apple 蓝。
+ * 标签栏选中色：Android 12+ 用 Material You 动态取色，低版本用品牌蓝。
  */
 @Composable
 fun TabAccent(): Color {
