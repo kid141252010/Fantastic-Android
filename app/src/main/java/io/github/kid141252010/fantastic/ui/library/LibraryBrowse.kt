@@ -1,6 +1,19 @@
 package io.github.kid141252010.fantastic.ui.library
 
 import io.github.kid141252010.fantastic.data.fillRelationCountriesFrom
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import io.github.kid141252010.fantastic.ui.AmSongMoreButton
+import io.github.kid141252010.fantastic.ui.amLabelColor
+import io.github.kid141252010.fantastic.ui.amPageBackground
+import io.github.kid141252010.fantastic.ui.amSecondaryLabelColor
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,12 +76,12 @@ import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 internal enum class LibraryCategory(val title: String, val kind: String?, val icon: ImageVector) {
-    Playlists("歌单", "playlist", Icons.AutoMirrored.Rounded.QueueMusic),
+    Playlists("播放列表", "playlist", Icons.AutoMirrored.Rounded.QueueMusic),
     Artists("艺人", "artist", Icons.Rounded.Person),
     Albums("专辑", "album", Icons.Rounded.Album),
     Songs("歌曲", "song", Icons.Rounded.MusicNote),
-    Videos("音乐视频", "music-video", Icons.Rounded.VideoLibrary),
     Downloads("已下载", null, Icons.Rounded.Download),
+    Videos("音乐视频", "music-video", Icons.Rounded.VideoLibrary),
 }
 
 /** Album entries include saved songs with a known album ID. The projection never alters the snapshot. */
@@ -190,18 +203,15 @@ internal fun LibraryHome(
                     if (!floatingActions) actions()
                 }
             }
-            items(categories, key = { "category:${it.name}" }) { category ->
-                LibraryCoverCard(
-                    title = category.title,
-                    subtitle = "",
-                    artwork = null,
-                    icon = category.icon,
-                    onClick = { onCategory(category) },
-                )
+            item(key = "library-categories", span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.fillMaxWidth()) {
+                    categories.forEach { category -> LibraryCategoryRow(category) { onCategory(category) } }
+                }
             }
             if (notice != null) item(key = "notice", span = { GridItemSpan(maxLineSpan) }) { notice() }
             item(key = "recent-title", span = { GridItemSpan(maxLineSpan) }) {
-                Md3MediaSectionHeader("最近添加", modifier = Modifier)
+                Text("最近添加", Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 14.dp)
+                    .semantics { heading() }, color = amLabelColor(), style = MaterialTheme.typography.titleLarge)
             }
             if (snapshot.loading) item(key = "loading", span = { GridItemSpan(maxLineSpan) }) { LibraryLoading() }
             else if (recent.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
@@ -221,6 +231,27 @@ internal fun LibraryHome(
         }
         if (floatingActions) Row(Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = horizontalPadding),
             verticalAlignment = Alignment.CenterVertically, content = actions)
+    }
+
+
+}
+@Composable
+internal fun LibraryCategoryRow(category: LibraryCategory, onClick: () -> Unit) {
+    LibraryCategoryRow(category.title, category.icon, onClick)
+}
+
+@Composable
+internal fun LibraryCategoryRow(title: String, icon: ImageVector, onClick: () -> Unit) {
+    val categoryTextPadding = if (LocalConfiguration.current.screenWidthDp >= 600) 12.dp else 10.dp
+    val dividerColor = if (amPageBackground() == Color.Black) Color(0xA6545458) else Color(0x4A3C3C43)
+    Row(Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(40.dp), tint = amLabelColor())
+        Spacer(Modifier.width(5.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, Modifier.padding(vertical = categoryTextPadding), color = amLabelColor(),
+                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 22.sp).withUserFontWeight())
+            HorizontalDivider(thickness = .5.dp, color = dividerColor)
+        }
     }
 }
 
@@ -247,7 +278,7 @@ internal fun LibraryAlbumsGrid(
 }
 
 @Composable
-private fun LibraryCoverGrid(
+internal fun LibraryCoverGrid(
     modifier: Modifier,
     state: LazyGridState = rememberLazyGridState(),
     topPadding: Dp = 8.dp,
@@ -256,7 +287,7 @@ private fun LibraryCoverGrid(
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(128.dp),
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize().background(amPageBackground()),
         state = state,
         contentPadding = PaddingValues(start = horizontalPadding, end = horizontalPadding, top = topPadding,
             bottom = LocalBarsPadding.current.calculateBottomPadding() + 16.dp),
@@ -276,32 +307,27 @@ private fun CatalogCoverCard(entry: LibraryEntry, onCatalog: (CatalogHit) -> Uni
 }
 
 @Composable
-private fun LibraryCoverCard(
+internal fun LibraryCoverCard(
     title: String,
     subtitle: String,
     artwork: String?,
     icon: ImageVector,
     onOptions: (() -> Unit)? = null,
+    artworkShape: Shape = RoundedCornerShape(5.dp),
     onClick: () -> Unit,
 ) {
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-    ) {
-        Md3MediaArtwork(artwork, Modifier.fillMaxWidth().aspectRatio(1f), icon = icon)
+    Column(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Md3MediaArtwork(artwork, Modifier.fillMaxWidth().aspectRatio(1f), shape = artworkShape, icon = icon)
         Row(
             Modifier.fillMaxWidth().padding(start = 12.dp, end = if (onOptions == null) 12.dp else 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Text(title, style = MaterialTheme.typography.titleSmall, color = amLabelColor(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = amSecondaryLabelColor(),
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (onOptions != null) IconButton(onClick = onOptions) {
-                Icon(Icons.Rounded.MoreHoriz, "$title 更多操作")
-            }
+            if (onOptions != null) AmSongMoreButton(onClick = onOptions)
         }
     }
 }

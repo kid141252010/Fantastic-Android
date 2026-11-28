@@ -7,9 +7,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -30,10 +32,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
@@ -45,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.appAccentColors
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 
 @Composable
@@ -128,7 +133,6 @@ internal fun Md3MediaSectionHeader(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun Md3MediaRow(
     title: String,
@@ -141,30 +145,52 @@ internal fun Md3MediaRow(
     queueSwipeLabel: String? = null,
     onQueueSwipe: (() -> Unit)? = null,
 ) {
+    MediaRowInteraction(modifier, playing, onClick, queueSwipeLabel, onQueueSwipe) { rowModifier ->
+        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
+            rowModifier.clip(MaterialTheme.shapes.medium))
+    }
+}
+
+/** Input and accessibility only; each row owns its foreground geometry and color. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun MediaRowInteraction(
+    modifier: Modifier,
+    playing: Boolean,
+    onClick: (() -> Unit)?,
+    queueSwipeLabel: String?,
+    onQueueSwipe: (() -> Unit)?,
+    content: @Composable (Modifier) -> Unit,
+) {
     val swipeLabel = queueSwipeLabel?.takeIf { onQueueSwipe != null }
     if (swipeLabel == null) {
-        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
-            mediaRowModifier(modifier, playing, onClick))
+        content(mediaRowModifier(modifier, playing, onClick))
         return
     }
-
     val latestQueueSwipe = rememberUpdatedState(onQueueSwipe)
     val latestSwipeLabel = rememberUpdatedState(swipeLabel)
     val dismiss = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
         if (value == SwipeToDismissBoxValue.StartToEnd) latestQueueSwipe.value?.invoke()
         false
     })
+    val accent = appAccentColors()
     SwipeToDismissBox(
         state = dismiss,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().clipToBounds(),
         enableDismissFromStartToEnd = true,
         enableDismissFromEndToStart = false,
         backgroundContent = {
-            Box(
-                Modifier.fillMaxSize().background(Color(0xFF0088FF)).padding(horizontal = 20.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Text(latestSwipeLabel.value, color = Color.White, style = MaterialTheme.typography.labelLarge)
+            val revealed = if (dismiss.dismissDirection == SwipeToDismissBoxValue.Settled) 0.dp
+                else with(LocalDensity.current) { kotlin.math.abs(dismiss.requireOffset()).toDp() }
+            Box(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.CenterStart) {
+                if (revealed > 0.dp) {
+                    Box(Modifier.width(revealed).fillMaxHeight().clipToBounds()
+                        .background(accent.primary).padding(horizontal = 20.dp),
+                        contentAlignment = Alignment.CenterStart) {
+                        Text(latestSwipeLabel.value, color = accent.onPrimary,
+                            style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
+                    }
+                }
             }
         },
     ) {
@@ -172,8 +198,7 @@ internal fun Md3MediaRow(
             latestQueueSwipe.value?.invoke()
             true
         }
-        Md3MediaRowContent(title, subtitle, playing, leading, trailing,
-            mediaRowModifier(Modifier, playing, onClick, listOf(action)))
+        content(mediaRowModifier(Modifier, playing, onClick, listOf(action)))
     }
 }
 
@@ -189,7 +214,7 @@ private fun mediaRowModifier(
     playing: Boolean,
     onClick: (() -> Unit)?,
     accessibilityActions: List<CustomAccessibilityAction> = emptyList(),
-): Modifier = modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+): Modifier = modifier.fillMaxWidth()
     .then(if (onClick == null) Modifier else Modifier.clickable(role = Role.Button, onClick = onClick))
     .then(if (playing || accessibilityActions.isNotEmpty()) Modifier.semantics {
         if (playing) stateDescription = "当前曲目"
@@ -206,6 +231,7 @@ private fun Md3MediaRowContent(
     modifier: Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
+    val accent = appAccentColors()
     ListItem(
         headlineContent = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = if (subtitle.isNotBlank()) {
@@ -214,8 +240,8 @@ private fun Md3MediaRowContent(
         leadingContent = leading,
         trailingContent = trailing,
         colors = ListItemDefaults.colors(
-            containerColor = if (playing) colors.surfaceContainerHigh else Color.Transparent,
-            headlineColor = if (playing) colors.primary else colors.onSurface,
+            containerColor = if (playing) colors.surfaceVariant else colors.background,
+            headlineColor = if (playing) accent.primary else colors.onSurface,
         ),
         modifier = modifier,
     )

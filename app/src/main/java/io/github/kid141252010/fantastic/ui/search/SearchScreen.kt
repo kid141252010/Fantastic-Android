@@ -19,7 +19,6 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -66,6 +65,15 @@ import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.SearchCatalog
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
+import io.github.kid141252010.fantastic.data.LibraryKey
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.playback.DownloadStatus
+import io.github.kid141252010.fantastic.playback.OfflineDownload
+import io.github.kid141252010.fantastic.playback.mediaId
+import io.github.kid141252010.fantastic.ui.AmSongMoreButton
+import io.github.kid141252010.fantastic.ui.AmSongRow
+import io.github.kid141252010.fantastic.ui.AmSongRowStyle
+import io.github.kid141252010.fantastic.ui.amSecondaryLabelColor
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
@@ -129,6 +137,12 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
     }
     val result = if (selectedKind == null) overview else category
     val player by app.player.state.collectAsStateWithLifecycle()
+    val librarySnapshot by app.library.snapshot.collectAsStateWithLifecycle()
+    val downloadRecords by app.downloads.entries.collectAsStateWithLifecycle()
+    val favoriteKeys = remember(librarySnapshot.items) {
+        librarySnapshot.items.asSequence().filter { it.isFavorite }.mapTo(HashSet()) { it.key }
+    }
+    val downloadsByTrack = remember(downloadRecords) { downloadRecords.associateBy(OfflineDownload::key) }
     val focus = LocalFocusManager.current
     var handledRootNavigationRequest by rememberSaveable { mutableStateOf(rootNavigationRequest) }
     LaunchedEffect(rootNavigationRequest) {
@@ -302,19 +316,28 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                 if (editing && result.suggestions.isNotEmpty()) {
                     item("suggestions") { Md3MediaSectionHeader("搜索建议") }
                     items(result.suggestions, key = { "suggestion:${it.hit?.source}:${it.hit?.kind}:${it.hit?.id}:${it.query}" }) { suggestion ->
-                        Md3MediaRow(
-                            title = suggestion.title,
-                            subtitle = suggestion.hit?.subtitle.orEmpty(),
-                            leading = { Icon(Icons.Rounded.Search, contentDescription = null) },
-                            onClick = {
-                                if (source == Source.Apple && requestStorefront != app.prefs.storefront) return@Md3MediaRow
-                                focus.clearFocus()
-                                val hit = suggestion.hit
-                                if (hit?.track != null) app.player.play(hit.track)
-                                else if (hit != null) onOpen(hit)
-                                else suggestion.query?.let { query = it }
-                            },
-                        )
+                        val hit = suggestion.hit
+                        if (hit?.track != null) {
+                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack)
+                        } else {
+                            Md3MediaRow(
+                                title = suggestion.title,
+                                subtitle = hit?.let {
+                                    listOf(searchKindLabel(it.kind), it.subtitle).filter(String::isNotBlank).distinct().joinToString(" · ")
+                                }.orEmpty(),
+                                leading = {
+                                    if (hit == null) Icon(Icons.Rounded.Search, contentDescription = null)
+                                    else Md3MediaArtwork(hit.artwork, Modifier.size(48.dp),
+                                        shape = if (hit.kind == "artist") CircleShape else MaterialTheme.shapes.small)
+                                },
+                                trailing = if (hit == null) null else ({ Icon(Icons.Rounded.ChevronRight, contentDescription = null) }),
+                                onClick = {
+                                    if (source == Source.Apple && requestStorefront != app.prefs.storefront) return@Md3MediaRow
+                                    focus.clearFocus()
+                                    if (hit != null) onOpen(hit) else suggestion.query?.let { query = it }
+                                },
+                            )
+                        }
                     }
                 }
                 if (kind == null) {
@@ -332,7 +355,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                             }
                         }
                         items(group.items.take(previewLimit), key = { "${group.key}:${it.kind}:${it.id}" }) { hit ->
-                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen)
+                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack)
                         }
                     }
                     items(result.failures, key = { "failure:${it.kind.id}" }) { failure ->
@@ -343,7 +366,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                     }
                 } else {
                     items(result.items, key = { "${it.source}:${it.kind}:${it.id}" }) { hit ->
-                        SearchHitRow(app, hit, player, requestStorefront, focus, onOpen)
+                        SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack)
                     }
                 }
                 val noResults = if (kind == null) result.groups.isEmpty() && result.failures.isEmpty() else result.items.isEmpty()
@@ -374,6 +397,8 @@ private fun SearchHitRow(
     storefront: String,
     focus: FocusManager,
     onOpen: (CatalogHit) -> Unit,
+    favoriteKeys: Set<LibraryKey>,
+    downloadsByTrack: Map<String, OfflineDownload>,
 ) {
     val track = hit.track
     var actionsOpen by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
@@ -384,38 +409,64 @@ private fun SearchHitRow(
     val subtitle = if (track != null) track.artist else {
         listOf(searchKindLabel(hit.kind), hit.subtitle).filter { it.isNotBlank() }.distinct().joinToString(" · ")
     }
-    Md3MediaRow(
-        title = hit.title,
-        subtitle = subtitle,
-        playing = track != null && player.mediaId == "${track.source.mediaPrefix}:${track.id}",
-        queueSwipeLabel = queueLabel,
-        onQueueSwipe = if (track != null) ({
-            val latest = latestHit
-            if (latest.source != Source.Apple || latestStorefront == app.prefs.storefront) {
-                latest.track?.let { app.player.insertQueueItemsFromSwipe(listOf(it)) }
-            }
-        }) else null,
-        onClick = {
-            if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@Md3MediaRow
-            focus.clearFocus()
-            if (track != null) app.player.play(track) else onOpen(hit)
-        },
-        leading = {
-            Md3MediaArtwork(
-                hit.artwork ?: track?.artwork(120), Modifier.size(48.dp),
-                shape = if (hit.kind == "artist") CircleShape else MaterialTheme.shapes.small,
-            )
-        },
-        trailing = {
-            if (track == null) Icon(Icons.Rounded.ChevronRight, contentDescription = null)
-            else IconButton(onClick = {
-                if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@IconButton
-                focus.clearFocus(); actionsOpen = true
-            }) {
-                Icon(Icons.Rounded.MoreHoriz, "${hit.title}更多操作")
-            }
-        },
-    )
+    if (track != null) {
+        val libraryKey = LibraryKey(hit.source, "song", hit.id)
+        val country = if (track.source == Source.Apple)
+            track.country.normalizedAppleCountry() ?: storefront.normalizedAppleCountry() else null
+        val download = downloadsByTrack[track.mediaId]?.takeIf { country == null || it.storefront == country }
+        val downloadLabel = when (download?.status) {
+            DownloadStatus.Queued -> "等待下载"
+            DownloadStatus.Downloading -> download?.percent?.let { "正在下载 $it%" } ?: "正在下载"
+            DownloadStatus.Ready -> "已下载"
+            DownloadStatus.Failed -> "下载失败"
+            DownloadStatus.Cancelled -> "已取消"
+            null -> null
+        }
+        AmSongRow(
+            title = hit.title,
+            subtitle = subtitle,
+            style = AmSongRowStyle.Search,
+            artworkUrl = hit.artwork ?: track.artwork(120),
+            favorite = libraryKey in favoriteKeys,
+            playing = player.mediaId == track.mediaId,
+            onClick = {
+                if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@AmSongRow
+                focus.clearFocus()
+                app.player.play(track)
+            },
+            trailing = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    downloadLabel?.let { Text(it, color = amSecondaryLabelColor(), style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    AmSongMoreButton(onClick = {
+                        if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@AmSongMoreButton
+                        focus.clearFocus(); actionsOpen = true
+                    }, enabled = hit.source != Source.Apple || storefront == app.prefs.storefront)
+                }
+            },
+            queueSwipeLabel = queueLabel,
+            onQueueSwipe = {
+                val latest = latestHit
+                if (latest.source != Source.Apple || latestStorefront == app.prefs.storefront) {
+                    latest.track?.let { app.player.insertQueueItemsFromSwipe(listOf(it)) }
+                }
+            },
+        )
+    } else {
+        Md3MediaRow(
+            title = hit.title,
+            subtitle = subtitle,
+            onClick = {
+                if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@Md3MediaRow
+                focus.clearFocus(); onOpen(hit)
+            },
+            leading = {
+                Md3MediaArtwork(hit.artwork, Modifier.size(48.dp),
+                    shape = if (hit.kind == "artist") CircleShape else MaterialTheme.shapes.small)
+            },
+            trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
+        )
+    }
     if (track != null && actionsOpen && (hit.source != Source.Apple || storefront == app.prefs.storefront)) {
         GlassSheet(hit.title, onDismissRequest = { actionsOpen = false }, showHeader = false) {
             MediaActionContent(hit, app.library, listOf(track),
@@ -439,7 +490,6 @@ private fun SearchHitRow(
     }
 }
 
-
 private fun searchKindLabel(kind: String): String = when (kind.lowercase()) {
     "song", "songs" -> "歌曲"
     "album", "albums" -> "专辑"
@@ -448,3 +498,5 @@ private fun searchKindLabel(kind: String): String = when (kind.lowercase()) {
     "music-video", "music-videos", "mv" -> "音乐视频"
     else -> "详情"
 }
+
+

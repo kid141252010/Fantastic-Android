@@ -76,12 +76,55 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import java.net.URI
 import java.util.Locale
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.key
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import io.github.kid141252010.fantastic.playback.DownloadStatus
+import io.github.kid141252010.fantastic.playback.OfflineDownload
+import io.github.kid141252010.fantastic.ui.AmSongMoreButton
+import io.github.kid141252010.fantastic.ui.AmSongRow
+import io.github.kid141252010.fantastic.ui.AmSongRowStyle
+import io.github.kid141252010.fantastic.ui.GlassSheet
+import io.github.kid141252010.fantastic.ui.MediaActionContent
+import io.github.kid141252010.fantastic.ui.amLabelColor
+import io.github.kid141252010.fantastic.ui.amPageBackground
+import io.github.kid141252010.fantastic.ui.amSecondaryLabelColor
+import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 
 /** Native Apple editorial catalogue, using only the configured Fantastic server. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit, searchLanding: Boolean = false, modifier: Modifier = Modifier) {
-    val storefront = app.prefs.storefront
+    val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
+    val librarySnapshot by app.library.snapshot.collectAsStateWithLifecycle()
+    val downloads by app.downloads.entries.collectAsStateWithLifecycle()
+    val player by app.player.state.collectAsStateWithLifecycle()
+    val favoriteSongIds = remember(librarySnapshot) {
+        librarySnapshot.items.asSequence()
+            .filter { it.key.source == Source.Apple && it.key.kind == "song" && it.isFavorite }
+            .map { it.key.id }
+            .toSet()
+    }
+    val downloadsByMediaId = remember(downloads) {
+        downloads.associateBy { "${it.track.source.mediaPrefix}:${it.track.id}" }
+    }
+    val queueLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection)
+    val songRowState = remember(favoriteSongIds, downloadsByMediaId, player.mediaId, storefront, queueLabel) {
+        DiscoverySongRowState(favoriteSongIds, downloadsByMediaId, player.mediaId, storefront, queueLabel)
+    }
+    val carouselColumns = when {
+        LocalConfiguration.current.screenWidthDp >= 834 -> 3
+        LocalConfiguration.current.screenWidthDp >= 460 -> 2
+        else -> 1
+    }
     val initialArea = if (searchLanding) AREA_CATEGORIES else if (radio) AREA_RADIO else AREA_NEW
     var area by rememberSaveable(initialArea) { mutableStateOf(initialArea) }
     var stack by remember(initialArea) { mutableStateOf(emptyList<BrowseTarget>()) }
@@ -94,7 +137,9 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
     var error by remember { mutableStateOf<String?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
     var moreJob by remember { mutableStateOf<Job?>(null) }
+    var songOptionsEntry by remember { mutableStateOf<DiscoveryEntry?>(null) }
     val scope = rememberCoroutineScope()
+
     var handledRootNavigationRequest by rememberSaveable { mutableStateOf(rootNavigationRequest) }
     LaunchedEffect(rootNavigationRequest) {
         if (handledRootNavigationRequest != rootNavigationRequest) {
@@ -180,6 +225,18 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
         onOpen(SearchCatalog.appleHit(resource, country))
     }
 
+    fun playSong(entry: DiscoveryEntry) {
+        appleSongHitForCurrentCountry(entry, storefront)?.track?.let(app.player::play)
+    }
+
+    fun queueSong(entry: DiscoveryEntry) {
+        appleSongHitForCurrentCountry(entry, storefront)?.track?.let { app.player.insertQueueItemsFromSwipe(listOf(it)) }
+    }
+
+    fun showSongOptions(entry: DiscoveryEntry) {
+        if (appleSongHitForCurrentCountry(entry, storefront)?.track != null) songOptionsEntry = entry
+    }
+
     val title = when {
         target != null -> target.title
         radio -> "广播"
@@ -196,7 +253,7 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
     val bottom = if (searchLanding) LocalBarsPadding.current.calculateBottomPadding() + 20.dp else 20.dp
 
     LazyColumn(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize().background(amPageBackground()),
         contentPadding = PaddingValues(bottom = bottom),
     ) {
         if (target != null) item(key = "discovery-detail-heading") {
@@ -285,19 +342,43 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
                     }
                 }
                 itemsIndexed(current.sections, key = { index, section -> "${section.key}-$index" }) { _, section ->
-                    DiscoveryShelf(
-                        section = section,
-                        onSelect = { entry ->
-                            entry.resource?.let { openResource(it, entry.country) } ?: entry.target?.let(::openTarget)
-                        },
-                        onSeeAll = { section.seeAll?.let(::openTarget) },
-                        onChart = { kind ->
-                            area = AREA_CHARTS
-                            chartKind = kind
-                            chartCountry = section.country ?: current.country
-                            genreId = ALL_GENRES
-                        },
-                    )
+                    val fullSongChart = area == AREA_CHARTS && chartKind == "songs" && section.hasOnlySongEntries()
+                    if (fullSongChart) {
+                        Column(Modifier.fillMaxWidth()) {
+                            section.entries.forEach { entry ->
+                                key(entry.key) {
+                                    DiscoverySongRow(
+                                        entry = entry,
+                                        style = AmSongRowStyle.Chart,
+                                        state = songRowState,
+                                        modifier = Modifier.fillMaxWidth().padding(end = 16.dp),
+                                        onPlaySong = ::playSong,
+                                        onSongOptions = ::showSongOptions,
+                                        onQueueSong = ::queueSong,
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        DiscoveryShelf(
+                            section = section,
+                            onSelect = { entry ->
+                                entry.resource?.let { openResource(it, entry.country) } ?: entry.target?.let(::openTarget)
+                            },
+                            onPlaySong = ::playSong,
+                            onSongOptions = ::showSongOptions,
+                            onQueueSong = ::queueSong,
+                            onSeeAll = { section.seeAll?.let(::openTarget) },
+                            onChart = { kind ->
+                                area = AREA_CHARTS
+                                chartKind = kind
+                                chartCountry = section.country ?: current.country
+                                genreId = ALL_GENRES
+                            },
+                            songRowState = songRowState,
+                            carouselColumns = carouselColumns,
+                        )
+                    }
                 }
                 if (!current.next.isNullOrBlank()) {
                     item(key = "load-more") {
@@ -350,6 +431,41 @@ fun AppleDiscoveryScreen(app: FantasticApp, radio: Boolean, rootNavigationReques
             }
         }
     }
+    val menuEntry = songOptionsEntry
+    val menuHit = menuEntry?.let { appleSongHitForCurrentCountry(it, storefront) }
+    val menuTrack = menuHit?.track
+    LaunchedEffect(menuEntry, storefront) {
+        if (menuEntry != null && menuHit == null) songOptionsEntry = null
+    }
+    BackHandler(enabled = menuEntry != null) { songOptionsEntry = null }
+    if (menuEntry != null && menuHit != null && menuTrack != null) {
+        val dismissMenu = { songOptionsEntry = null }
+        GlassSheet(menuHit.title, onDismissRequest = dismissMenu, showHeader = false) {
+            MediaActionContent(
+                hit = menuHit,
+                library = app.library,
+                tracks = listOf(menuTrack),
+                onPlay = {
+                    dismissMenu()
+                    if (appleSongHitForCurrentCountry(menuEntry, app.prefs.storefrontState.value)?.track == menuTrack) {
+                        app.player.play(menuTrack)
+                    }
+                },
+                onView = {
+                    dismissMenu()
+                    appleSongHitForCurrentCountry(menuEntry, app.prefs.storefrontState.value)?.let(onOpen)
+                },
+                onOpenRelated = { related ->
+                    if (songOptionsEntry == menuEntry &&
+                        appleSongHitForCurrentCountry(menuEntry, app.prefs.storefrontState.value)?.track != null) {
+                        dismissMenu()
+                        onOpen(related)
+                    }
+                },
+                onDismiss = dismissMenu,
+            )
+        }
+    }
 }
 
 @Composable
@@ -361,33 +477,222 @@ private fun DiscoveryTab(label: String, selected: Boolean, onClick: () -> Unit) 
 private fun DiscoveryShelf(
     section: DiscoverySection,
     onSelect: (DiscoveryEntry) -> Unit,
+    onPlaySong: (DiscoveryEntry) -> Unit,
+    onSongOptions: (DiscoveryEntry) -> Unit,
+    onQueueSong: (DiscoveryEntry) -> Unit,
     onSeeAll: () -> Unit,
     onChart: (String) -> Unit,
+    songRowState: DiscoverySongRowState,
+    carouselColumns: Int,
 ) {
+    val isFourRowSongShelf = section.editorialKind == "327" && section.hasOnlySongEntries()
+    val linkedRoomTitle = isFourRowSongShelf && section.seeAll != null &&
+        section.entries.size > carouselColumns * 4
     Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
         Row(
             Modifier.fillMaxWidth().padding(start = Dimens.Page, end = Dimens.Page, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(section.title, Modifier.weight(1f),
-                style = LocalTextStyle.current.copy(fontSize = 20.sp, fontWeight = FontWeight.SemiBold).withUserFontWeight(FontWeightRole.Title))
-            section.seeAll?.let { TextButton(onClick = onSeeAll) { Text("查看全部") } }
+            if (linkedRoomTitle) {
+                Row(
+                    Modifier.weight(1f).clickable(role = Role.Button, onClick = onSeeAll),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        section.title,
+                        Modifier.weight(1f),
+                        color = amLabelColor(),
+                        style = LocalTextStyle.current.copy(fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            .withUserFontWeight(FontWeightRole.Title),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = amLabelColor())
+                }
+            } else {
+                Text(
+                    section.title,
+                    Modifier.weight(1f),
+                    color = amLabelColor(),
+                    style = LocalTextStyle.current.copy(fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                        .withUserFontWeight(FontWeightRole.Title),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!isFourRowSongShelf) section.seeAll?.let { TextButton(onClick = onSeeAll) { Text("查看全部") } }
+            }
             section.chartKind?.let { TextButton(onClick = { onChart(it) }) { Text("查看全部") } }
         }
         section.description?.let {
-            Text(it, Modifier.padding(horizontal = Dimens.Page, vertical = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(it, Modifier.padding(horizontal = Dimens.Page, vertical = 6.dp), color = amSecondaryLabelColor())
         }
         if (section.entries.isNotEmpty()) {
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = Dimens.Page),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                itemsIndexed(section.entries, key = { index, entry -> "${entry.key}-$index" }) { index, entry ->
-                    DiscoveryCard(entry, index, onClick = { onSelect(entry) })
+            when {
+                isFourRowSongShelf -> BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val density = LocalDensity.current
+                    val viewportPx = with(density) { maxWidth.roundToPx() }
+                    val peekPx = with(density) { 52.dp.roundToPx() }
+                    val columnWidthPx = (viewportPx - peekPx) / carouselColumns
+                    if (columnWidthPx > 0) {
+                        val columnWidth = with(density) { columnWidthPx.toDp() }
+                        val songColumns = section.entries.chunked(4)
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(start = 0.dp, end = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(0.dp),
+                        ) {
+                            itemsIndexed(songColumns, key = { _, column -> "song-column:${column.first().key}" }) { _, column ->
+                                Column(Modifier.width(columnWidth)) {
+                                    column.forEach { entry ->
+                                        key(entry.key) {
+                                            DiscoverySongRow(
+                                                entry = entry,
+                                                style = AmSongRowStyle.Shelf,
+                                                state = songRowState,
+                                                onPlaySong = onPlaySong,
+                                                onSongOptions = onSongOptions,
+                                                onQueueSong = onQueueSong,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = Dimens.Page),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            itemsIndexed(section.entries, key = { index, entry -> "${entry.key}-$index" }) { index, entry ->
+                                DiscoveryCard(entry, index, onClick = {
+                                    if (isSongEntry(entry)) onPlaySong(entry) else onSelect(entry)
+                                })
+                            }
+                        }
+                    }
+                }
+                section.entries.any(::isSongEntry) && !section.hasOnlySongEntries() -> BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val songRowWidth = maxWidth - Dimens.Page - Dimens.Page
+                    if (songRowWidth > 0.dp) {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = Dimens.Page),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            itemsIndexed(section.entries, key = { index, entry -> "${entry.key}-$index" }) { index, entry ->
+                                if (isSongEntry(entry)) {
+                                    DiscoverySongRow(
+                                        entry = entry,
+                                        style = AmSongRowStyle.Shelf,
+                                        state = songRowState,
+                                        modifier = Modifier.width(songRowWidth),
+                                        onPlaySong = onPlaySong,
+                                        onSongOptions = onSongOptions,
+                                        onQueueSong = onQueueSong,
+                                    )
+                                } else DiscoveryCard(entry, index, onClick = { onSelect(entry) })
+                            }
+                        }
+                    } else {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = Dimens.Page),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            itemsIndexed(section.entries, key = { index, entry -> "${entry.key}-$index" }) { index, entry ->
+                                DiscoveryCard(entry, index, onClick = {
+                                    if (isSongEntry(entry)) onPlaySong(entry) else onSelect(entry)
+                                })
+                            }
+                        }
+                    }
+                }
+                section.hasOnlySongEntries() -> Column(Modifier.fillMaxWidth()) {
+                    section.entries.forEach { entry ->
+                        key(entry.key) {
+                            DiscoverySongRow(
+                                entry = entry,
+                                style = AmSongRowStyle.Shelf,
+                                state = songRowState,
+                                onPlaySong = onPlaySong,
+                                onSongOptions = onSongOptions,
+                                onQueueSong = onQueueSong,
+                            )
+                        }
+                    }
+                }
+                else -> LazyRow(
+                    contentPadding = PaddingValues(horizontal = Dimens.Page),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    itemsIndexed(section.entries, key = { index, entry -> "${entry.key}-$index" }) { index, entry ->
+                        DiscoveryCard(entry, index, onClick = { onSelect(entry) })
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun DiscoverySongRow(
+    entry: DiscoveryEntry,
+    style: AmSongRowStyle,
+    state: DiscoverySongRowState,
+    modifier: Modifier = Modifier,
+    onPlaySong: (DiscoveryEntry) -> Unit,
+    onSongOptions: (DiscoveryEntry) -> Unit,
+    onQueueSong: (DiscoveryEntry) -> Unit,
+) {
+    val hit = remember(entry.resource, entry.country, state.storefront) {
+        appleSongHitForCurrentCountry(entry, state.storefront)
+    }
+    val track = hit?.track
+    val mediaId = track?.let { "${it.source.mediaPrefix}:${it.id}" }
+    val download = mediaId?.let(state.downloadsByMediaId::get)?.takeIf { record ->
+        record.track.source == Source.Apple &&
+            (record.track.country.normalizedAppleCountry() ?: record.storefront.normalizedAppleCountry()) ==
+            track?.country.normalizedAppleCountry()
+    }
+    val canPlay = track != null
+    AmSongRow(
+        title = entry.title,
+        subtitle = entry.subtitle,
+        style = style,
+        artworkUrl = entry.artwork,
+        rank = entry.rank,
+        favorite = entry.resource?.id?.let { it in state.favoriteSongIds } == true,
+        playing = mediaId != null && mediaId == state.playerMediaId,
+        modifier = modifier,
+        onClick = if (canPlay) ({ onPlaySong(entry) }) else null,
+        trailing = if (track != null) ({
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                when (download?.status) {
+                    DownloadStatus.Ready -> Icon(
+                        Icons.Rounded.DownloadDone,
+                        contentDescription = "已下载",
+                        modifier = Modifier.size(16.dp),
+                        tint = amSecondaryLabelColor(),
+                    )
+                    DownloadStatus.Queued -> CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = amSecondaryLabelColor(),
+                    )
+                    DownloadStatus.Downloading -> {
+                        val percent = download?.percent?.coerceIn(0, 100)
+                        if (percent == null) CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = amSecondaryLabelColor(),
+                        ) else Text("$percent%", color = amSecondaryLabelColor(), fontSize = 11.sp)
+                    }
+                    else -> Unit
+                }
+                AmSongMoreButton(onClick = { onSongOptions(entry) }, enabled = canPlay)
+            }
+        }) else null,
+        queueSwipeLabel = state.queueSwipeLabel.takeIf { canPlay },
+        onQueueSwipe = if (canPlay && state.queueSwipeLabel != null) ({ onQueueSong(entry) }) else null,
+    )
 }
 
 @Composable
@@ -476,7 +781,32 @@ private data class DiscoverySection(
     val seeAll: BrowseTarget? = null,
     val chartKind: String? = null,
     val country: String? = null,
+    val editorialKind: String? = null,
 )
+private data class DiscoverySongRowState(
+    val favoriteSongIds: Set<String>,
+    val downloadsByMediaId: Map<String, OfflineDownload>,
+    val playerMediaId: String?,
+    val storefront: String,
+    val queueSwipeLabel: String?,
+)
+
+private fun DiscoverySection.hasOnlySongEntries(): Boolean = entries.isNotEmpty() && entries.all(::isSongEntry)
+
+private fun isSongEntry(entry: DiscoveryEntry): Boolean = entry.resource?.type == "songs"
+
+private fun appleSongHitForCurrentCountry(entry: DiscoveryEntry, storefront: String): CatalogHit? {
+    val resource = entry.resource?.takeIf { it.type == "songs" } ?: return null
+    val entryCountry = entry.country.normalizedAppleCountry() ?: return null
+    val currentCountry = storefront.normalizedAppleCountry() ?: return null
+    if (entryCountry != currentCountry) return null
+    val hit = SearchCatalog.appleHit(resource, entryCountry)
+    val track = hit.track ?: return null
+    if (hit.source != Source.Apple || hit.kind != "song" || hit.id != resource.id ||
+        hit.country.normalizedAppleCountry() != currentCountry || track.source != Source.Apple ||
+        track.id != resource.id || track.country.normalizedAppleCountry() != currentCountry) return null
+    return hit
+}
 private data class DiscoveryModel(
     val sections: List<DiscoverySection>,
     val next: String? = null,
@@ -579,6 +909,7 @@ private fun editorialSection(element: AppleCatalogResource, index: Int, fallback
         description = description,
         seeAll = room,
         country = country,
+        editorialKind = kind,
     )
 }
 
