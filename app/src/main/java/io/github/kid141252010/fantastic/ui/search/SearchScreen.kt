@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -67,6 +69,8 @@ import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.data.LibraryKey
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.ui.library.searchLibrary
+import io.github.kid141252010.fantastic.ui.library.librarySubtitle
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.OfflineDownload
 import io.github.kid141252010.fantastic.playback.mediaId
@@ -85,7 +89,9 @@ import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
 import io.github.kid141252010.fantastic.playback.PlayerState
 import io.github.kid141252010.fantastic.ui.MediaActionContent
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 private val searchTabs = listOf(
     null to "综合", SearchCatalog.Kind.Artist to "艺人", SearchCatalog.Kind.Album to "专辑",
@@ -111,15 +117,19 @@ private class SearchResults(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit) {
+fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (CatalogHit) -> Unit,
+    onOpenLibraryAlbum: (CatalogHit) -> Unit = onOpen,
+    showLibrarySources: Boolean = app.prefs.showLibrarySources) {
     var query by rememberSaveable { mutableStateOf("") }
     var source by rememberSaveable { mutableStateOf(Source.Apple) }
+    var librarySelected by rememberSaveable { mutableStateOf(false) }
     var kind by rememberSaveable { mutableStateOf<SearchCatalog.Kind?>(null) }
     var editing by remember { mutableStateOf(false) }
     val term = query.trim()
     val selectedKind = kind
     val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
     val regions by app.appleRegions.state.collectAsStateWithLifecycle()
+    val librarySnapshot by app.library.snapshot.collectAsStateWithLifecycle()
     val requestStorefront = if (source == Source.Apple) storefront else ""
     val server = SourceStatus.normalizeBaseUrl(app.prefs.baseUrl)
     val regionEntry = regions.entries[server]
@@ -130,14 +140,13 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
     }
     var regionsOpen by remember { mutableStateOf(false) }
     val search = remember(app) { SearchCatalog(app.apple, app.netease, app.qq) }
-    val overview = remember(term, source, app.prefs.baseUrl, requestStorefront) { SearchResults() }
-    val category = remember(term, source, selectedKind, app.prefs.baseUrl, requestStorefront) {
+    val overview = remember(term, source, librarySelected, app.prefs.baseUrl, requestStorefront) { SearchResults() }
+    val category = remember(term, source, librarySelected, selectedKind, app.prefs.baseUrl, requestStorefront) {
         val seed = selectedKind?.let { selected -> overview.groups.firstOrNull { it.kind == selected } }
         SearchResults(seed?.items.orEmpty(), seed?.next, seed != null)
     }
     val result = if (selectedKind == null) overview else category
     val player by app.player.state.collectAsStateWithLifecycle()
-    val librarySnapshot by app.library.snapshot.collectAsStateWithLifecycle()
     val downloadRecords by app.downloads.entries.collectAsStateWithLifecycle()
     val favoriteKeys = remember(librarySnapshot.items) {
         librarySnapshot.items.asSequence().filter { it.isFavorite }.mapTo(HashSet()) { it.key }
@@ -154,15 +163,33 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
         }
     }
 
-    LaunchedEffect(result, result.pageRequest, selectedKind) {
+    LaunchedEffect(result, result.pageRequest, selectedKind, librarySelected, librarySnapshot.items, librarySnapshot.loading) {
         if (term.isEmpty()) return@LaunchedEffect
-        if (result.loaded && result.pageRequest == 0) return@LaunchedEffect
-        if (result.loaded && selectedKind != null && result.next == null) return@LaunchedEffect
-        if (result.pageRequest == 0) delay(330)
+        if (!librarySelected && result.loaded && result.pageRequest == 0) return@LaunchedEffect
+        if (!librarySelected && result.loaded && selectedKind != null && result.next == null) return@LaunchedEffect
+        if (librarySelected && librarySnapshot.loading) return@LaunchedEffect
+        if (result.pageRequest == 0) delay(if (librarySelected) 250 else 330)
         result.busy = true
         result.error = null
         try {
-            if (selectedKind == null) {
+            if (librarySelected) {
+                val groups = withContext(Dispatchers.Default) { searchLibrary(librarySnapshot, term) }.mapNotNull { group ->
+                    val kind = when (group.kind) {
+                        "artist" -> SearchCatalog.Kind.Artist
+                        "album" -> SearchCatalog.Kind.Album
+                        "song" -> SearchCatalog.Kind.Song
+                        else -> null
+                    } ?: return@mapNotNull null
+                    SearchCatalog.Group(group.kind, group.title, kind, group.items)
+                }
+                result.groups = groups
+                result.failures = emptyList()
+                if (selectedKind != null) {
+                    result.items = groups.firstOrNull { it.kind == selectedKind }?.items.orEmpty()
+                    result.next = null
+                }
+                result.loaded = true
+            } else if (selectedKind == null) {
                 val grouped = search.searchAll(source, term, requestStorefront)
                 result.groups = grouped.groups
                 result.failures = grouped.failures
@@ -187,8 +214,8 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
         }
     }
 
-    LaunchedEffect(result, editing) {
-        if (!editing || term.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(result, editing, librarySelected) {
+        if (librarySelected || !editing || term.isEmpty()) return@LaunchedEffect
         delay(220)
         try {
             result.suggestions = search.suggestions(source, term, requestStorefront)
@@ -235,7 +262,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                                 Icon(Icons.Rounded.Close, "清除搜索")
                             }
                         }
-                        if (source == Source.Apple) {
+                        if (source == Source.Apple && !librarySelected) {
                             Box {
                                 TextButton(
                                     onClick = { focus.clearFocus(); regionsOpen = true },
@@ -276,22 +303,37 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                 },
             )
         }
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 4.dp)) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+            .padding(horizontal = Dimens.Page, vertical = 4.dp)) {
             sources.forEachIndexed { index, (choice, title) ->
                 SegmentedButton(
-                    selected = source == choice,
+                    selected = !librarySelected && source == choice,
                     onClick = {
                         if (choice == Source.Netease && kind == SearchCatalog.Kind.Video) kind = null
                         regionsOpen = false
+                        librarySelected = false
                         source = choice
                     },
-                    shape = SegmentedButtonDefaults.itemShape(index, sources.size),
+                    shape = SegmentedButtonDefaults.itemShape(index, sources.size + 1),
                     icon = {},
                 ) { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
+            SegmentedButton(
+                selected = librarySelected,
+                onClick = {
+                    if (kind in setOf(SearchCatalog.Kind.Playlist, SearchCatalog.Kind.Video)) kind = null
+                    regionsOpen = false
+                    librarySelected = true
+                },
+                shape = SegmentedButtonDefaults.itemShape(sources.size, sources.size + 1),
+                icon = {},
+            ) { Text("资料库", maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
         if (term.isNotEmpty()) {
-            val tabs = remember(source) { searchTabs.filter { source != Source.Netease || it.first != SearchCatalog.Kind.Video } }
+            val tabs = remember(source, librarySelected) {
+                searchTabs.filter { (librarySelected || source != Source.Netease || it.first != SearchCatalog.Kind.Video) &&
+                    (!librarySelected || it.first in setOf(null, SearchCatalog.Kind.Artist, SearchCatalog.Kind.Album, SearchCatalog.Kind.Song)) }
+            }
             val selected = tabs.indexOfFirst { it.first == kind }.coerceAtLeast(0)
             SecondaryScrollableTabRow(selectedTabIndex = selected, edgePadding = Dimens.Page) {
                 tabs.forEach { (filter, label) ->
@@ -303,7 +345,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                 }
             }
         }
-        if (term.isEmpty() && !editing && source == Source.Apple) {
+        if (term.isEmpty() && !editing && source == Source.Apple && !librarySelected) {
             Box(Modifier.weight(1f)) {
                 key(storefront) {
                     AppleDiscoveryScreen(app, radio = false, rootNavigationRequest = rootNavigationRequest, onOpen = onOpen, searchLanding = true)
@@ -313,12 +355,19 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
         }
         key(result) {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = LocalBarsPadding.current) {
-                if (editing && result.suggestions.isNotEmpty()) {
+                if (librarySelected && librarySnapshot.loading) item("library-loading") {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
+                } else if (librarySelected && term.isEmpty()) item("library-prompt") {
+                    Md3EmptyState("搜索资料库", "输入关键词查找已保存的歌曲、艺人和专辑。", icon = Icons.Rounded.Search)
+                }
+                if (!librarySelected && editing && result.suggestions.isNotEmpty()) {
                     item("suggestions") { Md3MediaSectionHeader("搜索建议") }
                     items(result.suggestions, key = { "suggestion:${it.hit?.source}:${it.hit?.kind}:${it.hit?.id}:${it.query}" }) { suggestion ->
                         val hit = suggestion.hit
                         if (hit?.track != null) {
-                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack)
+                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack,
+                                librarySelected = librarySelected, onOpenLibraryAlbum = onOpenLibraryAlbum,
+                            showLibrarySources = showLibrarySources)
                         } else {
                             Md3MediaRow(
                                 title = suggestion.title,
@@ -354,8 +403,10 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                                 }
                             }
                         }
-                        items(group.items.take(previewLimit), key = { "${group.key}:${it.kind}:${it.id}" }) { hit ->
-                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack)
+                        items(group.items.take(previewLimit), key = { "${group.key}:${it.source}:${it.kind}:${it.id}" }) { hit ->
+                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack,
+                                librarySelected = librarySelected, onOpenLibraryAlbum = onOpenLibraryAlbum,
+                            showLibrarySources = showLibrarySources)
                         }
                     }
                     items(result.failures, key = { "failure:${it.kind.id}" }) { failure ->
@@ -366,8 +417,13 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                     }
                 } else {
                     items(result.items, key = { "${it.source}:${it.kind}:${it.id}" }) { hit ->
-                        SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack)
+                        SearchHitRow(app, hit, player, requestStorefront, focus, onOpen, favoriteKeys, downloadsByTrack,
+                            librarySelected = librarySelected, onOpenLibraryAlbum = onOpenLibraryAlbum,
+                            showLibrarySources = showLibrarySources)
                     }
+                }
+                if (librarySelected && librarySnapshot.persistenceError && result.loaded && result.groups.isEmpty()) item("library-error") {
+                    Md3EmptyState("资料库暂不可用", "本地资料库读取遇到问题。", icon = Icons.Rounded.ErrorOutline)
                 }
                 val noResults = if (kind == null) result.groups.isEmpty() && result.failures.isEmpty() else result.items.isEmpty()
                 val error = result.error
@@ -377,7 +433,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                     Md3EmptyState("搜索失败", error, icon = Icons.Rounded.ErrorOutline) {
                         FilledTonalButton(onClick = { result.pageRequest++ }) { Text("重试") }
                     }
-                } else if (result.loaded && noResults) item("empty") {
+                } else if (result.loaded && noResults && !(librarySelected && librarySnapshot.persistenceError)) item("empty") {
                     Md3EmptyState("没有搜索结果", "试试其他关键词或音乐来源。", icon = Icons.Rounded.Search)
                 } else if (kind != null && result.next != null) item("more") {
                     FilledTonalButton(onClick = { result.pageRequest++ }, modifier = Modifier.padding(Dimens.Page)) {
@@ -399,6 +455,9 @@ private fun SearchHitRow(
     onOpen: (CatalogHit) -> Unit,
     favoriteKeys: Set<LibraryKey>,
     downloadsByTrack: Map<String, OfflineDownload>,
+    librarySelected: Boolean = false,
+    onOpenLibraryAlbum: (CatalogHit) -> Unit = onOpen,
+    showLibrarySources: Boolean = false,
 ) {
     val track = hit.track
     var actionsOpen by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
@@ -406,8 +465,12 @@ private fun SearchHitRow(
     val latestStorefront by rememberUpdatedState(storefront)
     val queueLabel = if (track != null) queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null
     val latestOnOpen by rememberUpdatedState(onOpen)
-    val subtitle = if (track != null) track.artist else {
-        listOf(searchKindLabel(hit.kind), hit.subtitle).filter { it.isNotBlank() }.distinct().joinToString(" · ")
+    val subtitle = if (track != null) {
+        if (librarySelected) track.source.librarySubtitle(track.artist, showLibrarySources) else track.artist
+    } else {
+        val type = searchKindLabel(hit.kind)
+        val details = if (librarySelected) hit.source.librarySubtitle(hit.subtitle, showLibrarySources) else hit.subtitle
+        listOf(type, details).filter { it.isNotBlank() }.distinct().joinToString(" · ")
     }
     if (track != null) {
         val libraryKey = LibraryKey(hit.source, "song", hit.id)
@@ -430,7 +493,7 @@ private fun SearchHitRow(
             favorite = libraryKey in favoriteKeys,
             playing = player.mediaId == track.mediaId,
             onClick = {
-                if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@AmSongRow
+                if (!librarySelected && hit.source == Source.Apple && storefront != app.prefs.storefront) return@AmSongRow
                 focus.clearFocus()
                 app.player.play(track)
             },
@@ -439,15 +502,15 @@ private fun SearchHitRow(
                     downloadLabel?.let { Text(it, color = amSecondaryLabelColor(), style = MaterialTheme.typography.labelSmall,
                         maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     AmSongMoreButton(onClick = {
-                        if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@AmSongMoreButton
+                        if (!librarySelected && hit.source == Source.Apple && storefront != app.prefs.storefront) return@AmSongMoreButton
                         focus.clearFocus(); actionsOpen = true
-                    }, enabled = hit.source != Source.Apple || storefront == app.prefs.storefront)
+                    }, enabled = librarySelected || hit.source != Source.Apple || storefront == app.prefs.storefront)
                 }
             },
             queueSwipeLabel = queueLabel,
             onQueueSwipe = {
                 val latest = latestHit
-                if (latest.source != Source.Apple || latestStorefront == app.prefs.storefront) {
+                if (librarySelected || latest.source != Source.Apple || latestStorefront == app.prefs.storefront) {
                     latest.track?.let { app.player.insertQueueItemsFromSwipe(listOf(it)) }
                 }
             },
@@ -457,8 +520,9 @@ private fun SearchHitRow(
             title = hit.title,
             subtitle = subtitle,
             onClick = {
-                if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@Md3MediaRow
-                focus.clearFocus(); onOpen(hit)
+                if (!librarySelected && hit.source == Source.Apple && storefront != app.prefs.storefront) return@Md3MediaRow
+                focus.clearFocus()
+                if (librarySelected && hit.kind == "album") onOpenLibraryAlbum(hit) else onOpen(hit)
             },
             leading = {
                 Md3MediaArtwork(hit.artwork, Modifier.size(48.dp),
@@ -467,20 +531,20 @@ private fun SearchHitRow(
             trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
         )
     }
-    if (track != null && actionsOpen && (hit.source != Source.Apple || storefront == app.prefs.storefront)) {
+    if (track != null && actionsOpen && (librarySelected || hit.source != Source.Apple || storefront == app.prefs.storefront)) {
         GlassSheet(hit.title, onDismissRequest = { actionsOpen = false }, showHeader = false) {
             MediaActionContent(hit, app.library, listOf(track),
                 onPlay = {
                     actionsOpen = false
-                    if (hit.source != Source.Apple || storefront == app.prefs.storefront) app.player.play(track)
+                    if (hit.source != Source.Apple || librarySelected || storefront == app.prefs.storefront) app.player.play(track)
                 },
                 onView = {
                     actionsOpen = false
-                    if (hit.source != Source.Apple || storefront == app.prefs.storefront) onOpen(hit)
+                    if (hit.source != Source.Apple || librarySelected || storefront == app.prefs.storefront) onOpen(hit)
                 },
                 onOpenRelated = { related ->
                     if (actionsOpen && latestHit == hit && hit.kind == "song" &&
-                        (hit.source != Source.Apple || storefront == app.prefs.storefront)) {
+                        (librarySelected || hit.source != Source.Apple || storefront == app.prefs.storefront)) {
                         actionsOpen = false
                         latestOnOpen(related)
                     }

@@ -62,6 +62,9 @@ import io.github.kid141252010.fantastic.FantasticApp
 import io.github.kid141252010.fantastic.data.CatalogHit
 import io.github.kid141252010.fantastic.data.Source
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
+import io.github.kid141252010.fantastic.ui.library.LibraryAlbumScreen
+import io.github.kid141252010.fantastic.ui.library.libraryAlbumTracks
+import io.github.kid141252010.fantastic.ui.library.libraryAlbums
 import io.github.kid141252010.fantastic.ui.library.MusicLibraryScreen
 import io.github.kid141252010.fantastic.ui.browse.AppleDiscoveryScreen
 import io.github.kid141252010.fantastic.ui.player.AppleMediaScreen
@@ -128,13 +131,34 @@ fun AppShell(app: FantasticApp) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val storefront by app.prefs.storefrontState.collectAsStateWithLifecycle()
+    val librarySnapshot by app.library.snapshot.collectAsStateWithLifecycle()
+    val libraryAlbumEntries = remember(librarySnapshot.items) { libraryAlbums(librarySnapshot.items) }
+    var librarySearchAlbum by remember { mutableStateOf<CatalogHit?>(null) }
     var catalog by remember { mutableStateOf<CatalogHit?>(null) }
     var catalogStorefront by remember { mutableStateOf<String?>(null) }
     var catalogOpenRequest by remember { mutableStateOf(0) }
+    val glassSheetState = remember { mutableStateOf(false) }
+    val playerBackOwnership = remember { mutableStateOf(false) }
+    val player by playerConnection.state.collectAsStateWithLifecycle()
+    val playerExpanded = player.mediaId != null && nowPlaying
     fun openCatalog(hit: CatalogHit) {
         catalogStorefront = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() ?: app.prefs.storefront else null
         catalog = hit
         catalogOpenRequest++
+    }
+    fun openLibrarySearchAlbum(hit: CatalogHit) {
+        if (tab == Tab.Search && hit.kind == "album" && libraryAlbumEntries.any {
+                it.hit.source == hit.source && it.hit.id == hit.id
+            } && catalog == null && !settings && !playerExpanded && !glassSheetState.value && !playerBackOwnership.value) {
+            librarySearchAlbum = hit
+        }
+    }
+    fun closeLibrarySearchAlbum() { librarySearchAlbum = null }
+    LaunchedEffect(librarySearchAlbum, librarySnapshot.items, librarySnapshot.loading, tab) {
+        val target = librarySearchAlbum ?: return@LaunchedEffect
+        if (tab != Tab.Search || (!librarySnapshot.loading && libraryAlbumEntries.none {
+                it.hit.source == target.source && it.hit.id == target.id
+            })) closeLibrarySearchAlbum()
     }
     fun closeCatalog() {
         catalog = null
@@ -145,16 +169,12 @@ fun AppShell(app: FantasticApp) {
         if (catalog?.source == Source.Apple && catalog?.country.normalizedAppleCountry() == null && catalogStorefront != storefront) closeCatalog()
     }
     val appleMedia = visibleCatalog?.takeIf { it.source == Source.Apple && it.kind in setOf("music-video", "station", "post") }
-    val glassSheetState = remember { mutableStateOf(false) }
     val glassSheetVisibility = remember { { visible: Boolean -> glassSheetState.value = visible } }
-    val playerBackOwnership = remember { mutableStateOf(false) }
     val onPlayerBackOwnershipChange = remember { { ownsBack: Boolean -> playerBackOwnership.value = ownsBack } }
     val libraryBackEnabled = !playerBackOwnership.value && catalog == null && !settings
-    val player by playerConnection.state.collectAsStateWithLifecycle()
     remember { app.lyrics }
     val haze = remember { HazeState() }
     val hasTrack = player.mediaId != null
-    val playerExpanded = hasTrack && nowPlaying
     if (playerExpanded && playerPane == PlayerPane.Lyrics && !settings && appleMedia == null && !glassSheetState.value) {
         val view = LocalView.current
         LifecycleResumeEffect(view) {
@@ -178,10 +198,12 @@ fun AppShell(app: FantasticApp) {
             Box(Modifier.fillMaxSize()) {
                 Box(
                     Modifier.fillMaxSize().haze(haze).statusBarsPadding()
-                        .then(if (playerExpanded || settings || visibleCatalog != null) Modifier.clearAndSetSemantics {} else Modifier),
+                        .then(if (playerExpanded || settings || visibleCatalog != null || librarySearchAlbum != null) Modifier.clearAndSetSemantics {} else Modifier),
                 ) {
                     when (tab) {
-                        Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest, onOpen = ::openCatalog)
+                        Tab.Search -> SearchScreen(app, rootNavigationRequest = rootNavigationRequest,
+                            onOpen = ::openCatalog, onOpenLibraryAlbum = ::openLibrarySearchAlbum,
+                            showLibrarySources = showLibrarySources)
                         Tab.Library -> MusicLibraryScreen(app, showLibrarySources, rootNavigationRequest,
                             backEnabled = libraryBackEnabled, onOpen = ::openCatalog,
                             onOpenAlbumArtist = { hit, expectedRequest ->
@@ -199,7 +221,19 @@ fun AppShell(app: FantasticApp) {
                         Tab.Home -> Placeholder(tab, onSettings = { settings = true })
                     }
                 }
-                visibleCatalog?.takeIf { appleMedia == null }?.let { hit ->
+                val albumEntry = librarySearchAlbum?.let { target -> libraryAlbumEntries.firstOrNull {
+                    it.hit.source == target.source && it.hit.id == target.id
+                } }
+                if (albumEntry != null && tab == Tab.Search) {
+                    LibraryAlbumScreen(app, albumEntry, libraryAlbumTracks(albumEntry, librarySnapshot.items), showLibrarySources,
+                        backEnabled = !playerBackOwnership.value && catalog == null && !settings && !playerExpanded && !glassSheetState.value,
+                        onBack = ::closeLibrarySearchAlbum, onOpenCatalog = ::openCatalog,
+                        onOpenArtist = { hit ->
+                            if (tab == Tab.Search && librarySearchAlbum?.let { it.source == albumEntry.hit.source && it.id == albumEntry.hit.id } == true &&
+                                catalog == null && !settings && !playerExpanded && !playerBackOwnership.value && !glassSheetState.value) openCatalog(hit)
+                        })
+                }
+                visibleCatalog?.takeIf { appleMedia == null && albumEntry == null }?.let { hit ->
                     CatalogDetails(app, hit.source, hit.kind, hit.id, hit.country ?: catalogStorefront,
                         openRequest = catalogOpenRequest,
                         modifier = Modifier.fillMaxSize().haze(haze),
@@ -242,6 +276,7 @@ fun AppShell(app: FantasticApp) {
                                 selected = tab,
                                 onSelect = {
                                     closeCatalog()
+                                    closeLibrarySearchAlbum()
                                     settings = false
                                     tab = it
                                     rootNavigationRequest++
