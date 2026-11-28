@@ -25,12 +25,14 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Person
@@ -100,6 +102,7 @@ import io.github.kid141252010.fantastic.data.libraryTrackCount
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.toTrack
 import io.github.kid141252010.fantastic.data.toLibraryTracks
+import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
 import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.MediaActionContent
@@ -120,7 +123,6 @@ import io.github.kid141252010.fantastic.ui.amPageBackground
 import io.github.kid141252010.fantastic.ui.amSecondaryLabelColor
 import io.github.kid141252010.fantastic.ui.CollectionDownloads
 import io.github.kid141252010.fantastic.ui.DownloadStatusMark
-import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
 import io.github.kid141252010.fantastic.playback.DownloadStatus
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.playback.PlayerState
@@ -131,8 +133,8 @@ import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json

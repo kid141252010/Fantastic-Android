@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
@@ -51,6 +52,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -193,7 +196,8 @@ internal fun LibraryHome(
     }
     val gridState = rememberLazyGridState()
     val floatingActions by remember(gridState) { derivedStateOf { gridState.firstVisibleItemIndex > 0 } }
-    val horizontalPadding = if (LocalConfiguration.current.screenWidthDp < 360) 16.dp else Dimens.Page
+    val configuration = LocalConfiguration.current
+    val horizontalPadding = if (configuration.screenWidthDp < 360) 16.dp else Dimens.Page
     Box(modifier.fillMaxSize()) {
         LibraryCoverGrid(Modifier, state = gridState, topPadding = 0.dp, horizontalPadding = horizontalPadding) {
             item(key = "library_title_key", span = { GridItemSpan(maxLineSpan) }) {
@@ -204,7 +208,7 @@ internal fun LibraryHome(
                 }
             }
             item(key = "library-categories", span = { GridItemSpan(maxLineSpan) }) {
-                Column(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
                     categories.forEach { category -> LibraryCategoryRow(category) { onCategory(category) } }
                 }
             }

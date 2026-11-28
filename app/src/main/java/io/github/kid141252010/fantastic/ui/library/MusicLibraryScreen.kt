@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -37,15 +36,15 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ImportExport
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Shuffle
-import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
@@ -83,7 +82,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -125,6 +123,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import java.io.ByteArrayOutputStream
+import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import java.text.Collator
 
 /** Offline catalog library, favorites, local playlists and nested playlist folders. */
@@ -190,6 +189,10 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
             searchEditing = false
             focus.clearFocus()
             handledRootNavigationRequest = rootNavigationRequest
+            query = ""
+            debouncedQuery = ""
+            searchEditing = false
+            focus.clearFocus()
         }
     }
     val currentCategory = category
@@ -521,7 +524,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                             if (snapshot.loading) item("loading") { LibraryLoading() }
                             else {
                             item("playlist-header") {
-                                LibraryPlaylistHeader(app, selectedPlaylist, collectionTracks, collectionDownloads, snapshot.loading)
+                                LibraryPlaylistHeader(app, selectedPlaylist, collectionTracks, snapshot.loading)
                             }
                             if (selectedPlaylist.tracks.isEmpty()) item("empty") {
                                 Md3EmptyState("歌单为空", "在歌曲的更多菜单中选择“添加到歌单”。")
@@ -548,7 +551,7 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                             }
                             }
                         } else if (favoriteSongs) {
-                            item("favorite-header") { LibraryFavoriteSongsHeader(app, collectionTracks, collectionDownloads, snapshot.loading) }
+                            item("favorite-header") { LibraryFavoriteSongsHeader(app, collectionTracks, snapshot.loading) }
                             if (snapshot.loading) item("favorite-loading") { LibraryLoading() }
                             else if (collectionTracks.isEmpty()) item("empty") {
                                 Md3EmptyState("未添加歌曲", "喜爱的歌曲将在这里显示。", icon = LibraryCategory.Songs.icon)
@@ -906,10 +909,8 @@ private fun LibraryPlaylistHeader(
     app: FantasticApp,
     playlist: LibraryPlaylist,
     tracks: List<Track>,
-    downloads: io.github.kid141252010.fantastic.ui.CollectionDownloads,
     busy: Boolean,
 ) {
-    val allReady = downloads.tracks.isNotEmpty() && downloads.unavailableCount == 0 && downloads.readyCount == downloads.tracks.size
     AmCollectionHeader(
         artworkUrl = playlist.coverUrl(),
         title = playlist.name,
@@ -919,9 +920,6 @@ private fun LibraryPlaylistHeader(
         busy = busy,
         onPlay = if (tracks.isNotEmpty()) ({ app.player.playQueue(tracks, 0) }) else null,
         onShuffle = if (tracks.isNotEmpty()) ({ app.player.playQueue(tracks, 0, shuffle = true) }) else null,
-        onAction = if (downloads.tracks.isNotEmpty() && !allReady) ({ app.downloads.enqueue(downloads.tracks) }) else null,
-        actionLabel = "下载",
-        actionReady = allReady,
     )
 }
 
@@ -929,10 +927,8 @@ private fun LibraryPlaylistHeader(
 private fun LibraryFavoriteSongsHeader(
     app: FantasticApp,
     tracks: List<Track>,
-    downloads: io.github.kid141252010.fantastic.ui.CollectionDownloads,
     busy: Boolean,
 ) {
-    val allReady = downloads.tracks.isNotEmpty() && downloads.unavailableCount == 0 && downloads.readyCount == downloads.tracks.size
     AmCollectionHeader(
         artworkUrl = "android.resource://${LocalContext.current.packageName}/drawable/am_favorite_songs",
         title = "喜爱的歌曲",
@@ -942,9 +938,6 @@ private fun LibraryFavoriteSongsHeader(
         busy = busy,
         onPlay = if (tracks.isNotEmpty()) ({ app.player.playQueue(tracks, 0) }) else null,
         onShuffle = if (tracks.isNotEmpty()) ({ app.player.playQueue(tracks, 0, shuffle = true) }) else null,
-        onAction = if (downloads.tracks.isNotEmpty() && !allReady) ({ app.downloads.enqueue(downloads.tracks) }) else null,
-        actionLabel = "下载",
-        actionReady = allReady,
     )
 }
 
@@ -968,7 +961,10 @@ private fun PlaylistTrackRow(
     var menuOpen by remember { mutableStateOf(false) }
     val trailing: @Composable () -> Unit = {
         Box {
-            AmSongMoreButton(onClick = { menuOpen = true })
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (track.hit.kind == "song") DownloadStatusMark(downloadStatus)
+                AmSongMoreButton(onClick = { menuOpen = true })
+            }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("查看详情") }, onClick = { menuOpen = false; onOpen() })
                 DropdownMenuItem(text = { Text("上移") }, enabled = canMoveUp, onClick = { menuOpen = false; onUp() })
@@ -1008,10 +1004,6 @@ private fun playLibraryHit(app: FantasticApp, entry: LibraryEntry, visibleItems:
     if (index >= 0) app.player.playQueue(songs.map { asTrack(it.hit) }, index)
 }
 
-private fun playPlaylist(app: FantasticApp, playlist: LibraryPlaylist, shuffle: Boolean) {
-    val songs = playlist.tracks.filter { it.hit.kind == "song" }
-    if (songs.isNotEmpty()) app.player.playQueue(songs.map { asTrack(it.hit) }, 0, shuffle = shuffle)
-}
 
 private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: String) {
     val songs = playlist.tracks.filter { it.hit.kind == "song" }
@@ -1019,8 +1011,18 @@ private fun playPlaylistFrom(app: FantasticApp, playlist: LibraryPlaylist, uid: 
     if (selected >= 0) app.player.playQueue(songs.map { asTrack(it.hit) }, selected)
 }
 
-private fun asTrack(hit: CatalogHit): Track = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
-    ?: Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0, country = hit.country)
+private fun asTrack(hit: CatalogHit): Track {
+    val existing = hit.track?.takeIf { it.source == hit.source && it.id == hit.id }
+    if (existing != null) {
+        if (existing.source == Source.Apple && existing.country.normalizedAppleCountry() == null) {
+            val country = hit.country.normalizedAppleCountry()
+            if (country != null) return existing.copy(country = country)
+        }
+        return existing
+    }
+    return Track(hit.id, hit.source, hit.title, hit.subtitle, "", hit.artwork, 0,
+        country = if (hit.source == Source.Apple) hit.country.normalizedAppleCountry() else hit.country)
+}
 
 internal fun Source.librarySubtitle(subtitle: String, showSource: Boolean): String = when {
     !showSource -> subtitle

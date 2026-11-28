@@ -3,6 +3,7 @@ package io.github.kid141252010.fantastic.ui.theme
 import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -50,6 +51,7 @@ private val Dark = darkColorScheme(
 internal enum class FontWeightRole { Body, Title }
 
 internal val LocalFontWeights = staticCompositionLocalOf { FontWeights() }
+private val LocalAccentColors = staticCompositionLocalOf { Light }
 
 private fun TextStyle.withLocalAmFont(context: Context, customWeight: Int = 0): TextStyle {
     val weight = if (customWeight == 0) fontWeight?.weight ?: 400 else customWeight
@@ -85,6 +87,13 @@ internal fun TextStyle.withUserFontWeight(role: FontWeightRole = FontWeightRole.
 fun FantasticTheme(prefs: Prefs, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
+    val dark = isSystemInDarkTheme()
+    val colors = if (dark) Dark else Light
+    val accentColors = remember(context, configuration, dark) {
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        } else colors
+    }
     val weights by prefs.fontWeightsState.collectAsStateWithLifecycle()
     val typography = remember(context.assets, configuration.locales, configuration.fontScale,
         configuration.densityDpi, weights.body, weights.title) {
@@ -107,20 +116,11 @@ fun FantasticTheme(prefs: Prefs, content: @Composable () -> Unit) {
             labelSmall = defaults.labelSmall.withLocalAmFont(context, weights.body),
         )
     }
-    CompositionLocalProvider(LocalFontWeights provides weights) {
-        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) Dark else Light, typography = typography, content = content)
+    CompositionLocalProvider(LocalFontWeights provides weights, LocalAccentColors provides accentColors) {
+        MaterialTheme(colorScheme = colors, typography = typography, content = content)
     }
 }
 
-/**
- * 标签栏选中色：Android 12+ 用 Material You 动态取色，低版本用品牌蓝。
- */
+/** Shared system accent; page surfaces remain on the neutral theme. */
 @Composable
-fun TabAccent(): Color {
-    val dark = isSystemInDarkTheme()
-    if (Build.VERSION.SDK_INT >= 31) {
-        val context = LocalContext.current
-        return (if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)).primary
-    }
-    return if (dark) Color(0xFF0A84FF) else Color(0xFF007AFF)
-}
+internal fun appAccentColors(): ColorScheme = LocalAccentColors.current

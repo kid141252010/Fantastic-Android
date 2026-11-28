@@ -4,29 +4,22 @@ import androidx.compose.foundation.background
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Album
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.MoreHoriz
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
@@ -44,8 +37,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
@@ -66,10 +57,10 @@ import io.github.kid141252010.fantastic.data.albumMetadataRevision
 import io.github.kid141252010.fantastic.data.matchesAlbum
 import io.github.kid141252010.fantastic.data.LibraryKey
 import io.github.kid141252010.fantastic.data.libraryAlbumArtists
-import io.github.kid141252010.fantastic.playback.DownloadStatus
-import io.github.kid141252010.fantastic.playback.OfflineDownload
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.ui.Dimens
+import io.github.kid141252010.fantastic.ui.DownloadStatusMark
+import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3BackButton
@@ -84,9 +75,7 @@ import io.github.kid141252010.fantastic.ui.AmSongMoreButton
 import io.github.kid141252010.fantastic.ui.AmSongRow
 import io.github.kid141252010.fantastic.ui.AmSongRowStyle
 import io.github.kid141252010.fantastic.ui.CollectionDownloads
-import io.github.kid141252010.fantastic.ui.DownloadStatusMark
 import io.github.kid141252010.fantastic.ui.amPageBackground
-import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -157,7 +146,7 @@ internal fun LibraryAlbumScreen(
         orderLibraryAlbumTracks(savedTracks, metadata?.tracks ?: albumEntry.albumTracks)
     }
     val player by app.player.state.collectAsStateWithLifecycle()
-    val downloads = rememberCollectionDownloads(app, displayTracks, storefront)
+    val downloads = rememberCollectionDownloads(app, displayTracks, selectedStorefront)
     val favoriteKeys = remember(snapshot.items) {
         snapshot.items.asSequence().filter { it.hit.kind == "song" && it.isFavorite }.map { it.key }.toSet()
     }
