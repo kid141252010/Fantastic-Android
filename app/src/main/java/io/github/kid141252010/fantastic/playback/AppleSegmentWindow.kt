@@ -43,7 +43,11 @@ internal class AppleSegmentWindow(
             check(!closed) { "Apple segment window is closed" }
             if (index !in track.media.segments.indices) throw IOException("Apple 分片获取失败：HTTP 416")
             decrypt.segmentLookahead(track, legacyLookahead) // Failed resources cannot return even a held fragment.
-            if (index == heldIndex) return checkNotNull(held)
+            if (index == heldIndex) {
+                val bytes = checkNotNull(held)
+                decrypt.ensureSegmentHealthy(track)
+                return bytes
+            }
             if (heldIndex >= 0 && index != heldIndex + 1 || queued.isNotEmpty() && queued.first.index != index) reset()
             held = null
             heldIndex = -1
@@ -51,9 +55,11 @@ internal class AppleSegmentWindow(
             if (queued.isEmpty() && priority == AppleSegmentPriority.Playback) {
                 // The initial/seek target never waits for the speculative window to fill.
                 val bytes = withContext(Dispatchers.IO) { decrypt.fetchSegment(track, index, AppleSegmentPriority.Playback) }
+                decrypt.ensureSegmentHealthy(track)
                 hold(index, bytes)
                 next = index + 1
                 fill()
+                decrypt.ensureSegmentHealthy(track)
                 return bytes
             }
             if (queued.isEmpty()) {
@@ -62,12 +68,14 @@ internal class AppleSegmentWindow(
             }
             val pending = queued.first
             val bytes = pending.result.await()
+            decrypt.ensureSegmentHealthy(track)
             queued.removeFirst()
             queuedBytes -= pending.length
             setUrgentSegment(queued.peekFirst()?.index ?: -1)
             hold(index, bytes)
             // Replenish before parsing/muxing so that one writer overlaps network work.
             fill()
+            decrypt.ensureSegmentHealthy(track)
             return bytes
         } catch (error: Throwable) {
             setUrgentSegment(-1)

@@ -128,7 +128,7 @@ internal data class PlayerSheetFrame(
 private const val PlayerSheetHideFriction = .1f
 private const val PlayerSheetDefaultSignificantVelocity = 500f
 
-// Apple Music Android 7.0.0/1614: H2.d's ViewDragHelper interpolator.
+// Quintic deceleration for settling between player positions.
 internal val PlayerSheetSettleEasing: Easing = Easing { fraction ->
     val t = fraction - 1f
     t * t * t * t * t + 1f
@@ -143,7 +143,7 @@ private fun playerSheetReleaseVelocity(velocity: Float, configuration: ViewConfi
     )
 }
 
-/** BottomSheetBehavior.O plus the fit-to-contents release branches used by the player. */
+/** Choose the release position from velocity, drag distance, and content bounds. */
 internal fun playerSheetReleaseTarget(
     topPx: Float,
     xVelocity: Float,
@@ -205,7 +205,7 @@ private fun playerSheetAxisSettleDuration(
     return duration.coerceAtMost(600)
 }
 
-// Apple Music H2.d.i: distance/velocity weighted axes, capped at 600ms.
+// Weight each axis by distance or velocity and cap settling at 600ms.
 internal fun playerSheetSettleDuration(
     distanceX: Float,
     distanceY: Float,
@@ -838,7 +838,7 @@ internal fun PlayerSheetHost(
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                 if (source != NestedScrollSource.UserInput) return Offset.Zero
                 if (nestedPane.value == PlayerPane.Lyrics) {
-                    // Apple Music waits for three unconsumed touch moves at the upper edge.
+                    // Hand off after three unconsumed touch moves at the upper edge.
                     lyricsEdgeSteps = if (consumed.y == 0f && available.y > 0f && childAtTopState.value()) {
                         (lyricsEdgeSteps + 1).coerceAtMost(3)
                     } else 0

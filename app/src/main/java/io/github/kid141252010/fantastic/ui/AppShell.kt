@@ -70,7 +70,7 @@ import io.github.kid141252010.fantastic.ui.player.PlayerSheetHost
 import io.github.kid141252010.fantastic.ui.search.CatalogDetails
 import io.github.kid141252010.fantastic.ui.search.SearchScreen
 import io.github.kid141252010.fantastic.ui.settings.SettingsScreen
-import io.github.kid141252010.fantastic.ui.theme.TabAccent
+import io.github.kid141252010.fantastic.ui.theme.appAccentColors
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -269,13 +269,14 @@ fun AppShell(app: FantasticApp) {
     }
 }
 
-/** 悬浮玻璃标签栏：选中项用系统强调色（Material You 动态取色，录屏里是蓝色） */
+/** 悬浮玻璃标签栏：选中项用系统强调色（Material You 动态取色） */
 @Composable
 private fun TabBar(selected: Tab, onSelect: (Tab) -> Unit, enabled: Boolean = true) {
+    val accent = appAccentColors().primary
     Glass(CircleShape, Modifier.fillMaxWidth().height(Dimens.TabBarHeight)) {
         Row(Modifier.fillMaxSize().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
             Tab.entries.forEach { t ->
-                val color = if (t == selected) TabAccent() else MaterialTheme.colorScheme.onSurface
+                val color = if (t == selected) accent else MaterialTheme.colorScheme.onSurface
                 Column(
                     Modifier
                         .weight(1f)

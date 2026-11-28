@@ -1,15 +1,15 @@
 # Repository Guidelines
 
-## 第一要点（强制）：以原版 Apple Music 为准
+## 第一要点（强制）：以既定设计规格为准
 
-- 本项目所有内容及实现改动，包括界面、交互、歌词、动画、排版、时序和参数，必须以原版 Apple Music 为实现与验收基准，不得以个人偏好或自创方案替代。
-- 用户的提示词只是建议和宽泛的目标描述，不是精确规格，也不是具体参数的依据。不得完全顺从或机械照搬用户描述；必须先对照原版 Apple Music，依据核实后的实际行为与具体参数落实修改。用户描述与原版不一致时，应指出差异，不得直接按描述改造原版行为。
-- 修改前必须核对 Apple 官方资料或原版官方客户端、网页的可验证实现，明确参考平台、版本及参数来源。官方未公开的参数，只能依据原版的可复现测量或实现取证确定；不得把第三方仿制库、经验值或推测冒充 Apple 官方参数。
-- 缺少可核验证据时，保留相关现状并说明缺失的依据，不得猜测数值、编造参数、擅自采用自己的实现方式，或以“改进”为由偏离原版。
+- 界面、交互、歌词、动画、排版和时序以产品既定设计规格及已确认的项目行为为准，不以个人偏好替代。
+- 需求描述不等于精确参数。修改前核对相关设计文档与现有实现；描述与规格冲突时指出差异，再按确认后的规格执行。
+- 参数缺少依据时保留现状并说明缺失项，不猜测数值，不将经验值冒充已确认规格。
+- 不得提交第三方应用的分析或拆包资料、内部类名／方法名／资源名、样本哈希及抓包证据；参数只写数值与行为，不写内部出处。
 
 ## Project Overview
 
-Fantastic Android is a Kotlin and Jetpack Compose client for a user-configured Fantastic server. It supports Apple Music, QQ Music, and NetEase Cloud Music, with library, discovery, and radio screens. Home provides the settings entry point. [Features and setup](README.md)
+Fantastic Android is a Kotlin and Jetpack Compose client for a user-configured Fantastic server. It supports Apple Music, QQ Music, and NetEase Cloud Music, with library, discovery, and radio screens. Home provides the settings entry point. [Features and setup](README.md), [Usage guide](docs/usage.md)
 
 ## Architecture & Data Flow
 
@@ -45,7 +45,7 @@ The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Set `sdk.dir` in i
 
 Build the unsigned release APK with `gradle :app:assembleRelease`. Align `app/build/outputs/apk/release/app-release-unsigned.apk` with `zipalign`, then sign it with `apksigner` and the existing release key. The signing certificate must match the previous release for an in-place update.
 
-For a local build with fonts, place SF Pro plus the complete local-only `pingfang.ttc`, `hiragino_sans.ttc`, and `apple_sd_gothic_neo.ttc` collections under the ignored `.work/local-am-fonts/assets/am-fonts/` directory and use `-PincludeLocalAmFonts=true`; missing required assets stop the build. Use `-PincludeLocalAmFonts=false` for Android system fonts. On Android 10 and later, lyrics and app text share the [Apple-recommended CJK families](https://support.apple.com/zh-cn/guide/pages/tanfbd4156e/mac): PingFang SC for simplified Chinese, TC for Taiwan, HK for Hong Kong and Macau, Hiragino Sans for Japanese, and Apple SD Gothic Neo for Korean. App locale determines Han glyph forms and family order; CJK uses the collections' real static weights, not SF Pro variation axes. Keep TTC face order consistent with `LocalAmFonts.kt`, store TTC assets uncompressed, and do not track private fonts in Git. Android 8 and 9 use system CJK fallbacks.
+For local font assets, preparation, build switches, fallback families, and weight mappings, see [Fonts and local packaging](docs/fonts.md). Keep private fonts out of Git; public CI uses Android system fonts.
 
 ## 提交与 APK 交付
 
@@ -83,7 +83,7 @@ For a local build with fonts, place SF Pro plus the complete local-only `pingfan
 - `.github/workflows/android.yml`: CI APK build and nightly publication.
 - The [lyrics renderer guide](app/src/main/assets/lyrics/README.md) describes the parser contract, timing and layout.
 - `data/MusicLibrary.kt`, `ui/library/MusicLibraryScreen.kt`: local catalog library state and UI.
-- `ui/player/AppleMediaScreen.kt` and `ui/browse/AppleDiscoveryScreen.kt` handle media pages and discovery. [Player behavior and device acceptance](APPLE_MUSIC_PARITY.md)
+- `ui/player/AppleMediaScreen.kt` and `ui/browse/AppleDiscoveryScreen.kt` handle media pages and discovery. [Player behavior and device acceptance](docs/player-behavior.md)
 
 ## Runtime/Tooling Preferences
 

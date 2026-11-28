@@ -7,7 +7,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** Apple Music Android 7.0.0 (1614): C4022z, Q2.e, p236lc.y and X9.a. */
+/** Shared lyric timing, typography, and animation curves. */
 internal object LyricMotion {
     val line = PathInterpolator(.4f, .1f, 0f, 1f)
     val emphasis = PathInterpolator(.25f, .1f, .25f, 1f)
@@ -22,34 +22,34 @@ internal object LyricMotion {
     const val foreground = 240
     const val background = 89
     const val waiting = 46
-    const val legacyMainSp = 20f // Lyrics_body / Title3Emphasized
-    const val legacyStaticLineHeightSp = 26f // lyrics_line_static
-    const val karaokeMainSp = 34f // lyrics_line_text_size
-    const val backgroundSp = 22f // lyrics_line_secondary_text_size
-    const val karaokePronunciationSp = 20f // lyrics_word_pronunciation / Title3Emphasized
-    const val backgroundPronunciationSp = 14f // lyrics_word_pronunciation_bg / SubheadBoldShort
-    const val pronunciationRowPaddingDp = 8f // lyrics_pronunciation_line_break_padding_vert
+    const val legacyMainSp = 20f
+    const val legacyStaticLineHeightSp = 26f
+    const val karaokeMainSp = 34f
+    const val backgroundSp = 22f
+    const val karaokePronunciationSp = 20f
+    const val backgroundPronunciationSp = 14f
+    const val pronunciationRowPaddingDp = 8f
     const val secondaryTextAlpha = 115 // Player credits and attribution, not karaoke translation masks.
-    const val legacyTranslationColor = 0x99ebebf5.toInt() // lyrics_body / secondary_label_color_dark
+    const val legacyTranslationColor = 0x99ebebf5.toInt()
     const val legacyTranslationAlpha = legacyTranslationColor ushr 24
-    const val mainAnnotationTrackingEm = -46f / 2048f // sf_font_tracking_font_units at 20sp
+    const val mainAnnotationTrackingEm = -46f / 2048f
     const val backgroundAnnotationTrackingEm = -22f / 2048f // 14sp
     const val legacyTranslationTrackingEm = -32f / 2048f // 15sp
-    const val karaokeTranslationSp = 20f // lyrics_translation_line_karaoke -> Title3Emphasized
-    const val backgroundTranslationSp = 14f // lyrics_bg_translation_line_karaoke -> SubheadBoldShort
-    const val legacyTranslationSp = 15f // lyrics_body -> SubheadEmphasized
-    const val karaokeTranslationMarginDp = 10f // smaller_margin_10
-    const val backgroundTranslationMarginDp = 2f // smaller_margin_2
+    const val karaokeTranslationSp = 20f
+    const val backgroundTranslationSp = 14f
+    const val legacyTranslationSp = 15f
+    const val karaokeTranslationMarginDp = 10f
+    const val backgroundTranslationMarginDp = 2f
     const val legacyTranslationMarginDp = 4f
-    const val scaleEnterDelayMs = 150L // X.O, BR.friendsSetting
+    const val scaleEnterDelayMs = 150L
     const val scaleEnterMs = 500L
-    const val scaleExitDelayMs = 50L // U.W scale reset
+    const val scaleExitDelayMs = 50L
     const val scaleExitMs = 350L
-    const val lineAlphaEnterDelayMs = 250L // U0.V
-    const val lineAlphaExitDelayMs = 250L // U0.V, BR.isSeeAllInvisible
+    const val lineAlphaEnterDelayMs = 250L
+    const val lineAlphaExitDelayMs = 250L
     const val lineAlphaEnterMs = 250L
-    const val lineAlphaExitMs = 350L // U0.V, BR.queueItem
-    const val backingEnterDelayFraction = .85f // C4022z.j0
+    const val lineAlphaExitMs = 350L
+    const val backingEnterDelayFraction = .85f
     const val backingEnterMs = 500L // scale + alpha
     const val backingExitScaleMs = 500L
     const val backingExitAlphaMs = 250L
@@ -111,7 +111,7 @@ internal object LyricMotion {
         return start * (1f - emphasis.getInterpolation(fraction(t - release, attack)))
     }
 
-    /** Width to add to the main sweep, before the end-of-wrapped-band rush. C4022z.d0. */
+    /** Width to add to the main sweep, before the end-of-wrapped-band rush. */
     fun featherExtension(cjk: Boolean, terminal: Boolean, grouped: Boolean, length: Int, total: Int,
         pairedExpansion: Boolean, flexParent: Boolean): Float = when {
         cjk && !pairedExpansion -> 0f
@@ -122,7 +122,7 @@ internal object LyricMotion {
         else -> .25f
     }
 
-    // X9.a: every sample of the original pulse, not a fitted replacement curve.
+    // Full sample table for the interlude pulse curve.
     private val pulse = floatArrayOf(
         0f, .0005f, .002f, .004f, .007f, .01f, .0138f, .02f, .026f, .032f, .039f,
         .048f, .058f, .071f, .086f, .102f, .119f, .135f, .153f, .172f, .194f,

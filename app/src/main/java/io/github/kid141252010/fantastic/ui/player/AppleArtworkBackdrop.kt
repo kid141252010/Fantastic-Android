@@ -95,7 +95,7 @@ internal class PrewarmedArtwork(
     var elapsedNanos: Long = 0L
 }
 
-/** Apple Music's LyricsBackgroundLayerView, rendered without owning Coil's bitmap. */
+/** Layered artwork backdrop rendered without owning Coil's bitmap. */
 @Composable
 internal fun AppleArtworkBackdrop(
     artwork: String?,
@@ -132,7 +132,7 @@ internal fun AppleArtworkBackdrop(
         }
     }
 
-    // repeatOnLifecycle gives the same pause/resume boundary as the original view's visibility owner.
+    // Pause and resume animation with the visible lifecycle.
     LaunchedEffect(current, lifecycle, movingArtwork) {
         fadeNanos = if (current == null || !animationsEnabled || previous == null) FADE_NANOS else 0L
         if (current == null || !movingArtwork) return@LaunchedEffect
@@ -154,8 +154,8 @@ internal fun AppleArtworkBackdrop(
     }
 
     val dark = androidx.compose.foundation.isSystemInDarkTheme()
-    val blackScrim = if (dark) .50f else .30f // lyrics_bg_layer_black_scrim
-    val whiteScrim = if (dark) .05f else .10f // lyrics_bg_layer_white_scrim
+    val blackScrim = if (dark) .50f else .30f
+    val whiteScrim = if (dark) .05f else .10f
     val densityDpi = context.resources.configuration.densityDpi
     val downscale = if (reducedEffects) 72f else if (densityDpi >= 420) 24f else 16f
     val saturation = if (reducedEffects) 3.5f else 2.5f
@@ -252,7 +252,7 @@ private class ArtworkBuffers {
         third.postRotate(angle3, widthF * .5f, heightF * .5f)
         canvas.drawBitmap(source, third, imagePaint)
 
-        // Exact light/dark resource scrims: black_alpha_30/50 followed by white_alpha_10/5.
+        // Apply the light/dark black scrim first, then the white scrim.
         canvas.drawColor(Color.Black.copy(alpha = blackScrim).toArgb())
         canvas.drawColor(Color.White.copy(alpha = whiteScrim).toArgb())
         val output = blurred ?: return raw!!

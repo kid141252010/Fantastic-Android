@@ -66,6 +66,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
+import io.github.kid141252010.fantastic.ui.theme.appAccentColors
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -81,7 +82,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.runtime.snapshotFlow
 
-/** Geometry: APK new_fragment_player_queue_view, layout_player_buttons and small_list_d_upnext_item. */
+/** Queue pane geometry. */
 @Composable
 internal fun QueuePane(
     state: PlayerState,
@@ -190,6 +191,8 @@ internal fun QueuePane(
                 confirmButton = { TextButton(onClick = { player.clearUpcoming(revision); clearRevision = null }) { Text("清除") } },
                 dismissButton = { TextButton(onClick = { clearRevision = null }) { Text("取消") } })
         }
+        // The active group heading stays in a separate sticky container.
+        // No history section is fabricated from playlist indices before the current item.
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().queueBottomFade(controlsInset).then(contentFade),
@@ -254,6 +257,7 @@ private fun QueueRow(
     onSelect: () -> Unit,
     onRemove: () -> Unit,
 ) {
+    val accent = appAccentColors()
     val remove by rememberUpdatedState(onRemove)
     val dismiss = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
         if (value != SwipeToDismissBoxValue.Settled) remove()
@@ -268,9 +272,9 @@ private fun QueueRow(
             Box(Modifier.fillMaxSize(), contentAlignment =
                 if (direction == SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart else Alignment.CenterEnd) {
                 Box(Modifier.width(width).height(60.dp).clipToBounds()
-                    .background(Color(0xFF0088FF)).padding(horizontal = 16.dp),
+                    .background(accent.primary).padding(horizontal = 16.dp),
                     contentAlignment = if (direction == SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart else Alignment.CenterEnd) {
-                    Icon(Icons.Default.Delete, "移除", tint = Color.White)
+                    Icon(Icons.Default.Delete, "移除", tint = accent.onPrimary)
                 }
             }
         }) {
@@ -305,7 +309,7 @@ private fun QueueRow(
 
 private fun Modifier.queueBottomFade(controlsInset: Dp): Modifier =
     graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }.drawWithCache {
-        // NewPlayerQueueViewFragment.W1: 16dp fade followed by transparent controls overlap.
+        // 16dp fade followed by transparent controls overlap.
         val end = (size.height - controlsInset.toPx()).coerceAtLeast(0f)
         val start = (end - 16.dp.toPx()).coerceAtLeast(0f)
         val mask = Brush.verticalGradient(listOf(Color.Black, Color.Transparent), startY = start, endY = end.coerceAtLeast(start + 1f))

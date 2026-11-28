@@ -1,31 +1,25 @@
 package io.github.kid141252010.fantastic.ui.library
+import androidx.compose.foundation.background
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Album
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.MoreHoriz
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
@@ -43,8 +37,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
@@ -63,11 +55,12 @@ import io.github.kid141252010.fantastic.data.librarySongHit
 import io.github.kid141252010.fantastic.data.normalizedAppleCountry
 import io.github.kid141252010.fantastic.data.albumMetadataRevision
 import io.github.kid141252010.fantastic.data.matchesAlbum
+import io.github.kid141252010.fantastic.data.LibraryKey
 import io.github.kid141252010.fantastic.data.libraryAlbumArtists
-import io.github.kid141252010.fantastic.playback.DownloadStatus
-import io.github.kid141252010.fantastic.playback.OfflineDownload
 import io.github.kid141252010.fantastic.playback.mediaId
 import io.github.kid141252010.fantastic.ui.Dimens
+import io.github.kid141252010.fantastic.ui.DownloadStatusMark
+import io.github.kid141252010.fantastic.ui.rememberCollectionDownloads
 import io.github.kid141252010.fantastic.ui.GlassSheet
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3BackButton
@@ -77,6 +70,12 @@ import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
 import io.github.kid141252010.fantastic.ui.MediaActionContent
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
+import io.github.kid141252010.fantastic.ui.AmCollectionHeader
+import io.github.kid141252010.fantastic.ui.AmSongMoreButton
+import io.github.kid141252010.fantastic.ui.AmSongRow
+import io.github.kid141252010.fantastic.ui.AmSongRowStyle
+import io.github.kid141252010.fantastic.ui.CollectionDownloads
+import io.github.kid141252010.fantastic.ui.amPageBackground
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -147,14 +146,10 @@ internal fun LibraryAlbumScreen(
         orderLibraryAlbumTracks(savedTracks, metadata?.tracks ?: albumEntry.albumTracks)
     }
     val player by app.player.state.collectAsStateWithLifecycle()
-    val downloads by app.downloads.entries.collectAsStateWithLifecycle()
-    val downloadsByTrack = remember(downloads) { downloads.associateBy(OfflineDownload::key) }
-    fun downloadFor(track: Track): OfflineDownload? {
-        val download = downloadsByTrack[track.mediaId] ?: return null
-        val country = if (track.source == Source.Apple) track.country.normalizedAppleCountry() else null
-        return download.takeIf { country == null || it.storefront == country }
+    val downloads = rememberCollectionDownloads(app, displayTracks, selectedStorefront)
+    val favoriteKeys = remember(snapshot.items) {
+        snapshot.items.asSequence().filter { it.hit.kind == "song" && it.isFavorite }.map { it.key }.toSet()
     }
-    val readyCount = displayTracks.count { downloadFor(it)?.status == DownloadStatus.Ready }
     val hasMultipleDiscs = remember(displayTracks) { displayTracks.any { it.discNumber > 1 } }
     var menuTrackId by remember(albumEntry.stableKey) { mutableStateOf<String?>(null) }
     val menuTrack = displayTracks.firstOrNull { it.id == menuTrackId }
@@ -196,47 +191,35 @@ internal fun LibraryAlbumScreen(
         }
     }
     BackHandler(enabled = backEnabled && menuTrack == null, onBack = onBack)
-    Column(Modifier.fillMaxSize()) {
-        TopAppBar(title = { Text("专辑") }, navigationIcon = { Md3BackButton(onBack) }, windowInsets = WindowInsets(0, 0, 0, 0))
+    Column(Modifier.fillMaxSize().background(amPageBackground())) {
+        TopAppBar(title = { Text("专辑") }, navigationIcon = { Md3BackButton(onBack) }, windowInsets = WindowInsets(0, 0, 0, 0),
+            colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(containerColor = amPageBackground()))
         LazyColumn(
-            Modifier.fillMaxWidth().weight(1f),
+            Modifier.fillMaxWidth().weight(1f).background(amPageBackground()),
             contentPadding = PaddingValues(bottom = LocalBarsPadding.current.calculateBottomPadding() + 16.dp),
         ) {
             item("header") {
-                Column(
-                    Modifier.fillMaxWidth().padding(horizontal = Dimens.Page, vertical = 16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Md3MediaArtwork(album.artwork, Modifier.widthIn(max = 260.dp).fillMaxWidth(.72f).aspectRatio(1f),
-                        shape = MaterialTheme.shapes.large, icon = Icons.Rounded.Album)
-                    Text(album.title, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
-                    val artistName = album.subtitle.ifBlank { metadata?.albumArtist.orEmpty() }
-                    val subtitle = album.source.librarySubtitle(artistName, showLibrarySources)
-                    if (subtitle.isNotBlank()) Text(subtitle, textAlign = TextAlign.Center,
-                        modifier = if (artistName.isNotBlank()) Modifier.clickable(
-                            enabled = backEnabled && menuTrackId == null && !artistOpening,
-                            role = Role.Button, onClickLabel = "查看艺人",
-                        ) {
-                            artistOpenError = null
-                            artistOpenCommit = onOpenArtist
-                        } else Modifier)
-                    val artistStatus = if (artistOpening) "正在读取艺人信息…" else artistOpenError
-                    if (artistStatus != null) Text(artistStatus, textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${savedTracks.size} 首已保存 · $readyCount 首已下载", style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (savedTracks.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Button(onClick = { app.player.playQueue(displayTracks, 0) }) {
-                            Icon(Icons.Rounded.PlayArrow, contentDescription = null)
-                            Text("播放", Modifier.padding(start = 8.dp))
-                        }
-                        FilledTonalIconButton(onClick = { app.downloads.enqueue(displayTracks) }, enabled = readyCount < displayTracks.size) {
-                            Icon(Icons.Rounded.Download, "下载已保存曲目")
-                        }
-                    }
-                }
+                val artistName = album.subtitle.ifBlank { metadata?.albumArtist.orEmpty() }
+                val subtitle = album.source.librarySubtitle(artistName, showLibrarySources)
+                val artistStatus = if (artistOpening) "正在读取艺人信息…" else artistOpenError
+                val allReady = downloads.tracks.isNotEmpty() && downloads.unavailableCount == 0 && downloads.readyCount == downloads.tracks.size
+                AmCollectionHeader(
+                    artworkUrl = album.artwork,
+                    title = album.title,
+                    subtitle = subtitle,
+                    caption = "${savedTracks.size} 首已保存 · ${downloads.readyCount} 首已下载",
+                    description = artistStatus.orEmpty(),
+                    busy = artistOpening,
+                    onSubtitle = if (artistName.isNotBlank() && backEnabled && menuTrackId == null) ({
+                        artistOpenError = null
+                        artistOpenCommit = onOpenArtist
+                    }) else null,
+                    onPlay = if (displayTracks.isNotEmpty()) ({ app.player.playQueue(displayTracks, 0) }) else null,
+                    onShuffle = if (displayTracks.isNotEmpty()) ({ app.player.playQueue(displayTracks, 0, shuffle = true) }) else null,
+                    onAction = if (downloads.tracks.isNotEmpty() && !allReady) ({ app.downloads.enqueue(downloads.tracks) }) else null,
+                    actionLabel = "下载已保存曲目",
+                    actionReady = allReady,
+                )
             }
             if (snapshot.persistenceError) item("library_persistence_error") {
                 Text("本地资料库保存失败，重新启动后可能需要再次读取专辑信息。", Modifier.padding(horizontal = Dimens.Page, vertical = 12.dp),
@@ -244,36 +227,24 @@ internal fun LibraryAlbumScreen(
             }
             if (savedTracks.isEmpty()) item("empty") { Md3EmptyState("没有已保存的曲目", "", icon = Icons.Rounded.Album) }
             itemsIndexed(displayTracks, key = { _, track -> track.mediaId }) { index, track ->
-                val download = downloadFor(track)
                 val number = track.trackNumber.takeIf { it > 0 }?.let {
                     if (hasMultipleDiscs && track.discNumber > 0) "${track.discNumber}-$it" else it.toString()
                 }
-                Md3MediaRow(
+                AmSongRow(
                     title = track.title,
                     subtitle = track.source.librarySubtitle(track.artist, showLibrarySources),
+                    style = AmSongRowStyle.AlbumNumbered,
+                    artworkUrl = null,
+                    trackNumber = number,
+                    favorite = LibraryKey(track.source, "song", track.id) in favoriteKeys,
                     playing = player.mediaId == track.mediaId,
                     queueSwipeLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection),
                     onQueueSwipe = { app.player.insertQueueItemsFromSwipe(listOf(track)) },
                     onClick = { app.player.playQueue(displayTracks, index) },
-                    leading = {
-                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                            if (number != null) Text(number, style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    },
                     trailing = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            when (download?.status) {
-                                DownloadStatus.Ready -> Icon(Icons.Rounded.CheckCircle, "已下载", Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                DownloadStatus.Queued, DownloadStatus.Downloading -> CircularProgressIndicator(
-                                    Modifier.size(16.dp).semantics {
-                                        contentDescription = if (download.status == DownloadStatus.Queued) "等待下载" else "正在下载"
-                                    }, strokeWidth = 2.dp,
-                                )
-                                else -> Unit
-                            }
-                            IconButton(onClick = { menuTrackId = track.id }) { Icon(Icons.Rounded.MoreHoriz, "${track.title}更多操作") }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            DownloadStatusMark(downloads.status(track))
+                            AmSongMoreButton(onClick = { menuTrackId = track.id })
                         }
                     },
                 )
