@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Album
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MusicNote
@@ -32,7 +31,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
@@ -60,7 +58,6 @@ import io.github.kid141252010.fantastic.ui.Dimens
 import io.github.kid141252010.fantastic.ui.LocalBarsPadding
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
-import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
 import io.github.kid141252010.fantastic.ui.theme.FontWeightRole
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
@@ -171,6 +168,9 @@ internal fun LibraryHome(
     showLibrarySources: Boolean,
 ) {
     val showVideos = remember(snapshot.items) { snapshot.items.any { it.hit.kind == "music-video" } }
+    val categories = remember(showVideos) {
+        LibraryCategory.entries.filter { it != LibraryCategory.Videos || showVideos }
+    }
     val recent = remember(albums, snapshot.items, snapshot.playlists) {
         buildList<RecentCollection> {
             albums.forEach { add(RecentCollection.Catalog(it)) }
@@ -190,20 +190,14 @@ internal fun LibraryHome(
                     if (!floatingActions) actions()
                 }
             }
-            item(key = "categories", span = { GridItemSpan(maxLineSpan) }) {
-                Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                    Column {
-                        for (category in LibraryCategory.entries) {
-                            if (category == LibraryCategory.Videos && !showVideos) continue
-                            Md3MediaRow(
-                                title = category.title,
-                                onClick = { onCategory(category) },
-                                leading = { Icon(category.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                                trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null) },
-                            )
-                        }
-                    }
-                }
+            items(categories, key = { "category:${it.name}" }) { category ->
+                LibraryCoverCard(
+                    title = category.title,
+                    subtitle = "",
+                    artwork = null,
+                    icon = category.icon,
+                    onClick = { onCategory(category) },
+                )
             }
             if (notice != null) item(key = "notice", span = { GridItemSpan(maxLineSpan) }) { notice() }
             item(key = "recent-title", span = { GridItemSpan(maxLineSpan) }) {

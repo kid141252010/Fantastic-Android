@@ -19,8 +19,9 @@ internal data class PlaybackSnapshot(
     val current: Int? = null,
     val shuffle: Boolean = false,
     val repeat: Int = Player.REPEAT_MODE_OFF,
+    val queueSectionStartIndex: Int = -1,
+    val queueSectionEndIndex: Int = -1,
 )
-
 /** Queue edits and transport checkpoints are independent, so a position update never encodes a playlist. */
 internal class PlaybackStore(context: Context, private val settings: Prefs) {
     private val prefs = context.getSharedPreferences("fantastic-playback", Context.MODE_PRIVATE)
@@ -40,7 +41,16 @@ internal class PlaybackStore(context: Context, private val settings: Prefs) {
         if (saved.songs.size != ids.size || saved.order.size != ids.size || saved.order.toSet() != ids || selected == null || selected !in ids) {
             return modes
         }
-        return saved.copy(current = selected, repeat = modes.repeat)
+        val sectionStart = saved.queueSectionStartIndex
+        val sectionEnd = saved.queueSectionEndIndex
+        val validSection = sectionStart == -1 && sectionEnd == -1 ||
+            sectionStart in saved.order.indices && sectionEnd in saved.order.indices && sectionStart <= sectionEnd
+        return saved.copy(
+            current = selected,
+            repeat = modes.repeat,
+            queueSectionStartIndex = if (validSection) sectionStart else -1,
+            queueSectionEndIndex = if (validSection) sectionEnd else -1,
+        )
     }
 
     fun position(uid: Int?): Long = if (uid != null && prefs.getInt("positionUid", -1) == uid)

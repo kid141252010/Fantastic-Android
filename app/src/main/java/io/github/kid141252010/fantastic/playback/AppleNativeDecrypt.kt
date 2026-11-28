@@ -16,9 +16,14 @@ import io.github.kid141252010.fantastic.data.SourceStatus
 import io.github.kid141252010.fantastic.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -526,14 +531,33 @@ internal class AppleNativeDecrypt(
         if (rangeIdentities[resource]?.mode == AppleRangeMode.Failed) throw IOException("Apple 分片获取失败：HTTP 502")
     }
 
-    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int, job: Long): ByteArray {
+    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int, job: Long): ByteArray = supervisorScope {
         val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
-        val bytes = fetchRange(track.media, segment.range, "Apple 分片获取失败", segment = true, job = job, index = index)
-        if (segment.keyKind == KeyKind.WIDEVINE) return bytes
-        val handle = when (segment.keyKind) {
-            KeyKind.PREFETCH -> prefetchHandle()
-            KeyKind.TRACK -> templateHandle(track.media.adamId, segment.keyUri!!)
-            else -> 0L
+        val bytes: ByteArray
+        val handle: Long
+        if (segment.keyKind == KeyKind.TRACK) {
+            val range = async {
+                fetchRange(track.media, segment.range, "Apple 分片获取失败", segment = true, job = job, index = index)
+            }
+            val template = async { templateHandle(track.media.adamId, checkNotNull(segment.keyUri)) }
+            try {
+                // Observe either failure/cancellation immediately, even while the other branch waits.
+                select<Unit> {
+                    range.onAwait { }
+                    template.onAwait { }
+                }
+                bytes = range.await()
+                handle = template.await()
+            } finally {
+                withContext(NonCancellable) {
+                    range.cancelAndJoin()
+                    template.cancelAndJoin()
+                }
+            }
+        } else {
+            bytes = fetchRange(track.media, segment.range, "Apple 分片获取失败", segment = true, job = job, index = index)
+            if (segment.keyKind == KeyKind.WIDEVINE) return@supervisorScope bytes
+            handle = if (segment.keyKind == KeyKind.PREFETCH) prefetchHandle() else 0L
         }
         val samples = scanFragment(bytes, handle != 0L)
         for (sample in samples) {
@@ -548,7 +572,7 @@ internal class AppleNativeDecrypt(
             }
             track.alacConfig?.let { repairAlacEnd(bytes, sample, it) }
         }
-        return bytes
+        bytes
     }
     internal fun sampleRanges(fragment: ByteArray): List<AppleSampleRange> = scanFragment(fragment, sanitizeEncryption = false)
 

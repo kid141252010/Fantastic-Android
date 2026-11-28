@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -100,6 +101,62 @@ internal fun QueuePane(
     var dragOffset by remember(state.queueRevision) { mutableFloatStateOf(0f) }
     var clearRevision by remember { mutableStateOf<Long?>(null) }
     val canReorder = state.canEditQueue
+    val sectionEnd = rows.indexOfFirst { !it.inQueueSection }.let { if (it < 0) rows.size else it }
+
+    fun LazyListScope.addQueueRows(entries: List<QueueEntry>) {
+        items(entries, key = { it.occurrence }) { entry ->
+            val position = rows.indexOf(entry)
+            val actions = buildList {
+                if (state.canEditQueue) add(CustomAccessibilityAction("从待播队列移除") {
+                    player.removeQueue(entry.index, state.queueRevision); true
+                })
+                if (canReorder && position > 0) add(CustomAccessibilityAction("上移") {
+                    player.moveQueue(entry.index, rows[position - 1].index, state.queueRevision); true
+                })
+                if (canReorder && position < rows.lastIndex) add(CustomAccessibilityAction("下移") {
+                    player.moveQueue(entry.index, rows[position + 1].index, state.queueRevision); true
+                })
+            }
+            val handle = if (canReorder) Modifier.pointerInput(entry.index, state.queueRevision) {
+                detectDragGestures(
+                    onDragStart = { draggedIndex = entry.index; dragOffset = 0f },
+                    onDragCancel = { draggedIndex = -1; dragOffset = 0f; rows = state.upNext },
+                    onDragEnd = {
+                        val destination = rows.indexOfFirst { it.index == draggedIndex }
+                        val target = state.upNext.getOrNull(destination)
+                        if (target != null) player.moveQueue(draggedIndex, target.index, state.queueRevision)
+                        draggedIndex = -1
+                        dragOffset = 0f
+                    },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        dragOffset += amount.y
+                        val visible = listState.layoutInfo.visibleItemsInfo
+                        val active = visible.firstOrNull { it.key == entry.occurrence }
+                        if (active != null) {
+                            val center = active.offset + active.size / 2f + dragOffset
+                            val target = visible.firstOrNull { center >= it.offset && center < it.offset + it.size }
+                            val from = rows.indexOfFirst { it.index == entry.index }
+                            val to = rows.indexOfFirst { it.occurrence == target?.key }
+                            if (from >= 0 && to >= 0 && from != to) {
+                                rows = rows.toMutableList().apply { add(to, removeAt(from)) }
+                                dragOffset -= (target!!.offset - active.offset)
+                            }
+                        }
+                    },
+                )
+            } else Modifier
+            QueueRow(entry, state.canSelectQueue, state.canEditQueue,
+                Modifier.zIndex(if (draggedIndex == entry.index) 1f else 0f)
+                    .graphicsLayer { translationY = if (draggedIndex == entry.index) dragOffset else 0f }
+                    .semantics { customActions = actions },
+                handle = handle,
+                reorderEnabled = canReorder,
+                onSelect = { player.selectQueue(entry.index, state.queueRevision) },
+                onRemove = { player.removeQueue(entry.index, state.queueRevision) })
+        }
+    }
+
     Column(modifier.fillMaxSize()) {
         header()
         Spacer(Modifier.height(16.dp))
@@ -118,11 +175,9 @@ internal fun QueuePane(
             QueueModeButton(PlayerSymbol.ModeAutoplay, "自动播放不可用：Fantastic 未提供推荐队列", false, false,
                 Modifier.weight(1f), unavailable = true)
         }
-        Row(Modifier.fillMaxWidth().padding(start = 32.dp, end = 20.dp).then(contentFade),
+        Row(Modifier.fillMaxWidth().height(48.dp).padding(start = 32.dp, end = 20.dp).then(contentFade),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("继续播放", Modifier.weight(1f).padding(vertical = 14.dp),
-                color = Color.White.copy(alpha = .94f),
-                style = LocalTextStyle.current.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium).withUserFontWeight(FontWeightRole.Title))
+            Spacer(Modifier.weight(1f))
             if (rows.isNotEmpty() && state.canEditQueue) {
                 TextButton(onClick = { clearRevision = state.queueRevision }) {
                     Text("清除队列", color = Color.White.copy(alpha = .65f), fontSize = 13.sp)
@@ -142,63 +197,28 @@ internal fun QueuePane(
             modifier = Modifier.weight(1f).fillMaxWidth().queueBottomFade(controlsInset).then(contentFade),
             contentPadding = PaddingValues(bottom = controlsInset + 16.dp),
         ) {
+            if (sectionEnd > 0) {
+                item("queue-section-heading") { QueueGroupHeader("队列") }
+                addQueueRows(rows.subList(0, sectionEnd))
+            }
+            if (sectionEnd < rows.size) {
+                item("continuation-section-heading") { QueueGroupHeader("继续播放") }
+                addQueueRows(rows.subList(sectionEnd, rows.size))
+            }
             if (rows.isEmpty()) item {
                 Text("没有待播歌曲", Modifier.padding(horizontal = 32.dp),
                     color = Color.White.copy(alpha = .45f), fontSize = 17.sp)
             }
-            items(rows, key = { it.occurrence }) { entry ->
-                val position = rows.indexOf(entry)
-                val actions = buildList {
-                    if (state.canEditQueue) add(CustomAccessibilityAction("从待播队列移除") {
-                        player.removeQueue(entry.index, state.queueRevision); true
-                    })
-                    if (canReorder && position > 0) add(CustomAccessibilityAction("上移") {
-                        player.moveQueue(entry.index, rows[position - 1].index, state.queueRevision); true
-                    })
-                    if (canReorder && position < rows.lastIndex) add(CustomAccessibilityAction("下移") {
-                        player.moveQueue(entry.index, rows[position + 1].index, state.queueRevision); true
-                    })
-                }
-                val handle = if (canReorder) Modifier.pointerInput(entry.index, state.queueRevision) {
-                    detectDragGestures(
-                        onDragStart = { draggedIndex = entry.index; dragOffset = 0f },
-                        onDragCancel = { draggedIndex = -1; dragOffset = 0f; rows = state.upNext },
-                        onDragEnd = {
-                            val destination = rows.indexOfFirst { it.index == draggedIndex }
-                            val target = state.upNext.getOrNull(destination)
-                            if (target != null) player.moveQueue(draggedIndex, target.index, state.queueRevision)
-                            draggedIndex = -1
-                            dragOffset = 0f
-                        },
-                        onDrag = { change, amount ->
-                            change.consume()
-                            dragOffset += amount.y
-                            val visible = listState.layoutInfo.visibleItemsInfo
-                            val active = visible.firstOrNull { it.key == entry.occurrence }
-                            if (active != null) {
-                                val center = active.offset + active.size / 2f + dragOffset
-                                val target = visible.firstOrNull { center >= it.offset && center < it.offset + it.size }
-                                val from = rows.indexOfFirst { it.index == entry.index }
-                                val to = rows.indexOfFirst { it.occurrence == target?.key }
-                                if (from >= 0 && to >= 0 && from != to) {
-                                    rows = rows.toMutableList().apply { add(to, removeAt(from)) }
-                                    dragOffset -= (target!!.offset - active.offset)
-                                }
-                            }
-                        },
-                    )
-                } else Modifier
-                QueueRow(entry, state.canSelectQueue, state.canEditQueue,
-                    Modifier.zIndex(if (draggedIndex == entry.index) 1f else 0f)
-                        .graphicsLayer { translationY = if (draggedIndex == entry.index) dragOffset else 0f }
-                        .semantics { customActions = actions },
-                    handle = handle,
-                    reorderEnabled = canReorder,
-                    onSelect = { player.selectQueue(entry.index, state.queueRevision) },
-                    onRemove = { player.removeQueue(entry.index, state.queueRevision) })
-            }
         }
     }
+}
+
+@Composable
+private fun QueueGroupHeader(title: String) {
+    Text(title, Modifier.fillMaxWidth().padding(start = 32.dp, end = 20.dp, top = 14.dp, bottom = 8.dp),
+        color = Color.White.copy(alpha = .94f),
+        style = LocalTextStyle.current.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium)
+            .withUserFontWeight(FontWeightRole.Title))
 }
 
 @Composable

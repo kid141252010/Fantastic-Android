@@ -91,7 +91,7 @@ class LyricsController(
                     lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                         while (isActive) {
                             sync()
-                            delay(500)
+                            delay(if (player.state.value.mediaId?.startsWith("apple:") == true) 100L else 500L)
                         }
                     }
                 }
@@ -416,7 +416,7 @@ class LyricsController(
         val state = player.state.value
         val seek = state.seekGeneration != lastSeekGeneration
         lastSeekGeneration = state.seekGeneration
-        view.sync(player.position(), state.isPlaying, seek)
+        view.sync(player.position(), state.isPlaying, seek, followOutput = state.mediaId?.startsWith("apple:") == true)
     }
 
     private fun fail(id: String?, message: String, diagnostics: String = message) {

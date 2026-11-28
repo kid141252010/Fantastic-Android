@@ -40,9 +40,9 @@ android {
         applicationId = "io.github.kid141252010.fantastic"
         minSdk = 26
         targetSdk = 35
-        val releaseVersionCode = 18
+        val releaseVersionCode = 20
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt()?.coerceAtLeast(releaseVersionCode) ?: releaseVersionCode
-        versionName = "1.5.2"
+        versionName = "1.6.1"
         // 设置页「歌词诊断」显示构建对应的提交，便于确认手机上装的是哪个 nightly
         buildConfigField("String", "GIT_SHA", "\"${(System.getenv("GITHUB_SHA") ?: "local").take(7)}\"")
     }
@@ -121,4 +121,6 @@ dependencies {
     // 玻璃效果：背后内容模糊（API 31+ RenderEffect，低版本退化为半透明底色）
     implementation("dev.chrisbanes.haze:haze:1.1.1")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
+
+    testImplementation("junit:junit:4.13.2")
 }

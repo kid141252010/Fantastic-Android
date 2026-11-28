@@ -3,9 +3,7 @@ package io.github.kid141252010.fantastic.playback
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
-import android.media.AudioFormat
 import android.media.AudioManager
-import android.media.AudioTrack
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -13,13 +11,17 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.Prefs
@@ -31,11 +33,13 @@ import io.github.kid141252010.fantastic.data.reportedAudioDetails
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -142,19 +146,20 @@ internal class ApplePlaybackEngine(
     private class AlacRun(
         val serial: Long,
         val generation: Int,
-        val output: AudioTrack,
+        var output: AudioSink,
         val handle: Long,
         val sampleRate: Int,
         val channels: Int,
         val bits: Int,
         val cacheFileId: String?,
         val startPositionMs: Long,
-        val headBase: Long,
     ) {
+        val startPositionUs = Math.multiplyExact(startPositionMs, 1000L)
         var submittedFrames = 0L
-        var playedFrames = 0L
-        var lastHead = headBase
+        var previousOutputSamplePositionMs = startPositionMs
+        var sourceEnded = false
         var outputStarted = false
+        var floatFallbackAttempted = false
     }
 
     private var alacRun: AlacRun? = null
@@ -182,13 +187,13 @@ internal class ApplePlaybackEngine(
         if (_state.value.queueIndex != occurrence || _state.value.mediaId != "apple:${currentSong.track.id}") return pendingPositionMs
         val duration = _state.value.durationMs.takeIf { it > 0L } ?: currentSong.track.durationMs.takeIf { it > 0L }
         val position = if (activeAlacSource != null) {
-            val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) && it.outputStarted }
+            val run = alacRun?.takeIf { isCurrentAlac(it.serial, it.generation) }
                 ?: return pendingPositionMs
-            val head = run.output.playbackHeadPosition.toLong() and 0xffff_ffffL
-            val advanced = (head - run.lastHead) and 0xffff_ffffL
-            run.lastHead = head
-            run.playedFrames = (run.playedFrames + advanced).coerceAtMost(run.submittedFrames)
-            run.startPositionMs + run.playedFrames * 1000L / run.sampleRate
+            val outputPositionUs = run.output.getCurrentPositionUs(run.sourceEnded)
+            if (outputPositionUs == AudioSink.CURRENT_POSITION_NOT_SET || outputPositionUs == C.TIME_UNSET) {
+                return pendingPositionMs
+            }
+            (outputPositionUs / 1000L).coerceIn(run.startPositionMs, duration ?: Long.MAX_VALUE)
         } else {
             if (!timelineInstalled || !hasRealMedia3Timeline(activeSerial)) return pendingPositionMs
             (mediaPlayer?.currentPosition ?: pendingPositionMs).coerceAtLeast(0L)
@@ -567,9 +572,11 @@ internal class ApplePlaybackEngine(
     ) = supervisorScope {
         var reader: AppleAlacReader? = null
         var handle = 0L
-        var output: AudioTrack? = null
+        var output: AudioSink? = null
         var run: AlacRun? = null
         var monitor: Job? = null
+        var targetSeek: Deferred<Long>? = null
+        var failure: Throwable? = null
         fun decodeFailure(message: String): Nothing {
             if (source is AlacSource.Cached) throw AppleAlacCacheException("ALAC 缓存格式无效", IOException(message))
             throw IOException(message)
@@ -611,25 +618,28 @@ internal class ApplePlaybackEngine(
             if (channels !in 1..8 || sampleRate <= 0 || bits != 16 && bits != 20 && bits != 24 && bits != 32) {
                 decodeFailure("ALAC 解码器初始化失败")
             }
-            val firstPacketTimeUs = opened.seekTo(target)
-            awaitPlayWhenReady(serial, generation)
-            val built = buildAlacOutput(sampleRate, channels, bits) ?: throw IOException("ALAC AudioTrack 创建失败")
-            val createdOutput = built.first
+            val createdOutput = buildAlacOutput(sampleRate, channels, bits)
             output = createdOutput
-            val floatOutput = built.second
+            if (requestAlacAudioFocus() == AlacFocusResult.FAILED) throw IOException("音频焦点不可用")
+            // A delayed focus grant may overlap target I/O, but a denied grant must not fetch it.
+            targetSeek = async { opened.seekTo(target) }
             val cacheFileId = (source as? AlacSource.Cached)?.entry?.fileId
-            val currentRun = AlacRun(serial, generation, createdOutput, handle, sampleRate, channels, bits, cacheFileId,
-                target, createdOutput.playbackHeadPosition.toLong() and 0xffff_ffffL)
+            val currentRun = AlacRun(serial, generation, createdOutput, handle, sampleRate, channels, bits, cacheFileId, target)
             run = currentRun
+            val frameBytes = channels * if (bits == 16) 2 else 4
+            val direct = ByteBuffer.allocateDirect(Math.multiplyExact(opened.maxBlock, frameBytes))
+                .order(ByteOrder.LITTLE_ENDIAN)
+            val firstPacketTimeUs = targetSeek.await()
+            var skipFrames = Math.multiplyExact(maxOf(0L, Math.subtractExact(currentRun.startPositionUs, firstPacketTimeUs)),
+                sampleRate.toLong()) / 1_000_000L
+            awaitPlayWhenReady(serial, generation)
             alacRun = currentRun
             if (cacheFileId != null) cache.pinCurrent(cacheFileId)
+            // A user pause during target I/O may have abandoned the first focus request.
             if (requestAlacAudioFocus() == AlacFocusResult.FAILED) throw IOException("音频焦点不可用")
             if (alacFocusDucked) createdOutput.setVolume(0.2f)
             publishAlacState(currentRun)
             awaitPlayWhenReady(serial, generation)
-            val bytesPerOutputSample = if (floatOutput) 4 else 2
-            val direct = ByteBuffer.allocateDirect(opened.maxBlock * channels * bytesPerOutputSample).order(ByteOrder.LITTLE_ENDIAN)
-            var skipFrames = maxOf(0L, target * 1000L - firstPacketTimeUs) * sampleRate / 1_000_000L
             createdOutput.play()
             monitor = launch {
                 while (isCurrentAlac(serial, generation)) {
@@ -642,7 +652,6 @@ internal class ApplePlaybackEngine(
                 val packet = opened.readPacket() ?: break
                 val decoderHandle = currentRun.handle
                 val pcm = withContext(Dispatchers.Default) { AlacDecoder.decodeSafe(decoderHandle, packet) }
-                val frameBytes = channels * if (bits == 16) 2 else 4
                 if (pcm.isEmpty() || pcm.size % frameBytes != 0 || pcm.size / frameBytes > opened.maxBlock) {
                     decodeFailure("ALAC 分片解码失败")
                 }
@@ -650,45 +659,49 @@ internal class ApplePlaybackEngine(
                 val skipped = minOf(skipFrames, frames.toLong()).toInt()
                 skipFrames -= skipped
                 if (skipped < frames) {
-                    writeAlacPcm(currentRun, pcm, skipped, frames - skipped, bits, floatOutput, direct)
+                    writeAlacPcm(currentRun, pcm, skipped, frames - skipped, direct)
                 }
             }
             if (currentRun.submittedFrames == 0L) decodeFailure("ALAC 音频轨道为空")
-            // Submission is not playback: retain the output until its real head drains.
+            currentRun.sourceEnded = true
+            // Source EOF is not output EOF: repeatedly drain the processors and platform output.
             while (true) {
                 awaitPlayWhenReady(serial, generation)
-                position()
-                if (currentRun.playedFrames >= currentRun.submittedFrames) break
-                delay(100L)
+                currentRun.output.playToEndOfStream()
+                if (currentRun.output.isEnded) break
+                delay(10L)
             }
             pendingPositionMs = position()
             activeCacheSource = null
             _state.value = _state.value.copy(isPlaying = false, buffering = false, ended = true,
                 bufferedPositionMs = pendingPositionMs)
+        } catch (error: Throwable) {
+            failure = error
+            throw error
         } finally {
-            monitor?.cancel()
             try {
                 withContext(NonCancellable + Dispatchers.Main.immediate) {
-                    val ownsFocus = isCurrentAlac(serial, generation) && (run == null || alacRun === run)
-                    if (run != null && alacRun === run) {
-                        if (isCurrentAlac(serial, generation)) pendingPositionMs = position()
-                        alacRun = null
-                        if (run.cacheFileId != null) cache.pinCurrent(null)
+                    monitor?.cancelAndJoin()
+                    targetSeek?.cancelAndJoin()
+                    val currentOutput = run?.output ?: output
+                    try {
+                        val ownsFocus = isCurrentAlac(serial, generation) && (run == null || alacRun === run)
+                        if (run != null && alacRun === run) {
+                            if (isCurrentAlac(serial, generation)) pendingPositionMs = position()
+                            alacRun = null
+                            if (run.cacheFileId != null) cache.pinCurrent(null)
+                        }
+                        runCatching { currentOutput?.pause() }
+                        if (ownsFocus) abandonAlacAudioFocus()
+                        withContext(Dispatchers.IO) { reader?.close() }
+                    } finally {
+                        try { currentOutput?.let(::releaseAlacOutput) }
+                        finally { AlacDecoder.closeSafe(handle) }
                     }
-                    runCatching { output?.pause() }
-                    runCatching { output?.flush() }
-                    if (ownsFocus) abandonAlacAudioFocus()
                 }
-                withContext(NonCancellable + Dispatchers.IO) {
-                    try { reader?.close() }
-                    finally { monitor?.cancelAndJoin() }
-                }
-            } finally {
-                withContext(NonCancellable + Dispatchers.Main.immediate) {
-                    runCatching { output?.stop() }
-                    runCatching { output?.release() }
-                    AlacDecoder.closeSafe(handle)
-                }
+            } catch (cleanup: Throwable) {
+                val original = failure
+                if (original != null) original.addSuppressed(cleanup) else throw cleanup
             }
         }
     }
@@ -699,16 +712,15 @@ internal class ApplePlaybackEngine(
         if (state.ended) return
         val absolutePosition = position()
         val playing = state.playWhenReady && alacFocusGranted && run.outputStarted &&
-            run.submittedFrames > run.playedFrames
+            run.output.hasPendingData() && absolutePosition > run.previousOutputSamplePositionMs
+        run.previousOutputSamplePositionMs = absolutePosition
         val buffering = state.playWhenReady && alacFocusGranted && !playing
-        if (state.isPlaying == playing && state.buffering == buffering) return
-        if (playing) {
-            publishOutputStarted(run.serial, "alac")
-        } else {
-            pendingPositionMs = absolutePosition
-            activeCacheSource = null
-            _state.value = state.copy(isPlaying = false, buffering = buffering, bufferedPositionMs = absolutePosition)
-        }
+        pendingPositionMs = absolutePosition
+        if (playing && !state.isPlaying) publishOutputStarted(run.serial, "alac")
+        if (!playing) activeCacheSource = null
+        // Publish clock corrections even when the playing/buffering flags did not change.
+        _state.value = _state.value.copy(isPlaying = playing, buffering = buffering,
+            bufferedPositionMs = absolutePosition)
     }
 
     private suspend fun awaitPlayWhenReady(serial: Long, generation: Int) {
@@ -820,33 +832,36 @@ internal class ApplePlaybackEngine(
         }
     }
 
-    private fun buildAlacOutput(sampleRate: Int, channels: Int, bits: Int): Pair<AudioTrack, Boolean>? {
-        val channelMask = when (channels) {
-            1 -> AudioFormat.CHANNEL_OUT_MONO
-            2 -> AudioFormat.CHANNEL_OUT_STEREO
-            6 -> AudioFormat.CHANNEL_OUT_5POINT1
-            else -> return null
-        }
-        fun build(encoding: Int, floating: Boolean): Pair<AudioTrack, Boolean>? {
-            val minimum = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
-            if (minimum == AudioTrack.ERROR_BAD_VALUE || minimum == AudioTrack.ERROR || minimum <= 0) return null
-            val track = runCatching {
-                AudioTrack.Builder()
-                    .setAudioAttributes(alacAudioAttributes)
-                    .setAudioFormat(AudioFormat.Builder().setEncoding(encoding).setSampleRate(sampleRate)
-                        .setChannelMask(channelMask).build())
-                    .setBufferSizeInBytes(minimum.coerceAtLeast(32 * 1024))
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-            }.getOrNull() ?: return null
-            if (track.state != AudioTrack.STATE_INITIALIZED) {
-                runCatching { track.release() }
-                return null
+    private fun buildAlacOutput(sampleRate: Int, channels: Int, bits: Int, enableFloatOutput: Boolean = true): AudioSink {
+        val format = Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setSampleRate(sampleRate)
+            .setChannelCount(channels)
+            .setPcmEncoding(if (bits == 16) C.ENCODING_PCM_16BIT else C.ENCODING_PCM_FLOAT)
+            .build()
+        val sink = DefaultAudioSink.Builder(appContext)
+            .setEnableFloatOutput(enableFloatOutput)
+            .setAudioTrackBufferSizeProvider { minimum, _, _, frameSize, _, _, _ ->
+                if (minimum <= 0 || frameSize <= 0) throw IOException("ALAC AudioTrack 缓冲配置失败")
+                val bytes = maxOf(minimum, 32 * 1024)
+                val frames = Math.addExact(bytes, frameSize - 1) / frameSize
+                Math.multiplyExact(frames, frameSize)
             }
-            return track to floating
+            .build()
+        try {
+            sink.setAudioAttributes(androidx.media3.common.AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build())
+            sink.configure(format, 0, null)
+            return sink
+        } catch (error: Throwable) {
+            try { releaseAlacOutput(sink) } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
+            throw error
         }
-        if (bits > 16) build(AudioFormat.ENCODING_PCM_FLOAT, true)?.let { return it }
-        return build(AudioFormat.ENCODING_PCM_16BIT, false)
+    }
+
+    private fun releaseAlacOutput(output: AudioSink) {
+        try { output.reset() }
+        finally { output.release() }
     }
 
     private suspend fun writeAlacPcm(
@@ -854,48 +869,52 @@ internal class ApplePlaybackEngine(
         pcm: ByteArray,
         skipFrames: Int,
         frames: Int,
-        bits: Int,
-        floatOutput: Boolean,
         direct: ByteBuffer,
-    ): Int {
-        val channels = run.channels
+    ) {
+        val frameBytes = run.channels * if (run.bits == 16) 2 else 4
         withContext(Dispatchers.Default) {
             direct.clear()
-            if (floatOutput) {
-                val start = skipFrames * channels * 4
-                direct.put(pcm, start, frames * channels * 4)
-            } else if (bits == 16) {
-                val start = skipFrames * channels * 2
-                direct.put(pcm, start, frames * channels * 2)
-            } else {
-                val source = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
-                source.position(skipFrames * channels * 4)
-                repeat(frames * channels) {
-                    val sample = (source.float.coerceIn(-1.0f, 1.0f) * 32768.0f).toInt()
-                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                    direct.putShort(sample.toShort())
-                }
-            }
+            direct.put(pcm, Math.multiplyExact(skipFrames, frameBytes), Math.multiplyExact(frames, frameBytes))
             direct.flip()
         }
-        val frameBytes = channels * if (floatOutput) 4 else 2
-        var writtenBytes = 0
-        while (direct.hasRemaining()) {
+        val presentationTimeUs = Math.addExact(run.startPositionUs,
+            Math.multiplyExact(run.submittedFrames, 1_000_000L) / run.sampleRate)
+        var floatFailure: AudioSink.InitializationException? = null
+        while (true) {
             awaitPlayWhenReady(run.serial, run.generation)
-            val result = run.output.write(direct, direct.remaining(), AudioTrack.WRITE_NON_BLOCKING)
-            if (result < 0) throw IOException("ALAC AudioTrack 写入失败")
-            if (result == 0) {
-                delay(10L)
+            val before = direct.position()
+            val handled = try {
+                run.output.handleBuffer(direct, presentationTimeUs, 1)
+            } catch (error: AudioSink.InitializationException) {
+                if (run.bits == 16 || run.floatFallbackAttempted || run.outputStarted ||
+                    run.submittedFrames != 0L || direct.position() != 0) {
+                    floatFailure?.let(error::addSuppressed)
+                    throw error
+                }
+                run.floatFallbackAttempted = true
+                floatFailure = error
+                try {
+                    releaseAlacOutput(run.output)
+                    run.output = buildAlacOutput(run.sampleRate, run.channels, run.bits, enableFloatOutput = false)
+                    run.output.setVolume(if (alacFocusDucked) 0.2f else 1.0f)
+                    run.output.play()
+                } catch (fallback: Throwable) {
+                    fallback.addSuppressed(error)
+                    throw fallback
+                }
                 continue
             }
-            writtenBytes += result
-            run.submittedFrames += result / frameBytes
-            if (!run.outputStarted || !_state.value.isPlaying) {
-                run.outputStarted = true
-                publishAlacState(run)
+            val consumed = direct.position() - before
+            if (consumed < 0 || consumed % frameBytes != 0) throw IOException("ALAC PCM 帧边界无效")
+            if (consumed > 0) run.outputStarted = true
+            if (handled) {
+                if (direct.hasRemaining()) throw IOException("ALAC PCM 输出未完整消费")
+                run.submittedFrames = Math.addExact(run.submittedFrames, frames.toLong())
+                return
             }
+            // The same buffer and PTS remain owned by the sink until it accepts the whole packet.
+            delay(10L)
         }
-        return writtenBytes
     }
 
     private fun publishOutputStarted(serial: Long, mode: String) {

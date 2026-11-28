@@ -86,8 +86,8 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
     private var pronunciation = false
     private var lyricFontWeight = 0
     private var playing = false
-    private var timeAt = 0L
-    private var timeValue = 0L
+    private var followOutput = false
+    private val playbackClock = LyricPlaybackClock()
     private var currentTime = 0L
     private var lastDispatched = Long.MIN_VALUE
     private var fadeTopSize = 0
@@ -204,6 +204,8 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
         candidateLyricIds.clear()
         lastPreparedCueBegin = Long.MIN_VALUE
         lastDispatched = Long.MIN_VALUE
+        playbackClock.reset()
+        followOutput = false
         instant = true
         snapScaleChanges = true
         hasPlaybackAnchor = false
@@ -235,14 +237,11 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
     }
 
     /** Uses the playback clock; physical scroll position is independent while a finger/fling owns the list. */
-    fun sync(position: Long, playing: Boolean, discontinuity: Boolean) {
+    fun sync(position: Long, playing: Boolean, discontinuity: Boolean, followOutput: Boolean) {
         refreshAnimationScale()
         val now = SystemClock.uptimeMillis()
-        val projected = timeValue + if (this.playing) now - timeAt else 0L
-        if (!hasPlaybackAnchor || discontinuity || this.playing != playing || kotlin.math.abs(projected - position) > 30) {
-            timeValue = position.coerceAtLeast(0)
-            timeAt = now
-        }
+        playbackClock.sync(position, playing, now, discontinuity, followOutput)
+        this.followOutput = followOutput
         this.playing = playing
         if (discontinuity || !hasPlaybackAnchor) {
             // First load snaps; an in-song seek retargets from the rows' current visible positions.
@@ -258,7 +257,7 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
             if (instant) finishMoves()
         }
         hasPlaybackAnchor = true
-        updatePosition(force = true)
+        updatePosition(force = true, now = now)
         if (playing && isAttachedToWindow) postInvalidateOnAnimation()
     }
 
@@ -398,10 +397,8 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
         if (playing && isAttachedToWindow) postInvalidateOnAnimation()
     }
 
-    private fun updatePosition(force: Boolean = false) {
-        val now = SystemClock.uptimeMillis()
-        val projectedTime = timeValue + if (playing) now - timeAt else 0L
-        currentTime = if (lastDispatched == Long.MIN_VALUE) projectedTime else maxOf(projectedTime, lastDispatched)
+    private fun updatePosition(force: Boolean = false, now: Long = SystemClock.uptimeMillis()) {
+        currentTime = playbackClock.position(now, lastDispatched)
         if (!force && currentTime == lastDispatched) return
         val value = song ?: return
         if (isComputingLayout) return
@@ -825,7 +822,7 @@ internal class NativeLyricsView(context: Context) : RecyclerView(context) {
                 view.setOnClickListener {
                     if (view.rowActivationAllowed && serial == generation && timing != "None") {
                         onSeek(row.begin)
-                        sync(row.begin, playing, true)
+                        sync(row.begin, playing, true, followOutput)
                     }
                 }
                 view.isClickable = timing != "None"

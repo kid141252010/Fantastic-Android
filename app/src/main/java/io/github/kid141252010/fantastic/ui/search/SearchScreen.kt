@@ -73,6 +73,8 @@ import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
+import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
+import io.github.kid141252010.fantastic.playback.PlayerState
 import io.github.kid141252010.fantastic.ui.MediaActionContent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -330,7 +332,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                             }
                         }
                         items(group.items.take(previewLimit), key = { "${group.key}:${it.kind}:${it.id}" }) { hit ->
-                            SearchHitRow(app, hit, player.mediaId, requestStorefront, focus, onOpen)
+                            SearchHitRow(app, hit, player, requestStorefront, focus, onOpen)
                         }
                     }
                     items(result.failures, key = { "failure:${it.kind.id}" }) { failure ->
@@ -341,7 +343,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
                     }
                 } else {
                     items(result.items, key = { "${it.source}:${it.kind}:${it.id}" }) { hit ->
-                        SearchHitRow(app, hit, player.mediaId, requestStorefront, focus, onOpen)
+                        SearchHitRow(app, hit, player, requestStorefront, focus, onOpen)
                     }
                 }
                 val noResults = if (kind == null) result.groups.isEmpty() && result.failures.isEmpty() else result.items.isEmpty()
@@ -368,7 +370,7 @@ fun SearchScreen(app: FantasticApp, rootNavigationRequest: Int, onOpen: (Catalog
 private fun SearchHitRow(
     app: FantasticApp,
     hit: CatalogHit,
-    playingMediaId: String?,
+    player: PlayerState,
     storefront: String,
     focus: FocusManager,
     onOpen: (CatalogHit) -> Unit,
@@ -376,6 +378,8 @@ private fun SearchHitRow(
     val track = hit.track
     var actionsOpen by remember(hit.source, hit.kind, hit.id) { mutableStateOf(false) }
     val latestHit by rememberUpdatedState(hit)
+    val latestStorefront by rememberUpdatedState(storefront)
+    val queueLabel = if (track != null) queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null
     val latestOnOpen by rememberUpdatedState(onOpen)
     val subtitle = if (track != null) track.artist else {
         listOf(searchKindLabel(hit.kind), hit.subtitle).filter { it.isNotBlank() }.distinct().joinToString(" · ")
@@ -383,7 +387,14 @@ private fun SearchHitRow(
     Md3MediaRow(
         title = hit.title,
         subtitle = subtitle,
-        playing = track != null && playingMediaId == "${track.source.mediaPrefix}:${track.id}",
+        playing = track != null && player.mediaId == "${track.source.mediaPrefix}:${track.id}",
+        queueSwipeLabel = queueLabel,
+        onQueueSwipe = if (track != null) ({
+            val latest = latestHit
+            if (latest.source != Source.Apple || latestStorefront == app.prefs.storefront) {
+                latest.track?.let { app.player.insertQueueItemsFromSwipe(listOf(it)) }
+            }
+        }) else null,
         onClick = {
             if (hit.source == Source.Apple && storefront != app.prefs.storefront) return@Md3MediaRow
             focus.clearFocus()

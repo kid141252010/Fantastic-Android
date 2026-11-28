@@ -92,6 +92,7 @@ import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
 import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
+import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -403,6 +404,10 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                                 PlaylistTrackRow(
                                     track = track,
                                     playing = track.hit.kind == "song" && player.mediaId == "${track.hit.source.mediaPrefix}:${track.hit.id}",
+                                    queueSwipeLabel = if (track.hit.kind == "song") queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null,
+                                    onQueueSwipe = if (track.hit.kind == "song") ({
+                                        app.player.insertQueueItemsFromSwipe(listOf(asTrack(track.hit)))
+                                    }) else null,
                                     canMoveUp = index > 0,
                                     canMoveDown = index < selectedPlaylist.tracks.lastIndex,
                                     onPlay = { playPlaylistFrom(app, selectedPlaylist, track.uid) },
@@ -447,6 +452,10 @@ fun MusicLibraryScreen(app: FantasticApp, showLibrarySources: Boolean, rootNavig
                                     entry = entry,
                                     showLibrarySources = showLibrarySources,
                                     playing = entry.hit.kind == "song" && player.mediaId == "${entry.hit.source.mediaPrefix}:${entry.hit.id}",
+                                    queueSwipeLabel = if (entry.hit.kind == "song") queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection) else null,
+                                    onQueueSwipe = if (entry.hit.kind == "song") ({
+                                        app.player.insertQueueItemsFromSwipe(listOf(asTrack(entry.hit)))
+                                    }) else null,
                                     onClick = {
                                         if (entry.hit.kind == "song") playLibraryHit(app, entry, visibleItems)
                                         else openLibraryHit(entry.hit)
@@ -635,12 +644,22 @@ private fun LibraryEmptyCategory(category: LibraryCategory?, favoritesOnly: Bool
 }
 
 @Composable
-private fun LibraryItemRow(entry: LibraryEntry, playing: Boolean, showLibrarySources: Boolean, onClick: () -> Unit, onOptions: () -> Unit) {
+private fun LibraryItemRow(
+    entry: LibraryEntry,
+    playing: Boolean,
+    queueSwipeLabel: String?,
+    onQueueSwipe: (() -> Unit)?,
+    showLibrarySources: Boolean,
+    onClick: () -> Unit,
+    onOptions: () -> Unit,
+) {
     val hit = entry.hit
     Md3MediaRow(
         title = hit.title,
         subtitle = hit.source.librarySubtitle(hit.subtitle, showSource = hit.kind != "song" || showLibrarySources),
         playing = playing,
+        queueSwipeLabel = queueSwipeLabel,
+        onQueueSwipe = onQueueSwipe,
         onClick = onClick,
         leading = {
             Md3MediaArtwork(hit.artwork ?: hit.track?.artwork(120), Modifier.size(48.dp),
@@ -717,6 +736,8 @@ private fun PlaylistTrackRow(
     track: LibraryPlaylistTrack,
     playing: Boolean,
     canMoveUp: Boolean,
+    queueSwipeLabel: String?,
+    onQueueSwipe: (() -> Unit)?,
     canMoveDown: Boolean,
     onPlay: () -> Unit,
     onOpen: () -> Unit,
@@ -729,6 +750,8 @@ private fun PlaylistTrackRow(
         title = track.hit.title,
         subtitle = track.hit.source.librarySubtitle(track.hit.subtitle, showSource = true),
         playing = playing,
+        queueSwipeLabel = queueSwipeLabel,
+        onQueueSwipe = onQueueSwipe,
         onClick = if (track.hit.kind == "song") onPlay else onOpen,
         leading = { Md3MediaArtwork(track.hit.artwork ?: track.hit.track?.artwork(120), Modifier.size(48.dp), shape = MaterialTheme.shapes.small) },
         trailing = {

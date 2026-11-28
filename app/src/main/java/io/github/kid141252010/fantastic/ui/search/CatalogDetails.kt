@@ -99,6 +99,7 @@ import io.github.kid141252010.fantastic.ui.Md3BackButton
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
+import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
 import io.github.kid141252010.fantastic.ui.Md3MediaSectionHeader
 import io.github.kid141252010.fantastic.ui.formatTime
 import io.github.kid141252010.fantastic.playback.DownloadStatus
@@ -446,6 +447,8 @@ private fun DetailBody(
                         title = track.title,
                         subtitle = if (number == null) track.artist else "",
                         playing = player.mediaId == track.mediaId,
+                        queueSwipeLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection),
+                        onQueueSwipe = { app.player.insertQueueItemsFromSwipe(listOf(track)) },
                         onClick = { playCollection(section, index, false) },
                         leading = {
                             if (number != null) Text(number, Modifier.padding(horizontal = 4.dp),

@@ -24,6 +24,8 @@ internal const val KEY_TRACK_NUMBER = "fantastic.trackNumber"
 internal const val KEY_QUALITY = "fantastic.quality"
 internal const val KEY_PLAYBACK_MESSAGE = "fantastic.playbackMessage"
 internal const val KEY_SHUFFLE_START = "fantastic.shuffleStart"
+internal const val KEY_QUEUE_INSERTION = "fantastic.queueInsertion"
+internal const val KEY_QUEUE_SECTION = "fantastic.queueSection"
 internal const val KEY_OCCURRENCE = "fantastic.occurrence"
 internal const val KEY_COUNTRY = "fantastic.country"
 internal const val KEY_ARTIST_COUNTRY = "fantastic.artistCountry"
@@ -31,30 +33,35 @@ internal const val KEY_ALBUM_COUNTRY = "fantastic.albumCountry"
 
 internal val Track.mediaId get() = "${source.mediaPrefix}:$id"
 
-internal fun Track.toQueueItem(quality: String? = null, shuffleStart: Boolean? = null, occurrence: Int? = null): MediaItem =
-    MediaItem.Builder().setMediaId(mediaId).setMediaMetadata(MediaMetadata.Builder()
-        .setTitle(title).setArtist(artist).setAlbumTitle(album)
-        .setArtworkUri(artwork(600)?.let(Uri::parse))
-        .setExtras(Bundle().apply {
-            putString(KEY_ID, id)
-            putString(KEY_SOURCE, source.name)
-            putLong(KEY_DURATION_MS, durationMs)
-            putString(KEY_ARTIST_ID, artistId)
-            putString(KEY_ALBUM_ID, albumId)
-            putString(KEY_ARTWORK_TEMPLATE, artworkTemplate.orEmpty())
-            putString(KEY_ARTIST_ARTWORK_TEMPLATE, artistArtworkTemplate.orEmpty())
-            putString(KEY_ALBUM_ARTIST, albumArtist)
-            putInt(KEY_DISC_NUMBER, discNumber)
-            putInt(KEY_TRACK_NUMBER, trackNumber)
-            if (source == Source.Apple) country.normalizedAppleCountry()?.let { putString(KEY_COUNTRY, it) }
-            if (source == Source.Apple && artistId != "0" && validCatalogId(source, "artist", artistId))
-                artistCountry.normalizedAppleCountry()?.let { putString(KEY_ARTIST_COUNTRY, it) }
-            if (source == Source.Apple && albumId != "0" && validCatalogId(source, "album", albumId))
-                albumCountry.normalizedAppleCountry()?.let { putString(KEY_ALBUM_COUNTRY, it) }
-            if (quality != null) putString(KEY_QUALITY, quality)
-            if (shuffleStart != null) putBoolean(KEY_SHUFFLE_START, shuffleStart)
-            if (occurrence != null) putInt(KEY_OCCURRENCE, occurrence)
-        }).build()).build()
+internal fun Track.toQueueItem(
+    quality: String? = null,
+    shuffleStart: Boolean? = null,
+    occurrence: Int? = null,
+    queueInsertion: QueueInsertion? = null,
+): MediaItem = MediaItem.Builder().setMediaId(mediaId).setMediaMetadata(MediaMetadata.Builder()
+    .setTitle(title).setArtist(artist).setAlbumTitle(album)
+    .setArtworkUri(artwork(600)?.let(Uri::parse))
+    .setExtras(Bundle().apply {
+        putString(KEY_ID, id)
+        putString(KEY_SOURCE, source.name)
+        putLong(KEY_DURATION_MS, durationMs)
+        putString(KEY_ARTIST_ID, artistId)
+        putString(KEY_ALBUM_ID, albumId)
+        putString(KEY_ARTWORK_TEMPLATE, artworkTemplate.orEmpty())
+        putString(KEY_ARTIST_ARTWORK_TEMPLATE, artistArtworkTemplate.orEmpty())
+        putString(KEY_ALBUM_ARTIST, albumArtist)
+        putInt(KEY_DISC_NUMBER, discNumber)
+        putInt(KEY_TRACK_NUMBER, trackNumber)
+        if (source == Source.Apple) country.normalizedAppleCountry()?.let { putString(KEY_COUNTRY, it) }
+        if (source == Source.Apple && artistId != "0" && validCatalogId(source, "artist", artistId))
+            artistCountry.normalizedAppleCountry()?.let { putString(KEY_ARTIST_COUNTRY, it) }
+        if (source == Source.Apple && albumId != "0" && validCatalogId(source, "album", albumId))
+            albumCountry.normalizedAppleCountry()?.let { putString(KEY_ALBUM_COUNTRY, it) }
+        if (quality != null) putString(KEY_QUALITY, quality)
+        if (shuffleStart != null) putBoolean(KEY_SHUFFLE_START, shuffleStart)
+        if (occurrence != null) putInt(KEY_OCCURRENCE, occurrence)
+        queueInsertion?.let { putString(KEY_QUEUE_INSERTION, it.mediaValue) }
+    }).build()).build()
 
 internal fun MediaItem.toTrack(): Track? {
     val extras = mediaMetadata.extras

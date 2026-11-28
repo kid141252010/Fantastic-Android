@@ -74,6 +74,7 @@ import io.github.kid141252010.fantastic.ui.Md3BackButton
 import io.github.kid141252010.fantastic.ui.Md3EmptyState
 import io.github.kid141252010.fantastic.ui.Md3MediaArtwork
 import io.github.kid141252010.fantastic.ui.Md3MediaRow
+import io.github.kid141252010.fantastic.ui.queueSwipeActionLabel
 import io.github.kid141252010.fantastic.ui.MediaActionContent
 import io.github.kid141252010.fantastic.ui.theme.withUserFontWeight
 import kotlinx.coroutines.CancellationException
@@ -251,6 +252,8 @@ internal fun LibraryAlbumScreen(
                     title = track.title,
                     subtitle = track.source.librarySubtitle(track.artist, showLibrarySources),
                     playing = player.mediaId == track.mediaId,
+                    queueSwipeLabel = queueSwipeActionLabel(player.canEditQueue, player.canAddToQueueSection),
+                    onQueueSwipe = { app.player.insertQueueItemsFromSwipe(listOf(track)) },
                     onClick = { app.player.playQueue(displayTracks, index) },
                     leading = {
                         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
