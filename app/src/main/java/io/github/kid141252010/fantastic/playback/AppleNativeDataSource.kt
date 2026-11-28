@@ -5,9 +5,6 @@ import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
-import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultHttpDataSource
 import java.io.EOFException
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
@@ -17,7 +14,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 
-/** Virtual HLS resources yield decrypted fMP4; Widevine segment URLs remain ordinary HTTPS resources. */
+/** Virtual HLS resources; Widevine media fragments remain encrypted until Media3 applies DRM. */
 @UnstableApi
 internal class AppleNativeDataSource(
     context: Context,
@@ -25,38 +22,23 @@ internal class AppleNativeDataSource(
     private val track: AppleResolvedTrack,
     private val requestId: Long,
 ) : BaseDataSource(true) {
-    private val http = DefaultHttpDataSource.Factory().createDataSource()
-    private val appContext = context.applicationContext
     private var scope: CoroutineScope? = null
     private var uri: Uri? = null
     private var data: ByteArray? = null
     private var offset = 0
     private var remaining = 0L
     private var contentType = "application/octet-stream"
-    private var delegatedHttp = false
 
     override fun open(dataSpec: DataSpec): Long {
         check(uri == null)
         transferInitializing(dataSpec)
-        if (dataSpec.uri.scheme != "apple-native") {
-            delegatedHttp = true
-            return try {
-                val length = http.open(dataSpec)
-                uri = dataSpec.uri
-                transferStarted(dataSpec)
-                length
-            } catch (error: Exception) {
-                runCatching { http.close() }
-                delegatedHttp = false
-                throw error
-            }
-        }
+        if (dataSpec.uri.scheme != "apple-native") throw IOException("Apple 媒体地址无效")
         val host = dataSpec.uri.host?.toLongOrNull()
         if (host != requestId) throw IOException("Apple 播放列表请求已过期")
         val bytes = when {
             dataSpec.uri.encodedPath == "/playlist.m3u8" -> {
                 contentType = "application/vnd.apple.mpegurl"
-                if (track.variant.widevine) decrypt.generatedWidevinePlaylist(track) else decrypt.generatedPlaylist(track, requestId)
+                if (track.variant.widevine) decrypt.generatedWidevinePlaylist(track, requestId) else decrypt.generatedPlaylist(track, requestId)
             }
             dataSpec.uri.encodedPath == "/init" -> {
                 contentType = "video/mp4"
@@ -88,11 +70,6 @@ internal class AppleNativeDataSource(
 
     override fun read(buffer: ByteArray, bufferOffset: Int, length: Int): Int {
         if (length == 0) return 0
-        if (delegatedHttp) {
-            val count = http.read(buffer, bufferOffset, length)
-            if (count > 0) bytesTransferred(count)
-            return count
-        }
         val bytes = data ?: return C.RESULT_END_OF_INPUT
         if (remaining == 0L) return C.RESULT_END_OF_INPUT
         val count = minOf(length.toLong(), remaining, (bytes.size - offset).toLong()).toInt()
@@ -104,25 +81,19 @@ internal class AppleNativeDataSource(
         return count
     }
 
-    override fun getUri(): Uri? = if (delegatedHttp) uri ?: http.uri else uri
+    override fun getUri(): Uri? = uri
 
-    override fun getResponseHeaders(): Map<String, List<String>> = if (delegatedHttp) http.responseHeaders else
-        mapOf("Content-Type" to listOf(contentType))
+    override fun getResponseHeaders(): Map<String, List<String>> = mapOf("Content-Type" to listOf(contentType))
 
     override fun close() {
-        try {
-            if (delegatedHttp) http.close()
-        } finally {
-            delegatedHttp = false
-            data = null
-            offset = 0
-            remaining = 0
-            scope?.cancel()
-            scope = null
-            if (uri != null) {
-                uri = null
-                transferEnded()
-            }
+        data = null
+        offset = 0
+        remaining = 0
+        scope?.cancel()
+        scope = null
+        if (uri != null) {
+            uri = null
+            transferEnded()
         }
     }
 }

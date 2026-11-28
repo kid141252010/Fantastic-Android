@@ -46,7 +46,16 @@ internal data class OfflineDownload(
     val key: String get() = track.mediaId
 }
 
-internal data class OfflineAudio(val file: File, val quality: String)
+internal data class OfflineAudio(val file: File, val quality: String, val fileId: String, val storefront: String)
+
+internal interface OfflineAudioPin : AutoCloseable {
+    val audio: OfflineAudio
+    fun acquire(): OfflineAudioLease?
+}
+
+internal interface OfflineAudioLease : AutoCloseable {
+    val file: File
+}
 
 /** Durable files are separate from the evictable streaming cache. One worker owns the active file. */
 internal class OfflineDownloads(private val context: Context, private val prefs: Prefs, private val transfer: AudioFileTransfer) {
@@ -57,9 +66,17 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
     val entries = state.asStateFlow()
     private val updates = Channel<List<OfflineDownload>>(Channel.CONFLATED)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var ready = readyIndex(state.value)
+    private val lifetimeLock = Any()
+    private val lifetimes = mutableMapOf<String, FileLifetime>()
     private var active: Job? = null
     private var workerRunning = false
+
+    private class FileLifetime(val audio: OfflineAudio) {
+        var pins = 0
+        var leases = 0
+        var retired = false
+        var deleteQueued = false
+    }
 
     init {
         scope.launch(Dispatchers.IO) {
@@ -80,12 +97,56 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
         }
     }
 
-    fun audio(track: Track, requestedQuality: String?): OfflineAudio? = ready[track.mediaId]?.let { job ->
+    fun audio(track: Track, requestedQuality: String?): OfflineAudio? = synchronized(lifetimeLock) {
+        val job = state.value.firstOrNull { it.key == track.mediaId && it.status == DownloadStatus.Ready } ?: return@synchronized null
         val country = if (track.source == Source.Apple) track.country.normalizedAppleCountry() else null
-        if (country != null && job.storefront != country) return@let null
-        if (requestedQuality != null && requestedQuality != job.quality) return@let null
-        val file = completed(job).takeIf(File::isFile) ?: return@let null
-        OfflineAudio(file, job.quality)
+        if (country != null && job.storefront != country) return@synchronized null
+        if (requestedQuality != null && requestedQuality != job.quality) return@synchronized null
+        val file = completed(job).takeIf(File::isFile) ?: return@synchronized null
+        OfflineAudio(file, job.quality, job.fileId, job.storefront)
+    }
+
+    fun pin(fileId: String): OfflineAudioPin? = synchronized(lifetimeLock) {
+        if (!FILE_ID.matches(fileId)) return@synchronized null
+        val job = state.value.firstOrNull { it.fileId == fileId && it.status == DownloadStatus.Ready } ?: return@synchronized null
+        val audio = OfflineAudio(completed(job), job.quality, job.fileId, job.storefront)
+        if (!audio.file.isFile) return@synchronized null
+        val lifetime = lifetimes.getOrPut(fileId) { FileLifetime(audio) }
+        if (lifetime.retired || lifetime.audio.file != audio.file) return@synchronized null
+        lifetime.pins++
+        object : OfflineAudioPin {
+            private var closed = false
+            override val audio = lifetime.audio
+
+            override fun acquire(): OfflineAudioLease? = synchronized(lifetimeLock) {
+                if (closed || lifetime.pins <= 0 || lifetimes[fileId] !== lifetime || !lifetime.audio.file.isFile) {
+                    return@synchronized null
+                }
+                lifetime.leases++
+                object : OfflineAudioLease {
+                    private var leaseClosed = false
+                    override val file: File = lifetime.audio.file
+
+                    override fun close() {
+                        synchronized(lifetimeLock) {
+                            if (leaseClosed) return
+                            leaseClosed = true
+                            lifetime.leases--
+                            deleteRetiredWhenIdle(lifetime)
+                        }
+                    }
+                }
+            }
+
+            override fun close() {
+                synchronized(lifetimeLock) {
+                    if (closed) return
+                    closed = true
+                    lifetime.pins--
+                    deleteRetiredWhenIdle(lifetime)
+                }
+            }
+        }
     }
 
     fun enqueue(tracks: List<Track>, quality: String? = null) {
@@ -102,10 +163,6 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
             val selected = quality?.takeIf { q -> track.source.qualities.any { it.first == q } }
                 ?: prefs.preferredQuality(track.source)
             val region = country(track) ?: return@mapNotNull null
-            val previous = existing[track.mediaId]
-            if (track.source == Source.Apple && previous != null && previous.storefront != region) {
-                scope.launch(Dispatchers.IO) { completed(previous).delete() }
-            }
             OfflineDownload(track, UUID.randomUUID().toString(), prefs.baseUrl, region, selected)
         }
         if (new.isEmpty()) return
@@ -136,7 +193,6 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
         val job = find(key) ?: return
         if (job.status == DownloadStatus.Downloading) active?.cancel()
         publish(state.value.filter { it.key != key })
-        scope.launch(Dispatchers.IO) { completed(job).delete() }
     }
 
     fun failQueued(reason: String) = publish(state.value.map { job ->
@@ -194,7 +250,6 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
         }
     }
 
-
     private fun launchService() {
         try { ContextCompat.startForegroundService(context, Intent(context, OfflineDownloadService::class.java)) }
         catch (_: IllegalStateException) { failQueued("系统未允许启动后台下载，请在应用内重试") }
@@ -205,13 +260,45 @@ internal class OfflineDownloads(private val context: Context, private val prefs:
         val existing = find(job.key)
         if (existing?.fileId == job.fileId && existing.status == DownloadStatus.Downloading) update(job)
     }
-    private fun update(job: OfflineDownload, durable: Boolean = true) = publish(state.value.map { if (it.fileId == job.fileId) job else it }, durable)
+    private fun update(job: OfflineDownload, durable: Boolean = true) =
+        publish(state.value.map { if (it.fileId == job.fileId) job else it }, durable)
+
     private fun publish(list: List<OfflineDownload>, durable: Boolean = true) {
-        if (durable) { ready = readyIndex(list); updates.trySend(list) }
-        state.value = list
+        synchronized(lifetimeLock) {
+            val old = state.value
+            val retained = list.asSequence().filter { it.status == DownloadStatus.Ready }.mapTo(hashSetOf()) { it.fileId }
+            old.filter { it.status == DownloadStatus.Ready && it.fileId !in retained }.forEach(::retireLocked)
+            state.value = list
+            if (durable) updates.trySend(list)
+        }
     }
+
+    private fun retireLocked(job: OfflineDownload) {
+        val fileId = job.fileId
+        val lifetime = lifetimes.getOrPut(fileId) {
+            FileLifetime(OfflineAudio(completed(job), job.quality, fileId, job.storefront))
+        }
+        lifetime.retired = true
+        deleteRetiredWhenIdle(lifetime)
+    }
+
+    private fun deleteRetiredWhenIdle(lifetime: FileLifetime) {
+        if (!lifetime.retired || lifetime.pins != 0 || lifetime.leases != 0 || lifetime.deleteQueued) return
+        lifetime.deleteQueued = true
+        scope.launch(Dispatchers.IO) {
+            val removed = !lifetime.audio.file.exists() || lifetime.audio.file.delete()
+            synchronized(lifetimeLock) {
+                if (lifetimes[lifetime.audio.fileId] !== lifetime) return@synchronized
+                if (removed) lifetimes.remove(lifetime.audio.fileId)
+                else {
+                    lifetime.deleteQueued = false
+                    Log.w("FantasticDownloads", "无法删除已撤销离线音频 id=${lifetime.audio.fileId}")
+                }
+            }
+        }
+    }
+
     private fun completed(job: OfflineDownload) = File(directory, job.fileId + ".audio")
-    private fun readyIndex(list: List<OfflineDownload>) = list.filter { it.status == DownloadStatus.Ready }.associateBy(OfflineDownload::key)
     private fun load(): List<OfflineDownload> = runCatching {
         json.decodeFromString<List<OfflineDownload>>(index.readFully().decodeToString()).mapNotNull { job ->
             if (!FILE_ID.matches(job.fileId)) return@mapNotNull null

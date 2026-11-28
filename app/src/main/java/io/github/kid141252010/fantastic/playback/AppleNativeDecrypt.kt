@@ -11,9 +11,9 @@ import android.os.SystemClock
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import io.github.kid141252010.fantastic.BuildConfig
 import io.github.kid141252010.fantastic.data.FantasticApi
 import io.github.kid141252010.fantastic.data.SourceStatus
-import io.github.kid141252010.fantastic.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
@@ -37,7 +37,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.concurrent.ConcurrentHashMap
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.LinkedHashMap
 import java.util.ArrayDeque
@@ -81,9 +81,16 @@ internal data class AppleMediaPlaylist(
     val sourceText: String,
 )
 
-internal data class AppleSampleRange(val start: Int, val end: Int) {
+internal data class AppleSampleRange(
+    val start: Int,
+    val end: Int,
+    val startTicks: Long = -1L,
+    val durationTicks: Long = -1L,
+) {
     val size: Int get() = end - start
 }
+
+internal data class AppleAlacTiming(val trackId: Long, val timescale: Long, val defaultSampleDuration: Long)
 
 internal data class AppleAlacConfig(val channels: Int, val bits: Int, val maxBlock: Int)
 
@@ -95,16 +102,23 @@ internal data class AppleResolvedTrack(
     val alacConfig: AppleAlacConfig?,
     val widevineUri: String?,
     val widevinePssh: ByteArray?,
+    val alacTiming: AppleAlacTiming? = null,
 )
 
 internal const val APPLE_ALAC_SEGMENT_BUFFER_BYTES = 8L * 1024 * 1024
 
-internal data class AppleResolvedSource(val track: AppleResolvedTrack, val decrypt: AppleNativeDecrypt, val key: PlaybackCacheKey)
+internal data class AppleResolvedSource(val track: AppleResolvedTrack, val decrypt: AppleNativeDecrypt, val key: PlaybackCacheKey) {
+    @Volatile var completedCache: PlaybackCacheEntry? = null
+}
 
 private data class AppleSegmentKey(
+    val session: String,
     val resourceUrl: HttpUrl,
     val adamId: String,
     val groupId: String,
+    val codecs: String,
+    val sampleRate: Int,
+    val bitDepth: Int,
     val range: AppleByteRange,
     val keyKind: KeyKind?,
     val keyUri: String?,
@@ -122,7 +136,6 @@ private class AppleSegmentTicket(var priority: AppleSegmentPriority, val job: Lo
     var admittedAt = 0L
 }
 
-/** Process-wide producer admission; an active background job never consumes the playback reserve. */
 private object AppleSegmentAdmission {
     private val lock = Any()
     private val playback = ArrayDeque<AppleSegmentTicket>()
@@ -221,8 +234,21 @@ private class AppleSegmentFlight(val ticket: AppleSegmentTicket) {
 }
 
 private enum class AppleRangeMode { Unknown, Verified, Serial, Failed }
-private data class AppleRangeIdentity(val mode: AppleRangeMode, val total: Long = 0L, val etag: String? = null)
-private data class AppleRangeReply(val code: Int, val body: ByteArray, val contentRange: String?, val etag: String?)
+private data class AppleRangeIdentity(
+    val mode: AppleRangeMode,
+    val total: Long = 0L,
+    val etag: String? = null,
+    val finalResource: HttpUrl? = null,
+)
+private data class AppleRangeReply(
+    val code: Int,
+    val body: ByteArray,
+    val contentRange: String?,
+    val etag: String?,
+    val finalResource: HttpUrl,
+)
+private data class AppleFetchedRange(val bytes: ByteArray, val cacheIdentity: AppleSegmentRangeIdentity?)
+private data class AppleFetchedSegment(val bytes: ByteArray, val cacheIdentity: AppleSegmentRangeIdentity)
 private val appleStrongTag = Regex("\"[\\x21\\x23-\\x7e\\x80-\\xff]*\"")
 private val appleContentRange = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)", RegexOption.IGNORE_CASE)
 
@@ -263,16 +289,28 @@ internal class AppleNativeDecrypt(
     private val urgentSegments = mutableSetOf<AppleSegmentKey>()
     private val rangeLock = Any()
     private val rangeIdentities = mutableMapOf<HttpUrl, AppleRangeIdentity>()
-    private val completedSegments = LinkedHashMap<AppleSegmentKey, ByteArray>(4, 0.75f, true)
-    private var completedSegmentBytes = 0L
-    private var retainSegments = true
+    private val preparationId = UUID.randomUUID().toString()
+    @Volatile private var segmentCache: AppleSegmentCache? = null
 
-    internal fun clearSegmentCache() = synchronized(segmentLock) {
-        completedSegments.clear()
-        completedSegmentBytes = 0L
-        urgentSegments.clear()
-        // Detached sources can finish their cache transfer, but no longer retain playback fragments.
-        retainSegments = false
+    internal fun bindSegmentCache(cache: AppleSegmentCache) {
+        val namespace = cache.namespace
+        require(namespace.adamId == namespace.key.trackId && namespace.groupId.isNotBlank() &&
+            namespace.resourceUrl.isNotBlank())
+        segmentCache?.takeIf { it !== cache }?.detachPlayback()
+        segmentCache = cache
+    }
+    internal fun detachSegmentCache() {
+        segmentCache?.detachPlayback()
+    }
+
+    internal fun ensureSegmentHealthy(track: AppleResolvedTrack) {
+        ensureRangeHealthy(track.media.resourceUrl)
+        val cache = segmentCache ?: return
+        val namespace = cache.namespace
+        if (cache.track !== track || namespace.adamId != track.media.adamId || namespace.groupId != track.variant.groupId ||
+            namespace.codecs != track.variant.codecs || namespace.sampleRate != track.variant.sampleRate ||
+            namespace.bitDepth != track.variant.bitDepth || namespace.resourceUrl != track.media.resourceUrl.toString() ||
+            cache.isInvalid()) throw IOException("Apple 分片获取失败：HTTP 502")
     }
 
     suspend fun prepare(
@@ -369,7 +407,7 @@ internal class AppleNativeDecrypt(
         val url = requireHttps(variant.url)
         val text = getText(url, "Apple 播放列表获取失败")
         val media = parseMediaPlaylist(text, url, adamId)
-        val rawInit = fetchRange(media, media.init, "Apple 分片获取失败")
+        val rawInit = fetchRange(media, media.init, "Apple 分片获取失败").bytes
         val widevineUri = media.segments.asSequence().mapNotNull { it.keyUri }.firstOrNull { it.startsWith("data:") }
         val isWidevine = variant.widevine || widevineUri != null
         if (isWidevine) {
@@ -380,7 +418,9 @@ internal class AppleNativeDecrypt(
             val pssh = appleWidevinePssh(original) ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
             return AppleResolvedTrack(variant.copy(widevine = true), media, rawInit, null, null, original, pssh)
         }
-        val alacCookie = if (variant.groupId.contains("alac", true)) findAlacCookie(rawInit) else null
+        val alacData = if (variant.groupId.contains("alac", true)) findAlacTrackData(rawInit) else null
+        val alacCookie = alacData?.first
+        val alacTiming = alacData?.second
         val alacConfig = alacCookie?.let(::parseAlacConfig)
         if (variant.groupId.contains("alac", true)) {
             val cookie = alacCookie ?: throw IOException("该曲目没有所选音质")
@@ -404,7 +444,7 @@ internal class AppleNativeDecrypt(
             }
         }
         val patched = patchInit(rawInit)
-        return AppleResolvedTrack(variant, media, patched, alacCookie, alacConfig, null, null)
+        return AppleResolvedTrack(variant, media, patched, alacCookie, alacConfig, null, null, alacTiming)
     }
 
     suspend fun fetchInit(track: AppleResolvedTrack): ByteArray = track.initBytes.copyOf()
@@ -415,19 +455,16 @@ internal class AppleNativeDecrypt(
         priority: AppleSegmentPriority = AppleSegmentPriority.Playback,
     ): ByteArray {
         if (index !in track.media.segments.indices) throw IOException("Apple 分片获取失败：HTTP 416")
-        ensureRangeHealthy(track.media.resourceUrl)
-        if (!track.variant.groupId.contains("alac", true) || track.variant.widevine) {
-            return produceSegment(track, index, AppleSegmentAdmission.ticket(priority))
-        }
+        ensureSegmentHealthy(track)
+        val cache = segmentCache
+        if (priority == AppleSegmentPriority.Playback) cache?.touchPlayback(index)
         val key = segmentKey(track, index)
         while (true) {
             currentCoroutineContext().ensureActive()
-            ensureRangeHealthy(track.media.resourceUrl)
+            ensureSegmentHealthy(track)
             var producer = false
-            var cached: ByteArray? = null
-            val flight = synchronized(segmentLock) {
-                cached = completedSegments[key]
-                if (cached != null) null else inFlight[key] ?: run {
+            val pending = synchronized(segmentLock) {
+                inFlight[key] ?: run {
                     val selected = if (key in urgentSegments) AppleSegmentPriority.Playback else priority
                     AppleSegmentFlight(AppleSegmentAdmission.ticket(selected)).also {
                         inFlight[key] = it
@@ -435,13 +472,12 @@ internal class AppleNativeDecrypt(
                     }
                 }
             }
-            cached?.let { ensureRangeHealthy(track.media.resourceUrl); return it }
-            val pending = checkNotNull(flight)
             if (!producer) {
                 if (priority == AppleSegmentPriority.Playback) AppleSegmentAdmission.promote(pending.ticket)
                 try {
                     val bytes = pending.result.await()
-                    ensureRangeHealthy(track.media.resourceUrl)
+                    ensureSegmentHealthy(track)
+                    if (priority == AppleSegmentPriority.Playback) cache?.touchPlayback(index)
                     return bytes
                 } catch (cancelled: CancellationException) {
                     currentCoroutineContext().ensureActive()
@@ -449,20 +485,23 @@ internal class AppleNativeDecrypt(
                 }
             }
             try {
-                val bytes = produceSegment(track, index, pending.ticket)
-                synchronized(segmentLock) {
-                    if (retainSegments && bytes.size <= APPLE_ALAC_SEGMENT_BUFFER_BYTES) {
-                        completedSegments[key] = bytes
-                        completedSegmentBytes += bytes.size
-                        val entries = completedSegments.entries.iterator()
-                        while (completedSegments.size > 4 || completedSegmentBytes > APPLE_ALAC_SEGMENT_BUFFER_BYTES) {
-                            completedSegmentBytes -= entries.next().value.size
-                            entries.remove()
-                        }
-                    }
+                cache?.read(index)?.let { bytes ->
+                    ensureSegmentHealthy(track)
+                    if (priority == AppleSegmentPriority.Playback) cache.touchPlayback(index)
+                    pending.result.complete(bytes)
+                    return bytes
                 }
-                pending.result.complete(bytes)
-                return bytes
+                ensureSegmentHealthy(track)
+                val fetched = produceSegment(track, index, pending.ticket)
+                ensureSegmentHealthy(track)
+                cache?.let {
+                    it.publishRangeIdentity(fetched.cacheIdentity)
+                    it.write(index, fetched.bytes, pending.ticket.priority)
+                }
+                ensureSegmentHealthy(track)
+                if (priority == AppleSegmentPriority.Playback) cache?.touchPlayback(index)
+                pending.result.complete(fetched.bytes)
+                return fetched.bytes
             } catch (error: Throwable) {
                 // Detach this producer before waking surviving consumers; they may register a replacement.
                 synchronized(segmentLock) { if (inFlight[key] === pending) inFlight.remove(key) }
@@ -480,6 +519,7 @@ internal class AppleNativeDecrypt(
             urgentSegments.add(key)
             inFlight[key]
         }
+        segmentCache?.touchPlayback(index)
         // Never nest segmentLock with the admission lock.
         flight?.let { AppleSegmentAdmission.promote(it.ticket) }
     }
@@ -491,21 +531,22 @@ internal class AppleNativeDecrypt(
 
     private fun segmentKey(track: AppleResolvedTrack, index: Int): AppleSegmentKey {
         val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
-        return AppleSegmentKey(track.media.resourceUrl, track.media.adamId, track.variant.groupId,
-            segment.range, segment.keyKind, segment.keyUri)
+        return AppleSegmentKey(segmentCache?.namespace?.id ?: preparationId, track.media.resourceUrl,
+            track.media.adamId, track.variant.groupId, track.variant.codecs, track.variant.sampleRate,
+            track.variant.bitDepth, segment.range, segment.keyKind, segment.keyUri)
     }
 
-    private suspend fun produceSegment(track: AppleResolvedTrack, index: Int, ticket: AppleSegmentTicket): ByteArray {
+    private suspend fun produceSegment(track: AppleResolvedTrack, index: Int, ticket: AppleSegmentTicket): AppleFetchedSegment {
         var status = "failed"
         var size = 0
         try {
             AppleSegmentAdmission.acquire(ticket)
             AppleSegmentAdmission.trace(ticket, track, index, "start", 0, null)
-            val bytes = fetchSegmentUncached(track, index, ticket.job)
-            ensureRangeHealthy(track.media.resourceUrl)
-            size = bytes.size
+            val fetched = fetchSegmentUncached(track, index, ticket.job)
+            ensureSegmentHealthy(track)
+            size = fetched.bytes.size
             status = "ready"
-            return bytes
+            return fetched
         } catch (cancelled: CancellationException) {
             status = "cancelled"
             throw cancelled
@@ -515,11 +556,15 @@ internal class AppleNativeDecrypt(
         }
     }
 
-    internal fun segmentLookahead(track: AppleResolvedTrack, legacyLookahead: Int): Int = synchronized(rangeLock) {
-        when (rangeIdentities[track.media.resourceUrl]?.mode ?: AppleRangeMode.Unknown) {
-            AppleRangeMode.Verified -> AUDIO_LANES
-            AppleRangeMode.Unknown, AppleRangeMode.Serial -> legacyLookahead
-            AppleRangeMode.Failed -> throw IOException("Apple 分片获取失败：HTTP 502")
+
+    internal fun segmentLookahead(track: AppleResolvedTrack, legacyLookahead: Int): Int {
+        ensureSegmentHealthy(track)
+        return synchronized(rangeLock) {
+            when (rangeIdentities[track.media.resourceUrl]?.mode ?: AppleRangeMode.Unknown) {
+                AppleRangeMode.Verified -> AUDIO_LANES
+                AppleRangeMode.Unknown, AppleRangeMode.Serial -> legacyLookahead
+                AppleRangeMode.Failed -> throw IOException("Apple 分片获取失败：HTTP 502")
+            }
         }
     }
 
@@ -527,13 +572,17 @@ internal class AppleNativeDecrypt(
         (rangeIdentities[track.media.resourceUrl]?.mode ?: AppleRangeMode.Unknown).name
     }
 
-    private fun ensureRangeHealthy(resource: HttpUrl) = synchronized(rangeLock) {
-        if (rangeIdentities[resource]?.mode == AppleRangeMode.Failed) throw IOException("Apple 分片获取失败：HTTP 502")
+    private fun ensureRangeHealthy(resource: HttpUrl) {
+        val failed = synchronized(rangeLock) { rangeIdentities[resource]?.mode == AppleRangeMode.Failed }
+        if (failed) {
+            segmentCache?.takeIf { it.namespace.resourceUrl == resource.toString() }?.invalidate()
+            throw IOException("Apple 分片获取失败：HTTP 502")
+        }
     }
 
-    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int, job: Long): ByteArray = supervisorScope {
+    private suspend fun fetchSegmentUncached(track: AppleResolvedTrack, index: Int, job: Long): AppleFetchedSegment = supervisorScope {
         val segment = track.media.segments.getOrNull(index) ?: throw IOException("Apple 分片获取失败：HTTP 416")
-        val bytes: ByteArray
+        val fetched: AppleFetchedRange
         val handle: Long
         if (segment.keyKind == KeyKind.TRACK) {
             val range = async {
@@ -541,12 +590,11 @@ internal class AppleNativeDecrypt(
             }
             val template = async { templateHandle(track.media.adamId, checkNotNull(segment.keyUri)) }
             try {
-                // Observe either failure/cancellation immediately, even while the other branch waits.
                 select<Unit> {
                     range.onAwait { }
                     template.onAwait { }
                 }
-                bytes = range.await()
+                fetched = range.await()
                 handle = template.await()
             } finally {
                 withContext(NonCancellable) {
@@ -555,11 +603,15 @@ internal class AppleNativeDecrypt(
                 }
             }
         } else {
-            bytes = fetchRange(track.media, segment.range, "Apple 分片获取失败", segment = true, job = job, index = index)
-            if (segment.keyKind == KeyKind.WIDEVINE) return@supervisorScope bytes
+            fetched = fetchRange(track.media, segment.range, "Apple 分片获取失败", segment = true, job = job, index = index)
+            if (segment.keyKind == KeyKind.WIDEVINE) {
+                return@supervisorScope AppleFetchedSegment(fetched.bytes,
+                    fetched.cacheIdentity ?: throw IOException("Apple 分片获取失败：HTTP 502"))
+            }
             handle = if (segment.keyKind == KeyKind.PREFETCH) prefetchHandle() else 0L
         }
-        val samples = scanFragment(bytes, handle != 0L)
+        val bytes = fetched.bytes
+        val samples = scanFragment(bytes, handle != 0L, track.alacTiming)
         for (sample in samples) {
             if (sample.start < 0 || sample.end > bytes.size || sample.end < sample.start) {
                 throw IOException("Apple 分片获取失败：HTTP 502")
@@ -572,10 +624,11 @@ internal class AppleNativeDecrypt(
             }
             track.alacConfig?.let { repairAlacEnd(bytes, sample, it) }
         }
-        bytes
+        AppleFetchedSegment(bytes, fetched.cacheIdentity ?: throw IOException("Apple 分片获取失败：HTTP 502"))
     }
-    internal fun sampleRanges(fragment: ByteArray): List<AppleSampleRange> = scanFragment(fragment, sanitizeEncryption = false)
 
+    internal fun sampleRanges(fragment: ByteArray, timing: AppleAlacTiming?): List<AppleSampleRange> =
+        scanFragment(fragment, sanitizeEncryption = false, timing = timing)
 
     fun generatedPlaylist(track: AppleResolvedTrack, requestId: Long): ByteArray {
         val base = "apple-native://$requestId"
@@ -591,11 +644,13 @@ internal class AppleNativeDecrypt(
             append("#EXT-X-ENDLIST\n")
         }.toByteArray(Charsets.UTF_8)
     }
-    fun generatedWidevinePlaylist(track: AppleResolvedTrack): ByteArray {
+    fun generatedWidevinePlaylist(track: AppleResolvedTrack, requestId: Long): ByteArray {
         val keyUri = track.widevineUri ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
         val pssh = track.widevinePssh ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
         val psshUri = "data:text/plain;base64," + Base64.encodeToString(pssh, Base64.NO_WRAP)
+        val base = "apple-native://$requestId"
         val output = StringBuilder(track.media.sourceText.length + psshUri.length)
+        var segmentIndex = 0
         for (raw in track.media.sourceText.lineSequence()) {
             val line = raw.trim()
             when {
@@ -609,24 +664,29 @@ internal class AppleNativeDecrypt(
                     } else output.append(raw).append('\n')
                 }
                 line.startsWith("#EXT-X-MAP:") -> {
-                    output.append(rewriteUriAttribute(raw, track.media.playlistUrl)).append('\n')
+                    val attrs = parseAttributes(line.substringAfter(':'))
+                    val uri = attrs["URI"] ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
+                    val resolved = track.media.playlistUrl.resolve(uri) ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
+                    if (resolved.scheme != "https") throw IOException("Apple 媒体地址无效")
+                    output.append("#EXT-X-MAP:")
+                    attrs.forEach { (name, value) ->
+                        if (name != "URI" && name != "BYTERANGE") output.append(name).append('=').append(value).append(',')
+                    }
+                    output.append("URI=\"").append(base).append("/init\"\n")
                 }
+                line.startsWith("#EXT-X-BYTERANGE:") -> Unit
                 line.isNotEmpty() && !line.startsWith('#') -> {
                     val resolved = track.media.playlistUrl.resolve(line) ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
-                    if (resolved.scheme != "https") throw IOException("Apple 媒体地址无效")
-                    output.append(resolved).append('\n')
+                    if (resolved.scheme != "https" || segmentIndex !in track.media.segments.indices) {
+                        throw IOException("Apple 媒体地址无效")
+                    }
+                    output.append(base).append("/segment/").append(segmentIndex++).append('\n')
                 }
                 else -> output.append(raw).append('\n')
             }
         }
+        if (segmentIndex != track.media.segments.size) throw IOException("Apple 播放列表获取失败：HTTP 502")
         return output.toString().toByteArray(Charsets.UTF_8)
-    }
-
-    private fun rewriteUriAttribute(line: String, base: HttpUrl): String {
-        val match = Regex("URI=\\\"([^\\\"]+)\\\"").find(line) ?: return line
-        val resolved = base.resolve(match.groupValues[1]) ?: throw IOException("Apple 播放列表获取失败：HTTP 502")
-        if (resolved.scheme != "https") throw IOException("Apple 媒体地址无效")
-        return line.replaceRange(match.range, "URI=\"$resolved\"")
     }
 
 
@@ -784,12 +844,13 @@ internal class AppleNativeDecrypt(
         segment: Boolean = false,
         job: Long = 0L,
         index: Int = -1,
-    ): ByteArray {
+    ): AppleFetchedRange {
         val length = range.length
         if (length <= 0 || length > Int.MAX_VALUE || range.start < 0) throw IOException("$errorPrefix：HTTP 416")
         var last: IOException? = null
         repeat(4) { attempt ->
             try {
+                if (segment) ensureRangeHealthy(playlist.resourceUrl)
                 val builder = Request.Builder().url(playlist.resourceUrl)
                     .header("Range", "bytes=${range.start}-${range.end}").get()
                 if (segment) {
@@ -813,12 +874,18 @@ internal class AppleNativeDecrypt(
                     else -> reply.body
                 }
                 if (result.size.toLong() != length) throw IOException("$errorPrefix：HTTP 502")
-                if (segment) acceptRangeIdentity(playlist.resourceUrl, rangeIdentity(range, reply.code, reply.contentRange, reply.etag))
-                return result
+                val accepted = if (segment) {
+                    acceptRangeIdentity(playlist.resourceUrl,
+                        rangeIdentity(range, reply.code, reply.contentRange, reply.etag, reply.finalResource))
+                } else null
+                return AppleFetchedRange(result, accepted?.toCacheIdentity())
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: IOException) {
                 last = error
+                if (segment && synchronized(rangeLock) { rangeIdentities[playlist.resourceUrl]?.mode == AppleRangeMode.Failed }) {
+                    throw error
+                }
                 if (attempt < 3) kotlinx.coroutines.delay(500L * (1L shl attempt))
             }
         }
@@ -843,7 +910,7 @@ internal class AppleNativeDecrypt(
                             val etag = value.header("ETag")
                             val bytes = if (value.code == 200 || value.code == 206) {
                                 // Reject a changed verified entity before aggregating any response body.
-                                if (segment) validateRangeIdentity(request.url, rangeIdentity(range, value.code, contentRange, etag))
+                                if (segment) validateRangeIdentity(request.url, rangeIdentity(range, value.code, contentRange, etag, url))
                                 val body = value.body ?: throw IOException("Apple 分片获取失败：HTTP 502")
                                 if (value.code == 206) {
                                     val expected = range.length.toInt()
@@ -863,7 +930,7 @@ internal class AppleNativeDecrypt(
                                     bytes
                                 } else body.bytes() // Preserve the existing whole-object 200 compatibility path.
                             } else ByteArray(0) // In particular, do not buffer 403/error bodies before retrying.
-                            if (cont.isActive) cont.resumeWith(Result.success(AppleRangeReply(value.code, bytes, contentRange, etag)))
+                            if (cont.isActive) cont.resumeWith(Result.success(AppleRangeReply(value.code, bytes, contentRange, etag, url)))
                         } catch (error: Exception) {
                             if (cont.isActive) cont.resumeWith(Result.failure(error))
                         }
@@ -873,36 +940,65 @@ internal class AppleNativeDecrypt(
         }
     }
 
-    private fun rangeIdentity(range: AppleByteRange, code: Int, contentRange: String?, etag: String?): AppleRangeIdentity? {
-        if (code != 206 || etag == null || !appleStrongTag.matches(etag)) return null
-        val fields = appleContentRange.matchEntire(contentRange.orEmpty())?.groupValues ?: return null
-        val start = fields[1].toLongOrNull() ?: return null
-        val end = fields[2].toLongOrNull() ?: return null
-        val total = fields[3].toLongOrNull() ?: return null
-        if (start != range.start || end != range.end || total <= end) return null
-        return AppleRangeIdentity(AppleRangeMode.Verified, total, etag)
+    private fun rangeIdentity(
+        range: AppleByteRange,
+        code: Int,
+        contentRange: String?,
+        etag: String?,
+        finalResource: HttpUrl,
+    ): AppleRangeIdentity {
+        val fields = appleContentRange.matchEntire(contentRange.orEmpty())?.groupValues
+        val start = fields?.getOrNull(1)?.toLongOrNull()
+        val end = fields?.getOrNull(2)?.toLongOrNull()
+        val total = fields?.getOrNull(3)?.toLongOrNull()
+        if (code == 206 && (start != range.start || end != range.end || total == null || total <= end)) {
+            throw IOException("Apple 分片获取失败：HTTP 502")
+        }
+        if (code == 206 && etag != null && appleStrongTag.matches(etag) && finalResource.scheme == "https" &&
+            finalResource.username.isEmpty() && finalResource.password.isEmpty()) {
+            return AppleRangeIdentity(AppleRangeMode.Verified, checkNotNull(total), etag, finalResource)
+        }
+        return AppleRangeIdentity(AppleRangeMode.Serial, finalResource = finalResource)
     }
 
-    private fun validateRangeIdentity(resource: HttpUrl, reply: AppleRangeIdentity?) = synchronized(rangeLock) {
-        val current = rangeIdentities[resource] ?: return@synchronized
-        if (current.mode == AppleRangeMode.Failed) throw IOException("Apple 分片获取失败：HTTP 502")
-        if (current.mode == AppleRangeMode.Verified && current != reply) {
-            rangeIdentities[resource] = AppleRangeIdentity(AppleRangeMode.Failed)
+    private fun AppleRangeIdentity.toCacheIdentity(): AppleSegmentRangeIdentity = when (mode) {
+        AppleRangeMode.Verified -> AppleSegmentRangeIdentity(
+            AppleSegmentRangeMode.Verified, total, etag, checkNotNull(finalResource).toString())
+        AppleRangeMode.Serial -> AppleSegmentRangeIdentity(AppleSegmentRangeMode.Serial)
+        else -> throw IOException("Apple 分片获取失败：HTTP 502")
+    }
+
+    private fun validateRangeIdentity(resource: HttpUrl, reply: AppleRangeIdentity) {
+        val failed = synchronized(rangeLock) {
+            val current = rangeIdentities[resource] ?: return@synchronized false
+            current.mode == AppleRangeMode.Failed || current.mode == AppleRangeMode.Verified && current != reply
+        }
+        if (failed) {
+            failRangeIdentity(resource)
             throw IOException("Apple 分片获取失败：HTTP 502")
         }
     }
 
-    private fun acceptRangeIdentity(resource: HttpUrl, reply: AppleRangeIdentity?) = synchronized(rangeLock) {
-        val current = rangeIdentities[resource]
-        when (current?.mode ?: AppleRangeMode.Unknown) {
-            AppleRangeMode.Unknown -> rangeIdentities[resource] = reply ?: AppleRangeIdentity(AppleRangeMode.Serial)
-            AppleRangeMode.Serial -> Unit
-            AppleRangeMode.Failed -> throw IOException("Apple 分片获取失败：HTTP 502")
-            AppleRangeMode.Verified -> if (current != reply) {
-                rangeIdentities[resource] = AppleRangeIdentity(AppleRangeMode.Failed)
-                throw IOException("Apple 分片获取失败：HTTP 502")
+    private fun acceptRangeIdentity(resource: HttpUrl, reply: AppleRangeIdentity): AppleRangeIdentity {
+        val accepted = synchronized(rangeLock) {
+            val current = rangeIdentities[resource]
+            when (current?.mode ?: AppleRangeMode.Unknown) {
+                AppleRangeMode.Unknown -> reply.also { rangeIdentities[resource] = it }
+                AppleRangeMode.Serial -> checkNotNull(current)
+                AppleRangeMode.Failed -> null
+                AppleRangeMode.Verified -> if (current == reply) current else null
             }
         }
+        if (accepted == null) {
+            failRangeIdentity(resource)
+            throw IOException("Apple 分片获取失败：HTTP 502")
+        }
+        return accepted
+    }
+
+    private fun failRangeIdentity(resource: HttpUrl) {
+        synchronized(rangeLock) { rangeIdentities[resource] = AppleRangeIdentity(AppleRangeMode.Failed) }
+        segmentCache?.takeIf { it.namespace.resourceUrl == resource.toString() }?.invalidate()
     }
 
     private suspend fun templateHandle(adamId: String, uri: String): Long = templateMutex.withLock {
@@ -1124,67 +1220,107 @@ internal class AppleNativeDecrypt(
             return bytes
         }
 
-        private fun scanFragment(bytes: ByteArray, sanitizeEncryption: Boolean): List<AppleSampleRange> {
+        private fun scanFragment(
+            bytes: ByteArray,
+            sanitizeEncryption: Boolean,
+            timing: AppleAlacTiming? = null,
+        ): List<AppleSampleRange> {
             val samples = ArrayList<AppleSampleRange>()
             val rename = ArrayList<Int>()
             var foundMoof = false
+            var timedSamples = 0
             for (moof in boxes(bytes).filter { it.type == "moof" }) {
                 foundMoof = true
-                for (child in boxes(bytes, moof.body, moof.end)) {
+                val children = boxes(bytes, moof.body, moof.end)
+                for (child in children) {
                     if (sanitizeEncryption && child.type == "pssh") rename += child.start
                     if (child.type != "traf") continue
-                    val traf = child
-                    var defaultSize: Long? = null
-                    var next = moof.start.toLong()
-                    for (box in boxes(bytes, traf.body, traf.end)) {
-                        if (sanitizeEncryption && (box.type == "senc" || box.type == "saiz" || box.type == "saio" ||
+                    val trafBoxes = boxes(bytes, child.body, child.end)
+                    if (sanitizeEncryption) {
+                        for (box in trafBoxes) {
+                            if (box.type == "senc" || box.type == "saiz" || box.type == "saio" ||
                                 (box.type == "sgpd" || box.type == "sbgp") && box.body + 8 <= box.end &&
-                                (String(bytes, box.body + 4, 4, Charsets.ISO_8859_1) == "seig" || String(bytes, box.body + 4, 4, Charsets.ISO_8859_1) == "seam"))) {
-                            rename += box.start
+                                (String(bytes, box.body + 4, 4, Charsets.ISO_8859_1) == "seig" || String(bytes, box.body + 4, 4, Charsets.ISO_8859_1) == "seam")) {
+                                rename += box.start
+                            }
                         }
-                        if (box.type == "tfhd") {
-                            if (box.body + 8 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
-                            val flags = readU24(bytes, box.body + 1)
-                            var cursor = box.body + 8
-                            if (flags and 1 != 0) throw IOException("Apple 分片获取失败：HTTP 502")
-                            if (flags and 2 != 0) cursor += 4
-                            if (flags and 8 != 0) cursor += 4
-                            if (flags and 16 != 0) {
-                                if (cursor + 4 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
-                                defaultSize = readU32(bytes, cursor)
-                            }
-                        } else if (box.type == "trun") {
-                            if (box.body + 8 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
-                            val flags = readU24(bytes, box.body + 1)
-                            val count = readU32(bytes, box.body + 4)
-                            if (count > bytes.size) throw IOException("Apple 分片获取失败：HTTP 502")
-                            var cursor = box.body + 8
-                            var pos = next
-                            if (flags and 1 != 0) {
-                                if (cursor + 4 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
-                                pos = moof.start.toLong() + readU32(bytes, cursor).toInt().toLong()
-                                cursor += 4
-                            }
-                            if (flags and 4 != 0) cursor += 4
-                            repeat(count.toInt()) {
-                                if (flags and 0x100 != 0) cursor += 4
-                                val size = if (flags and 0x200 != 0) {
-                                    if (cursor + 4 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
-                                    readU32(bytes, cursor).also { cursor += 4 }
-                                } else defaultSize ?: throw IOException("Apple 分片获取失败：HTTP 502")
-                                if (flags and 0x400 != 0) cursor += 4
-                                if (flags and 0x800 != 0) cursor += 4
-                                if (cursor > box.end || size > Int.MAX_VALUE || pos < 0 || pos + size > bytes.size) throw IOException("Apple 分片获取失败：HTTP 502")
-                                samples += AppleSampleRange(pos.toInt(), (pos + size).toInt())
-                                pos += size
-                            }
-                            next = pos
+                    }
+                    val tfhd = trafBoxes.firstOrNull { it.type == "tfhd" }
+                    if (tfhd == null && timing != null) throw IOException("Apple 分片获取失败：HTTP 502")
+                    var trackId = -1L
+                    var defaultSize: Long? = null
+                    var defaultDuration: Long? = null
+                    if (tfhd != null) {
+                        if (tfhd.body + 8 > tfhd.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                        trackId = readU32(bytes, tfhd.body + 4)
+                        val flags = readU24(bytes, tfhd.body + 1)
+                        var cursor = tfhd.body + 8
+                        if (flags and 1 != 0) throw IOException("Apple 分片获取失败：HTTP 502")
+                        if (flags and 2 != 0) cursor = checkedAdvance(cursor, 4, tfhd.end)
+                        if (flags and 8 != 0) {
+                            if (cursor + 4 > tfhd.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                            defaultDuration = readU32(bytes, cursor)
+                            cursor += 4
                         }
+                        if (flags and 16 != 0) {
+                            if (cursor + 4 > tfhd.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                            defaultSize = readU32(bytes, cursor)
+                        }
+                    }
+                    val selectedTrack = timing != null && trackId == timing.trackId
+                    var next = moof.start.toLong()
+                    var relativeTicks: Long? = if (selectedTrack) 0L else null
+                    val trackDefaultDuration = if (selectedTrack) {
+                        defaultDuration ?: timing?.defaultSampleDuration?.takeIf { it > 0L }
+                    } else null
+                    for (box in trafBoxes) {
+                        if (box.type != "trun") continue
+                        if (box.body + 8 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                        val flags = readU24(bytes, box.body + 1)
+                        val count = readU32(bytes, box.body + 4)
+                        if (count > bytes.size) throw IOException("Apple 分片获取失败：HTTP 502")
+                        var cursor = box.body + 8
+                        var pos = next
+                        if (flags and 1 != 0) {
+                            if (cursor + 4 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                            pos = moof.start.toLong() + readU32(bytes, cursor).toInt().toLong()
+                            cursor += 4
+                        }
+                        if (flags and 4 != 0) cursor = checkedAdvance(cursor, 4, box.end)
+                        repeat(count.toInt()) {
+                            val duration = if (flags and 0x100 != 0) {
+                                if (cursor + 4 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                                readU32(bytes, cursor).also { cursor += 4 }
+                            } else trackDefaultDuration
+                            val size = if (flags and 0x200 != 0) {
+                                if (cursor + 4 > box.end) throw IOException("Apple 分片获取失败：HTTP 502")
+                                readU32(bytes, cursor).also { cursor += 4 }
+                            } else defaultSize ?: throw IOException("Apple 分片获取失败：HTTP 502")
+                            if (flags and 0x400 != 0) cursor = checkedAdvance(cursor, 4, box.end)
+                            if (flags and 0x800 != 0) cursor = checkedAdvance(cursor, 4, box.end)
+                            if (cursor > box.end || size <= 0L || size > Int.MAX_VALUE || pos < 0L ||
+                                pos > bytes.size.toLong() || size > bytes.size.toLong() - pos) {
+                                throw IOException("Apple 分片获取失败：HTTP 502")
+                            }
+                            if (timing == null || selectedTrack) {
+                                val validDuration = duration?.takeIf { it > 0L && it <= Long.MAX_VALUE }
+                                val startTicks = relativeTicks
+                                samples += AppleSampleRange(pos.toInt(), (pos + size).toInt(),
+                                    startTicks ?: -1L, validDuration ?: -1L)
+                                if (selectedTrack) {
+                                    timedSamples++
+                                    relativeTicks = if (relativeTicks != null && validDuration != null &&
+                                        relativeTicks!! <= Long.MAX_VALUE - validDuration) relativeTicks!! + validDuration else null
+                                }
+                            }
+                            pos += size
+                        }
+                        next = pos
                     }
                 }
             }
             rename.forEach { bytes[it + 4] = 'f'.code.toByte(); bytes[it + 5] = 'r'.code.toByte(); bytes[it + 6] = 'e'.code.toByte(); bytes[it + 7] = 'e'.code.toByte() }
-            if (!foundMoof) throw IOException("Apple 分片获取失败：HTTP 502")
+            if (!foundMoof || timing != null && timedSamples == 0) throw IOException("Apple 分片获取失败：HTTP 502")
             val sorted = samples.sortedBy { it.start }
             var previous = 0
             for (sample in sorted) {
@@ -1194,21 +1330,59 @@ internal class AppleNativeDecrypt(
             return sorted
         }
 
+        private fun checkedAdvance(position: Int, amount: Int, end: Int): Int {
+            if (position < 0 || amount < 0 || position > end - amount) throw IOException("Apple 分片获取失败：HTTP 502")
+            return position + amount
+        }
+
         private fun findChild(bytes: ByteArray, box: Box, type: String) = boxes(bytes, box.body, box.end).firstOrNull { it.type == type }
         private fun readU24(bytes: ByteArray, at: Int) = ((bytes[at].toInt() and 0xff) shl 16) or ((bytes[at + 1].toInt() and 0xff) shl 8) or (bytes[at + 2].toInt() and 0xff)
         private fun readU32(bytes: ByteArray, at: Int) = ByteBuffer.wrap(bytes, at, 4).order(ByteOrder.BIG_ENDIAN).int.toLong() and 0xffffffffL
         private fun readU64(bytes: ByteArray, at: Int) = ByteBuffer.wrap(bytes, at, 8).order(ByteOrder.BIG_ENDIAN).long
 
-        private fun findAlacCookie(init: ByteArray): ByteArray? {
-            for (moov in boxes(init).filter { it.type == "moov" }) for (trak in boxes(init, moov.body, moov.end).filter { it.type == "trak" }) {
-                val mdia = findChild(init, trak, "mdia") ?: continue
-                val minf = findChild(init, mdia, "minf") ?: continue
-                val stbl = findChild(init, minf, "stbl") ?: continue
-                val stsd = findChild(init, stbl, "stsd") ?: continue
-                for (entry in boxes(init, stsd.body + 8, stsd.end)) {
-                    if (entry.type !in setOf("alac", "enca")) continue
-                    val alac = boxes(init, entry.body + 28, entry.end).firstOrNull { it.type == "alac" } ?: continue
-                    if (alac.end - alac.body == 28 && alac.body + 28 <= alac.end) return init.copyOfRange(alac.body + 4, alac.end)
+        private fun findAlacTrackData(init: ByteArray): Pair<ByteArray, AppleAlacTiming?>? {
+            for (moov in boxes(init).filter { it.type == "moov" }) {
+                val defaultDurations = HashMap<Long, Long>()
+                findChild(init, moov, "mvex")?.let { mvex ->
+                    for (trex in boxes(init, mvex.body, mvex.end).filter { it.type == "trex" }) {
+                        if (trex.body + 16 > trex.end) continue
+                        val id = readU32(init, trex.body + 4)
+                        val duration = readU32(init, trex.body + 12)
+                        if (id > 0L) defaultDurations[id] = duration.takeIf { it > 0L } ?: -1L
+                    }
+                }
+                for (trak in boxes(init, moov.body, moov.end).filter { it.type == "trak" }) {
+                    val tkhd = findChild(init, trak, "tkhd")
+                    val mdia = findChild(init, trak, "mdia") ?: continue
+                    val handler = findChild(init, mdia, "hdlr") ?: continue
+                    if (handler.body + 12 > handler.end || readU32(init, handler.body + 8) != 0x736F756EL) continue
+                    val mdhd = findChild(init, mdia, "mdhd")
+                    val trackId = tkhd?.let { box ->
+                        if (box.body + 4 > box.end) null else {
+                            val version = init[box.body].toInt() and 0xff
+                            val offset = box.body + if (version == 1) 20 else if (version == 0) 12 else return@let null
+                            if (offset + 4 > box.end) null else readU32(init, offset)
+                        }
+                    }
+                    val timescale = mdhd?.let { box ->
+                        if (box.body + 4 > box.end) null else {
+                            val version = init[box.body].toInt() and 0xff
+                            val offset = box.body + if (version == 1) 20 else if (version == 0) 12 else return@let null
+                            if (offset + 4 > box.end) null else readU32(init, offset).takeIf { it > 0L }
+                        }
+                    }
+                    val stbl = findChild(init, mdia, "minf")?.let { findChild(init, it, "stbl") } ?: continue
+                    val stsd = findChild(init, stbl, "stsd") ?: continue
+                    for (entry in boxes(init, stsd.body + 8, stsd.end)) {
+                        if (entry.type !in setOf("alac", "enca")) continue
+                        val alac = boxes(init, entry.body + 28, entry.end).firstOrNull { it.type == "alac" } ?: continue
+                        if (alac.end - alac.body != 28 || alac.body + 28 > alac.end) continue
+                        val cookie = init.copyOfRange(alac.body + 4, alac.end)
+                        val timing = if (trackId != null && trackId > 0L && timescale != null) {
+                            AppleAlacTiming(trackId, timescale, defaultDurations[trackId] ?: -1L)
+                        } else null
+                        return cookie to timing
+                    }
                 }
             }
             return null

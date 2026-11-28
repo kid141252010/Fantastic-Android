@@ -42,6 +42,11 @@ internal interface AppleAlacReader {
     suspend fun close()
 }
 
+internal sealed interface AppleAudioFile {
+    data class Alac(val reader: AppleAlacFileReader) : AppleAudioFile
+    data class Media3(val format: Format, val durationMs: Long) : AppleAudioFile
+}
+
 internal class AppleAlacCacheException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
 @UnstableApi
@@ -68,7 +73,8 @@ internal class AppleAlacStreamReader(
         if (track.media.segments.isEmpty()) throw IOException("ALAC 播放列表为空")
         index = track.media.segments.indexOfLast { it.startMs <= positionMs }.coerceAtLeast(0)
         install(window.read(index))
-        return Math.multiplyExact(track.media.segments[index].startMs, 1000L)
+        return timedPacketPositionUs(positionMs, track.media.segments[index].startMs)
+            ?: Math.multiplyExact(track.media.segments[index].startMs, 1000L)
     }
 
     override suspend fun readPacket(): ByteArray? {
@@ -88,10 +94,41 @@ internal class AppleAlacStreamReader(
     }
 
     private suspend fun install(raw: ByteArray) {
-        ranges = withContext(Dispatchers.Default) { source.decrypt.sampleRanges(raw) }
+        ranges = withContext(Dispatchers.Default) { source.decrypt.sampleRanges(raw, track.alacTiming) }
         if (ranges.isEmpty()) throw IOException("ALAC 音频分片为空")
         fragment = raw
         packetIndex = 0
+    }
+
+    private fun timedPacketPositionUs(positionMs: Long, segmentStartMs: Long): Long? {
+        val timing = track.alacTiming ?: return null
+        if (timing.timescale <= 0L || ranges.isEmpty()) return null
+        var previousEnd = -1L
+        for (range in ranges) {
+            if (range.startTicks < 0L || range.durationTicks <= 0L ||
+                previousEnd >= 0L && range.startTicks != previousEnd ||
+                range.startTicks > Long.MAX_VALUE - range.durationTicks) return null
+            previousEnd = range.startTicks + range.durationTicks
+        }
+        val targetOffsetMs = (positionMs - segmentStartMs).coerceAtLeast(0L)
+        return try {
+            val firstTick = ranges.first().startTicks
+            val targetTick = Math.addExact(firstTick, Math.multiplyExact(targetOffsetMs, timing.timescale) / 1000L)
+            var low = 0
+            var high = ranges.size
+            while (low < high) {
+                val middle = (low + high) ushr 1
+                if (ranges[middle].startTicks <= targetTick) low = middle + 1 else high = middle
+            }
+            val selected = (low - 1).coerceAtLeast(0)
+            val deltaTicks = ranges[selected].startTicks - firstTick
+            val positionUs = Math.addExact(Math.multiplyExact(segmentStartMs, 1000L),
+                Math.multiplyExact(deltaTicks, 1_000_000L) / timing.timescale)
+            packetIndex = selected
+            positionUs
+        } catch (_: ArithmeticException) {
+            null
+        }
     }
 
     override suspend fun close() {
@@ -107,12 +144,13 @@ internal class AppleAlacStreamReader(
 @UnstableApi
 internal class AppleAlacFileReader private constructor(
     private val file: File,
-    private val lease: PlaybackCacheLease?,
+    private val lease: AutoCloseable?,
 ) : AppleAlacReader {
     private val dataSource = FileDataSource()
     private val extractor = Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED)
     private val seekPosition = PositionHolder()
     private lateinit var input: DefaultExtractorInput
+    private val audioOutputs = mutableListOf<PacketOutput>()
     private var length = 0L
     private var closed = false
     private var tracksEnded = false
@@ -126,15 +164,15 @@ internal class AppleAlacFileReader private constructor(
     override var maxBlock = 0
         private set
 
-    private fun invalid(): Nothing = throw AppleAlacCacheException("ALAC 缓存格式无效")
+    private fun invalid(): Nothing = throw IOException("音频文件格式无效")
 
-    private suspend fun initialize() {
+    private suspend fun initialize(): Format {
         length = file.length()
-        if (length <= 0) invalid()
+        if (length <= 0L) invalid()
         reposition(0L)
         extractor.init(object : ExtractorOutput {
             override fun track(id: Int, type: Int): TrackOutput =
-                if (type == C.TRACK_TYPE_AUDIO) PacketOutput(id) else DummyTrackOutput()
+                if (type == C.TRACK_TYPE_AUDIO) PacketOutput(id).also(audioOutputs::add) else DummyTrackOutput()
             override fun endTracks() { tracksEnded = true }
             override fun seekMap(map: SeekMap) { seekMap = map }
         })
@@ -145,25 +183,43 @@ internal class AppleAlacFileReader private constructor(
                 Extractor.RESULT_END_OF_INPUT -> invalid()
             }
         }
-        val format = packets?.format ?: invalid()
-        if (format.drmInitData != null) invalid()
-        cookie = format.initializationData.singleOrNull() ?: invalid()
-        if (cookie.size != 24 && cookie.size != 48) invalid()
-        val config = ByteBuffer.wrap(cookie).order(ByteOrder.BIG_ENDIAN)
-        val frames = config.int.toLong() and 0xffff_ffffL
-        val version = cookie[4].toInt() and 255
-        val bits = cookie[5].toInt() and 255
-        val channels = cookie[9].toInt() and 255
-        val rate = config.getInt(20).toLong() and 0xffff_ffffL
-        if (frames !in 1L..(1L shl 20) || version != 0 || bits !in setOf(16, 20, 24, 32) ||
-            channels !in 1..8 || rate !in 1L..Int.MAX_VALUE.toLong()) invalid()
-        if (format.sampleRate != Format.NO_VALUE && format.sampleRate != rate.toInt() ||
-            format.channelCount != Format.NO_VALUE && format.channelCount != channels) invalid()
-        maxBlock = frames.toInt()
+        if (audioOutputs.isEmpty()) invalid()
+        val formats = audioOutputs.mapNotNull { it.format }
+        if (formats.size != audioOutputs.size) invalid()
+        val format = formats.first()
+        if (formats.drop(1).any { !compatibleTracks(format, it) } || format.drmInitData != null ||
+            !MimeTypes.isAudio(format.sampleMimeType) || seekMap?.isSeekable != true) invalid()
         durationMs = (seekMap?.durationUs ?: C.TIME_UNSET) / 1000L
-        if (durationMs <= 0 || seekMap?.isSeekable != true) invalid()
-        packets?.discard()
+        if (durationMs <= 0L) invalid()
+        if (format.sampleMimeType == MimeTypes.AUDIO_ALAC) {
+            val selected = audioOutputs.firstOrNull { it.format?.sampleMimeType == MimeTypes.AUDIO_ALAC } ?: invalid()
+            if (selected.format?.drmInitData != null || selected.received > 0) invalid()
+            val alacCookie = selected.format?.initializationData?.singleOrNull() ?: invalid()
+            if (alacCookie.size != 24 && alacCookie.size != 48) invalid()
+            val config = ByteBuffer.wrap(alacCookie).order(ByteOrder.BIG_ENDIAN)
+            val frames = config.int.toLong() and 0xffff_ffffL
+            val version = alacCookie[4].toInt() and 255
+            val bits = alacCookie[5].toInt() and 255
+            val channels = alacCookie[9].toInt() and 255
+            val rate = config.getInt(20).toLong() and 0xffff_ffffL
+            if (frames !in 1L..(1L shl 20) || version != 0 || bits !in setOf(16, 20, 24, 32) ||
+                channels !in 1..8 || rate !in 1L..Int.MAX_VALUE.toLong()) invalid()
+            if (selected.format?.sampleRate != Format.NO_VALUE && selected.format?.sampleRate != rate.toInt() ||
+                selected.format?.channelCount != Format.NO_VALUE && selected.format?.channelCount != channels) invalid()
+            cookie = alacCookie
+            maxBlock = frames.toInt()
+            audioTrackId = selected.id
+            packets = selected
+            selected.discard()
+        }
+        return format
     }
+
+    private fun compatibleTracks(first: Format, other: Format): Boolean =
+        first.sampleMimeType == other.sampleMimeType && first.codecs == other.codecs &&
+            first.sampleRate == other.sampleRate && first.channelCount == other.channelCount &&
+            first.drmInitData == other.drmInitData && first.initializationData.size == other.initializationData.size &&
+            first.initializationData.indices.all { first.initializationData[it].contentEquals(other.initializationData[it]) }
 
     override suspend fun seekTo(positionMs: Long): Long = reading {
         val point = extractor.getSeekPoints(Math.multiplyExact(positionMs.coerceAtLeast(0L), 1000L), audioTrackId).first
@@ -175,7 +231,7 @@ internal class AppleAlacFileReader private constructor(
     }
 
     override suspend fun readPacket(): ByteArray? = reading {
-        val target = packets ?: invalid()
+        val target = packets ?: throw IOException("音频文件不是 ALAC")
         target.ready = false
         while (!target.ready) {
             currentCoroutineContext().ensureActive()
@@ -207,7 +263,7 @@ internal class AppleAlacFileReader private constructor(
         } catch (error: AppleAlacCacheException) {
             throw error
         } catch (error: Exception) {
-            throw AppleAlacCacheException("ALAC 缓存读取失败", error)
+            throw AppleAlacCacheException("音频文件读取失败", error)
         }
     }
 
@@ -221,12 +277,12 @@ internal class AppleAlacFileReader private constructor(
                     finally { lease?.close() }
                 }
             } catch (error: Exception) {
-                throw AppleAlacCacheException("ALAC 缓存读取失败", error)
+                throw AppleAlacCacheException("音频文件读取失败", error)
             }
         }
     }
 
-    private inner class PacketOutput(private val id: Int) : TrackOutput {
+    private inner class PacketOutput(val id: Int) : TrackOutput {
         private val ignored = DummyTrackOutput()
         var format: Format? = null
             private set
@@ -238,12 +294,11 @@ internal class AppleAlacFileReader private constructor(
         private var timeUs = C.TIME_UNSET
 
         override fun format(format: Format) {
-            if (format.sampleMimeType != MimeTypes.AUDIO_ALAC) return
-            if (packets != null && packets !== this) invalid()
-            selected = true
             this.format = format
-            packets = this
-            audioTrackId = id
+            if (format.sampleMimeType == MimeTypes.AUDIO_ALAC && packets == null) {
+                selected = true
+                packets = this
+            }
         }
 
         private fun prepare(length: Int, part: Int) {
@@ -294,22 +349,43 @@ internal class AppleAlacFileReader private constructor(
     }
 
     companion object {
-        suspend fun open(file: File, lease: PlaybackCacheLease? = null): AppleAlacFileReader {
+        suspend fun openAudio(file: File, lease: AutoCloseable? = null): AppleAudioFile {
             var reader: AppleAlacFileReader? = null
             try {
-                return withContext(Dispatchers.IO) {
-                    AppleAlacFileReader(file, lease).also { reader = it; it.initialize() }
+                val (opened, format) = withContext(Dispatchers.IO) {
+                    AppleAlacFileReader(file, lease).also { reader = it }.let { it to it.initialize() }
                 }
+                val duration = opened.durationMs
+                if (format.sampleMimeType == MimeTypes.AUDIO_ALAC) return AppleAudioFile.Alac(opened)
+                withContext(NonCancellable + Dispatchers.IO) { opened.close() }
+                reader = null
+                return AppleAudioFile.Media3(format, duration)
             } catch (error: Throwable) {
                 withContext(NonCancellable + Dispatchers.IO) {
                     try { reader?.close() ?: lease?.close() }
                     catch (closeError: Exception) { error.addSuppressed(closeError) }
                 }
                 if (error is CancellationException) throw error
-                if (error is AppleAlacCacheException) throw error
                 if (error !is Exception) throw error
-                throw AppleAlacCacheException("ALAC 缓存格式无效", error)
+                throw IOException("音频文件读取失败", error)
             }
+        }
+
+        suspend fun openKnownAlac(file: File, lease: AutoCloseable? = null): AppleAlacFileReader {
+            return when (val opened = openAudio(file, lease)) {
+                is AppleAudioFile.Alac -> opened.reader
+                is AppleAudioFile.Media3 -> throw IOException("下载音频格式与已确认的 ALAC 不一致")
+            }
+        }
+
+        suspend fun open(file: File, lease: AutoCloseable? = null): AppleAlacFileReader = try {
+            openKnownAlac(file, lease)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: AppleAlacCacheException) {
+            throw error
+        } catch (error: Exception) {
+            throw AppleAlacCacheException("ALAC 缓存格式无效", error)
         }
     }
 }
