@@ -135,7 +135,7 @@ internal fun QueuePane(
                 confirmButton = { TextButton(onClick = { player.clearUpcoming(revision); clearRevision = null }) { Text("清除") } },
                 dismissButton = { TextButton(onClick = { clearRevision = null }) { Text("取消") } })
         }
-        // The source keeps its active group heading in a separate sticky_header_container.
+        // The active group heading stays in a separate sticky container.
         // No history section is fabricated from playlist indices before the current item.
         LazyColumn(
             state = listState,
@@ -287,7 +287,7 @@ private fun QueueRow(
 
 private fun Modifier.queueBottomFade(controlsInset: Dp): Modifier =
     graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }.drawWithCache {
-        // NewPlayerQueueViewFragment.W1: 16dp fade followed by transparent controls overlap.
+        // 16dp fade followed by transparent controls overlap.
         val end = (size.height - controlsInset.toPx()).coerceAtLeast(0f)
         val start = (end - 16.dp.toPx()).coerceAtLeast(0f)
         val mask = Brush.verticalGradient(listOf(Color.Black, Color.Transparent), startY = start, endY = end.coerceAtLeast(start + 1f))

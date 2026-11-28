@@ -11,8 +11,7 @@ captures/
 # 安装包、第三方应用分析与抓包产物，永不入库
 **/*.apk
 *.har
-*.pcap
-*.pcapng
+*.pcap*
 **/ja[d]x-out/
 **/decompiled/
 **/*-reverse/
