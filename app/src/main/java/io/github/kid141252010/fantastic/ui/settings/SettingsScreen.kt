@@ -30,7 +30,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,7 +80,9 @@ fun SettingsScreen(
     val storefront = if (storefrontEdited) storefrontDraft else savedStorefront
     val savedServer = SourceStatus.normalizeBaseUrl(prefs.baseUrl)
     val regionEntry = regions.entries[savedServer]
-    val addressMatchesSaved = SourceStatus.normalizeBaseUrl(baseUrl) == savedServer
+    val cachedWrapper = regionEntry?.wrapperRegions
+    val selectedStorefront = storefront.trim().lowercase()
+    val storefrontValidationError = storefrontErrorFor(selectedStorefront, cachedWrapper)
     var qqQuality by remember { mutableStateOf(prefs.qqQuality) }
     var neteaseQuality by remember { mutableStateOf(prefs.neteaseQuality) }
     var appleDownloadQuality by remember { mutableStateOf(prefs.appleQuality) }
@@ -102,139 +103,73 @@ fun SettingsScreen(
     var wrapperStatus by remember { mutableStateOf<SourceStatus.Wrapper?>(null) }
     var wrapperError by remember { mutableStateOf<String?>(null) }
     var checkedAddress by remember { mutableStateOf<String?>(null) }
-    var refreshingRegions by remember { mutableStateOf(false) }
-    var refreshMessage by remember { mutableStateOf<String?>(null) }
-    var storefrontError by remember { mutableStateOf<String?>(null) }
     var neteaseCapabilities by remember { mutableStateOf<NeteaseCapabilities?>(null) }
     var neteaseError by remember { mutableStateOf<String?>(null) }
     var choicePanel by remember { mutableStateOf<SettingsChoicePanel?>(null) }
-    val regionRequestBusy = checking || refreshingRegions || regions.refreshingServer != null
+    var serverRequestGeneration by remember { mutableStateOf(0) }
+    val serverRequestBusy = checking
 
-    fun persistPlaybackSettings() {
-        prefs.qqQuality = qqQuality
-        prefs.neteaseQuality = neteaseQuality
-        prefs.appleQuality = appleDownloadQuality
-        prefs.appleWifiQuality = appleWifiQuality
-        prefs.appleCellularQuality = appleCellularQuality
-        prefs.appleSpatial = appleSpatial
-        prefs.appleTransition = appleTransition
-        prefs.appleCrossfade = appleCrossfade
-    }
-
-    fun closeSettings() {
-        if (checking) return
-        val language = appleLyricsLanguage.trim().ifEmpty { defaultLyricsOptions.language }
-        val script = appleLyricsScript.trim().ifEmpty { defaultLyricsOptions.script }
-        lyricsLanguageError = !isValidAppleLyricsTag(language)
-        lyricsScriptError = !isValidAppleLyricsTag(script)
-        if (lyricsLanguageError || lyricsScriptError) return
-
-        val normalized = SourceStatus.normalizeBaseUrl(baseUrl)
-        if (normalized == null) {
-            saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
-            return
-        }
-        val selectedStorefront = storefront.trim().lowercase()
-        if (!selectedStorefront.matches(Regex("[a-z]{2}"))) {
-            saveError = "Apple Music 地区必须是两位英文字母代码，例如 ca、tr 或 jp。"
-            return
-        }
-        val addressChanged = normalized != SourceStatus.normalizeBaseUrl(prefs.baseUrl)
-        val regionChanged = selectedStorefront != prefs.storefront
-        if ((addressChanged || regionChanged) &&
-            regions.entries[normalized]?.storefronts?.none { it.id == selectedStorefront } != false
-        ) {
-            saveError = "地区不在此服务器的已缓存 AM 列表中；请检查服务器或刷新 AM 地区。"
-            return
-        }
-        if (addressChanged && (checkedAddress != normalized || wrapperStatus?.serverReachable != true)) {
-            saveError = "请先检查新服务器并确认其返回有效的 Fantastic /status。"
-            return
-        }
-        if (addressChanged) prefs.baseUrl = normalized
-        if (regionChanged) prefs.storefront = selectedStorefront
-        persistPlaybackSettings()
-        val lyricsOptions = AppleLyricsOptions(language, script)
-        if (lyricsOptions != prefs.appleLyricsOptions) {
-            prefs.appleLyricsOptions = lyricsOptions
-            lyrics.onAppleLyricsOptionsChanged()
-        }
-        onClose()
-    }
-
-    fun refreshRegions() {
-        if (regionRequestBusy || !addressMatchesSaved) return
-        val server = SourceStatus.normalizeBaseUrl(prefs.baseUrl) ?: return
-        refreshingRegions = true
-        refreshMessage = null
-        scope.launch {
-            try {
-                val result = app.appleRegions.refresh(server)
-                val wrapper = result.wrapper.getOrNull()
-                val wrapperSucceeded = wrapper != null && wrapper.httpCode in 200..299 && wrapper.serverReachable && wrapper.available
-                refreshMessage = "AM 目录：${if (result.storefronts.isSuccess) "刷新成功" else "刷新失败"}；wrapper：${if (wrapperSucceeded) "刷新成功" else "刷新失败"}"
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                refreshMessage = "刷新失败：${error.message ?: "无法获取地区"}"
-            } finally {
-                refreshingRegions = false
-            }
+    fun saveStorefrontIfValid(value: String, wrapperRegions: List<String>?) {
+        val normalized = value.trim().lowercase()
+        if (storefrontErrorFor(normalized, wrapperRegions) == null) {
+            prefs.storefront = normalized
         }
     }
 
     fun checkServer() {
-        if (regionRequestBusy) return
+        if (serverRequestBusy) return
         val normalized = SourceStatus.normalizeBaseUrl(baseUrl)
         if (normalized == null) {
             saveError = "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
             return
         }
-        val requestedStorefront = storefront.trim().lowercase()
-        if (!requestedStorefront.matches(Regex("[a-z]{2}"))) {
-            saveError = "Apple Music 地区必须是两位英文字母代码，例如 ca、tr 或 jp。"
-            return
-        }
+        val requestGeneration = ++serverRequestGeneration
         saveError = null
-        refreshMessage = null
         wrapperStatus = null
         wrapperError = null
-        storefrontError = null
         neteaseCapabilities = null
         neteaseError = null
         checkedAddress = null
         checking = true
         scope.launch {
             try {
-                val result = app.appleRegions.refresh(normalized)
-                val status = result.wrapper.getOrNull()
+                val statusResult = sourceResult { SourceStatus.wrapper(app.api.client, normalized) }
+                val status = statusResult.getOrNull()
                 wrapperStatus = status
                 if (status == null) {
-                    wrapperError = result.wrapper.exceptionOrNull()?.message ?: "无法读取 /status"
+                    wrapperError = statusResult.exceptionOrNull()?.message ?: "无法读取 /status"
                     return@launch
                 }
                 if (!status.serverReachable || status.httpCode !in 200..299) {
                     wrapperError = "此地址未返回有效的 Fantastic /status。"
                     return@launch
                 }
-                result.storefronts.fold(
-                    onSuccess = { available ->
-                        if (available.none { it.id == requestedStorefront }) {
-                            storefrontError = "地区 $requestedStorefront 不在此服务器的 AM 列表中；未保存服务器或地区。"
-                        } else {
-                            checkedAddress = normalized
-                            prefs.baseUrl = normalized
-                            prefs.storefront = requestedStorefront
-                            storefrontDraft = requestedStorefront
-                            storefrontEdited = false
+                prefs.baseUrl = normalized
+                checkedAddress = normalized
+                app.appleRegions.refreshAfterStatusInBackground(normalized, status) { refreshResult ->
+                    scope.launch regionsUi@ {
+                        if (SourceStatus.normalizeBaseUrl(prefs.baseUrl) != normalized) return@regionsUi
+                        if (serverRequestGeneration == requestGeneration) {
+                            refreshResult.exceptionOrNull()?.let {
+                                saveError = "服务器已保存，但地区缓存刷新失败：${it.message ?: "未知错误"}"
+                            }
                         }
-                    },
-                    onFailure = { storefrontError = it.message ?: "无法读取 Apple Music 地区列表" },
-                )
-                sourceResult { app.netease.capabilities(normalized) }.fold(
-                    onSuccess = { neteaseCapabilities = it },
-                    onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
-                )
+                        if (storefrontEdited) {
+                            val supported = app.appleRegions.state.value.entries[normalized]?.wrapperRegions
+                            saveStorefrontIfValid(storefrontDraft, supported)
+                        }
+                    }
+                    val capabilitiesResult = sourceResult { app.netease.capabilities(normalized) }
+                    scope.launch capabilitiesUi@ {
+                        if (serverRequestGeneration != requestGeneration ||
+                            SourceStatus.normalizeBaseUrl(prefs.baseUrl) != normalized
+                        ) return@capabilitiesUi
+                        capabilitiesResult.fold(
+                            onSuccess = { neteaseCapabilities = it },
+                            onFailure = { neteaseError = it.message ?: "无法读取 NetEase capabilities" },
+                        )
+                    }
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -250,8 +185,12 @@ fun SettingsScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = onClose) {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "关闭设置")
+                        }
+                    },
                     title = { Text("设置") },
-                    actions = { TextButton(onClick = ::closeSettings, enabled = !checking) { Text("完成") } },
                 )
             },
         ) { innerPadding ->
@@ -263,47 +202,49 @@ fun SettingsScreen(
                     Md3SectionHeader("服务器")
                     OutlinedTextField(
                         value = baseUrl,
-                        onValueChange = { baseUrl = it; saveError = null },
+                        onValueChange = {
+                            baseUrl = it
+                            saveError = if (SourceStatus.normalizeBaseUrl(it) == null) {
+                                "服务器地址无效。请输入完整的 HTTP(S) 地址，不要包含账号、查询参数或片段。"
+                            } else null
+                        },
                         label = { Text("Fantastic 服务器地址") },
                         singleLine = true,
                         enabled = !checking,
+                        isError = saveError != null,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                         supportingText = if (baseUrl.trim().startsWith("http://", ignoreCase = true)) {
-                            { Text("HTTP 是明文传输，只建议在局域网内使用。检查会请求此地址的 /status、AM 地区与网易能力。") }
+                            { Text("HTTP 是明文传输，只建议在局域网内使用。检查会验证此地址的 /status 并读取网易能力。") }
                         } else null,
                     )
                     OutlinedTextField(
                         value = storefront,
-                        onValueChange = { storefrontDraft = it; storefrontEdited = true; saveError = null },
+                        onValueChange = {
+                            storefrontDraft = it
+                            storefrontEdited = true
+                            saveStorefrontIfValid(it, cachedWrapper)
+                        },
                         label = { Text("Apple Music 地区（默认 ca）") },
                         singleLine = true,
                         enabled = !checking,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                        isError = storefrontValidationError != null,
+                        supportingText = if (storefrontValidationError != null) {
+                            { Text(storefrontValidationError) }
+                        } else null,
                     )
-                    TextButton(
-                        onClick = ::refreshRegions,
-                        enabled = addressMatchesSaved && !regionRequestBusy,
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                    ) { Text(if (refreshingRegions) "正在刷新…" else "刷新 AM 地区") }
-                    if (!addressMatchesSaved) StatusMessage("请先检查并保存服务器，再刷新地区")
-                    refreshMessage?.let { StatusMessage(it) }
                     regions.persistenceError?.let { StatusMessage(it, isError = true) }
-                    val cachedStorefronts = regionEntry?.storefronts
-                    if (cachedStorefronts == null) StatusMessage(if (regions.loading) "正在读取地区…" else "地区信息尚未获取")
-                    else StatusMessage("当前服务器 AM 地区 (${cachedStorefronts.size})：${cachedStorefronts.joinToString { "${it.id} ${it.name}" }}")
-                    val cachedWrapper = regionEntry?.wrapperRegions
                     StatusMessage("缓存的 wrapper 支持地区：${cachedWrapper?.joinToString()?.ifEmpty { "无" } ?: "未知"}")
-                    regionEntry?.storefrontError?.let { StatusMessage("AM 地区：$it", isError = true) }
                     regionEntry?.wrapperError?.let { StatusMessage("wrapper 地区：$it", isError = true) }
-                    if (regionEntry?.storefrontError != null || regionEntry?.wrapperError != null) {
-                        StatusMessage(if (cachedStorefronts != null || cachedWrapper != null) "刷新失败，继续使用已缓存地区" else "地区信息尚未获取", isError = true)
-                        if (regionEntry?.wrapperError != null && cachedWrapper != null) StatusMessage("wrapper 支持信息来自上次成功获取")
+                    if (regionEntry?.wrapperError != null) {
+                        StatusMessage(if (cachedWrapper != null) "刷新失败，继续使用已缓存地区" else "地区信息尚未获取", isError = true)
+                        if (cachedWrapper != null) StatusMessage("wrapper 支持信息来自上次成功获取")
                     }
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        TextButton(onClick = ::checkServer, enabled = !regionRequestBusy) {
+                        TextButton(onClick = ::checkServer, enabled = !serverRequestBusy) {
                             Text(if (checking) "正在检查…" else "检查并保存服务器")
                         }
                         if (checking) CircularProgressIndicator(Modifier.size(20.dp))
@@ -312,16 +253,12 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodySmall)
                     }
                     saveError?.let { StatusMessage(it, isError = true) }
-                    checkedAddress?.let { StatusMessage("检查地址：$it") }
+                    checkedAddress?.let { StatusMessage("已检查并保存服务器：$it") }
                     wrapperStatus?.let { status ->
                         StatusMessage("Fantastic ${if (status.serverReachable) "可达" else "状态未知"}（HTTP ${status.httpCode}）；Apple wrapper ${if (status.available) "可用" else "不可用"}：${status.message}")
-                        StatusMessage("本次 wrapper 报告地区：${status.regions.joinToString().ifEmpty { "服务器未报告地区" }}")
                     }
                     wrapperError?.let {
                         StatusMessage("无法读取此 Fantastic 服务器的 /status：$it。请确认地址、网络及服务器是否允许客户端访问。", isError = true)
-                    }
-                    storefrontError?.let {
-                        StatusMessage("无法验证 Apple 地区：$it。请确认该服务器提供 /amp/v1/storefronts。", isError = true)
                     }
                     neteaseCapabilities?.let { capabilities ->
                         StatusMessage(
@@ -332,14 +269,6 @@ fun SettingsScreen(
                     }
                     neteaseError?.let {
                         StatusMessage("无法读取 NetEase capabilities：$it。请使用包含 /ncm/capabilities 的 Fantastic 服务器版本。", isError = true)
-                    }
-                    OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
-                        Text(
-                            "NetEase 登录态（如需）仅由服务器管理员通过 FANTASTIC_NCM_COOKIE 或 --ncm-cookie 配置；此应用不收集或发送 Cookie。",
-                            Modifier.padding(16.dp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
                     }
 
                     Md3SectionHeader("字体字重")
@@ -353,7 +282,7 @@ fun SettingsScreen(
                         prefs.fontWeights = prefs.fontWeights.copy(lyrics = it)
                     }
                     Text(
-                        "100–900，数值越大越粗。松手保存并生效，重启后保留；恢复默认沿用各处原样式。静态或系统字体按可用字重匹配。",
+                        "100–900，数值越大越粗。调整即保存并生效，重启后保留；恢复默认沿用各处原样式。静态或系统字体按可用字重匹配。",
                         Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -399,7 +328,18 @@ fun SettingsScreen(
                     Md3SectionHeader("歌词")
                     OutlinedTextField(
                         value = appleLyricsLanguage,
-                        onValueChange = { appleLyricsLanguage = it; lyricsLanguageError = false },
+                        onValueChange = {
+                            appleLyricsLanguage = it
+                            val language = it.trim().ifEmpty { defaultLyricsOptions.language }
+                            lyricsLanguageError = !isValidAppleLyricsTag(language)
+                            if (!lyricsLanguageError) {
+                                val options = prefs.appleLyricsOptions.copy(language = language)
+                                if (options != prefs.appleLyricsOptions) {
+                                    prefs.appleLyricsOptions = options
+                                    lyrics.onAppleLyricsOptionsChanged()
+                                }
+                            }
+                        },
                         label = { Text("Apple Music 歌词语言") },
                         singleLine = true,
                         placeholder = { Text(defaultLyricsOptions.language) },
@@ -411,7 +351,18 @@ fun SettingsScreen(
                     )
                     OutlinedTextField(
                         value = appleLyricsScript,
-                        onValueChange = { appleLyricsScript = it; lyricsScriptError = false },
+                        onValueChange = {
+                            appleLyricsScript = it
+                            val script = it.trim().ifEmpty { defaultLyricsOptions.script }
+                            lyricsScriptError = !isValidAppleLyricsTag(script)
+                            if (!lyricsScriptError) {
+                                val options = prefs.appleLyricsOptions.copy(script = script)
+                                if (options != prefs.appleLyricsOptions) {
+                                    prefs.appleLyricsOptions = options
+                                    lyrics.onAppleLyricsOptionsChanged()
+                                }
+                            }
+                        },
                         label = { Text("Apple Music 音译字形（script）") },
                         singleLine = true,
                         placeholder = { Text(defaultLyricsOptions.script) },
@@ -460,13 +411,34 @@ fun SettingsScreen(
         }
         val select: (String) -> Unit = { value ->
             when (panel) {
-                SettingsChoicePanel.QQ -> qqQuality = value
-                SettingsChoicePanel.Netease -> neteaseQuality = value
-                SettingsChoicePanel.AppleWifi -> appleWifiQuality = value
-                SettingsChoicePanel.AppleCellular -> appleCellularQuality = value
-                SettingsChoicePanel.AppleDownload -> appleDownloadQuality = value
-                SettingsChoicePanel.Spatial -> appleSpatial = value
-                SettingsChoicePanel.Transition -> appleTransition = value
+                SettingsChoicePanel.QQ -> {
+                    qqQuality = value
+                    prefs.qqQuality = value
+                }
+                SettingsChoicePanel.Netease -> {
+                    neteaseQuality = value
+                    prefs.neteaseQuality = value
+                }
+                SettingsChoicePanel.AppleWifi -> {
+                    appleWifiQuality = value
+                    prefs.appleWifiQuality = value
+                }
+                SettingsChoicePanel.AppleCellular -> {
+                    appleCellularQuality = value
+                    prefs.appleCellularQuality = value
+                }
+                SettingsChoicePanel.AppleDownload -> {
+                    appleDownloadQuality = value
+                    prefs.appleQuality = value
+                }
+                SettingsChoicePanel.Spatial -> {
+                    appleSpatial = value
+                    prefs.appleSpatial = value
+                }
+                SettingsChoicePanel.Transition -> {
+                    appleTransition = value
+                    prefs.appleTransition = value
+                }
                 SettingsChoicePanel.PlaybackCache -> {
                     val limit = PlaybackCacheLimit.entries.first { it.id == value }
                     app.playbackCache.setLimit(limit)
@@ -510,9 +482,15 @@ fun SettingsScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    TextButton(onClick = { appleCrossfade = (appleCrossfade - 1).coerceAtLeast(1) }, enabled = appleCrossfade > 1) { Text("−") }
+                                    TextButton(onClick = {
+                                        appleCrossfade = (appleCrossfade - 1).coerceAtLeast(1)
+                                        prefs.appleCrossfade = appleCrossfade
+                                    }, enabled = appleCrossfade > 1) { Text("−") }
                                     Text("$appleCrossfade 秒")
-                                    TextButton(onClick = { appleCrossfade = (appleCrossfade + 1).coerceAtMost(12) }, enabled = appleCrossfade < 12) { Text("+") }
+                                    TextButton(onClick = {
+                                        appleCrossfade = (appleCrossfade + 1).coerceAtMost(12)
+                                        prefs.appleCrossfade = appleCrossfade
+                                    }, enabled = appleCrossfade < 12) { Text("+") }
                                 }
                             }
                         }
@@ -533,24 +511,26 @@ private suspend fun <T> sourceResult(block: suspend () -> T): Result<T> = try {
     Result.failure(e)
 }
 
+private fun storefrontErrorFor(value: String, wrapperRegions: List<String>?): String? = when {
+    !value.matches(Regex("[a-z]{2}")) ->
+        "Apple Music 地区必须是两位小写英文字母代码，例如 ca、tr 或 jp。"
+    wrapperRegions != null && value !in wrapperRegions ->
+        "地区 $value 不在此服务器缓存的 wrapper 支持地区中。"
+    else -> null
+}
+
 @Composable
 private fun FontWeightPreference(title: String, value: Int, initialWeight: Int, onChange: (Int) -> Unit) {
-    var draft by remember(value) { mutableFloatStateOf((if (value == 0) initialWeight else value).toFloat()) }
-    var dragging by remember(value) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-            Text(if (value == 0 && !dragging) "默认" else draft.roundToInt().toString(),
+            Text(if (value == 0) "默认" else value.toString(),
                 style = MaterialTheme.typography.bodyMedium)
             TextButton(onClick = { onChange(0) }, enabled = value != 0) { Text("恢复默认") }
         }
         Slider(
-            value = draft,
-            onValueChange = { draft = it; dragging = true },
-            onValueChangeFinished = {
-                onChange(draft.roundToInt().coerceIn(FontWeights.MIN, FontWeights.MAX))
-                dragging = false
-            },
+            value = (if (value == 0) initialWeight else value).toFloat(),
+            onValueChange = { onChange(it.roundToInt().coerceIn(FontWeights.MIN, FontWeights.MAX)) },
             valueRange = FontWeights.MIN.toFloat()..FontWeights.MAX.toFloat(),
             modifier = Modifier.fillMaxWidth().semantics { contentDescription = "${title}字重" },
         )
