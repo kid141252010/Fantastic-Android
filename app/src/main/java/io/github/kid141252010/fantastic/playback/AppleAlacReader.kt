@@ -193,7 +193,7 @@ internal class AppleAlacFileReader private constructor(
         if (durationMs <= 0L) invalid()
         if (format.sampleMimeType == MimeTypes.AUDIO_ALAC) {
             val selected = audioOutputs.firstOrNull { it.format?.sampleMimeType == MimeTypes.AUDIO_ALAC } ?: invalid()
-            if (selected.format?.drmInitData != null || selected.received > 0) invalid()
+            if (selected.format?.drmInitData != null) invalid()
             val alacCookie = selected.format?.initializationData?.singleOrNull() ?: invalid()
             if (alacCookie.size != 24 && alacCookie.size != 48) invalid()
             val config = ByteBuffer.wrap(alacCookie).order(ByteOrder.BIG_ENDIAN)
@@ -210,6 +210,7 @@ internal class AppleAlacFileReader private constructor(
             maxBlock = frames.toInt()
             audioTrackId = selected.id
             packets = selected
+            // Probing may emit the first packet; playback's initial seek rereads the target sample.
             selected.discard()
         }
         return format
