@@ -101,6 +101,7 @@ internal class LyricInkView(context: Context) : View(context) {
     private val matrix = Matrix()
     private val bounds = Rect()
     private val glyphPath = Path()
+    private val glyphRowClip = Path()
     private val glyphBounds = RectF()
     private val groups = ArrayList<Group>()
     private val sweepRows = ArrayList<SweepRow>()
@@ -930,6 +931,13 @@ internal class LyricInkView(context: Context) : View(context) {
                     if (boundary > at) minOf(boundary, runEnd) else runEnd
                 }
                 layout.getSelectionPath(at, end, glyphPath)
+                if (row < layout.lineCount - 1 && end == layout.getLineEnd(row)) {
+                    // An exclusive end at the next row also selects that row's edge contour.
+                    glyphRowClip.rewind()
+                    glyphRowClip.addRect(layout.getLineLeft(row), band.top,
+                        layout.getLineRight(row), band.bottom, Path.Direction.CW)
+                    glyphPath.op(glyphRowClip, Path.Op.INTERSECT)
+                }
                 glyphPath.computeBounds(glyphBounds, true)
                 if (emphasis != null) block.paint.getTextBounds(text, at, end, bounds)
                 val delay = when {
